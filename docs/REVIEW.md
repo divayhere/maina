@@ -2,6 +2,8 @@
 
 **Purpose of this document:** a self-contained brief for an external reviewer (human or AI) to challenge the product decisions, architecture, and engineering of this app. It states what was built, what was measured, what failed, what was changed, and what is still unproven. Please argue with it.
 
+**⚠️ PARTLY SUPERSEDED — see docs/HANDOFF.md §5.** An independent audit confirmed several claims here are wrong (notably "transcript saved every 5s" and "never lose a meeting"). Read HANDOFF.md first.
+
 **Status:** v0.6.0, code complete and locally verified, **not yet installed on a device.**
 **Date:** 18 Aug 2026
 
