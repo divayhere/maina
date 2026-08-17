@@ -3,6 +3,20 @@
 All notable changes to Maina are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions follow [Semantic Versioning](https://semver.org/).
 
+## [0.2.0] — Phase 1: Record → Save
+
+### Added
+- **Real audio recording** (expo-audio): tap record → live timer → Stop & Save. Mic permission handled; records from the phone microphone.
+- **Meetings home**: list of recordings (title · date/time · duration · status chip), empty state, floating record button.
+- **Meeting detail**: metadata, audio-captured indicator, and Transcript/Summary placeholders (Phase 2/3).
+- **To-Dos & Settings tabs**: Settings shows version, provider default, and config; To-Dos stubbed for Phase 3.
+- **SQLite storage** with a versioned migration runner + meetings repository.
+- **Zustand** meetings store; Electric Grape theme applied via shared UI kit.
+
+### Notes
+- Audio is kept for now; auto-deletion lands with Phase 2 transcription.
+- Background/foreground-service recording hardening comes in a later phase; v0.2 records with the app open.
+
 ## [Unreleased]
 
 ### Added

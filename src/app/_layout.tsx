@@ -1,18 +1,38 @@
-import { DarkTheme, DefaultTheme, ThemeProvider } from 'expo-router';
-import * as SplashScreen from 'expo-splash-screen';
-import { useColorScheme } from 'react-native';
+import { Stack } from 'expo-router';
+import { useEffect, useState } from 'react';
+import { ActivityIndicator, View } from 'react-native';
+import { GestureHandlerRootView } from 'react-native-gesture-handler';
+import { SafeAreaProvider } from 'react-native-safe-area-context';
 
-import { AnimatedSplashOverlay } from '@/components/animated-icon';
-import AppTabs from '@/components/app-tabs';
+import { initDb } from '@/data/db';
+import { useAppTheme } from '@/design/theme';
+import { log } from '@/services/logger';
 
-SplashScreen.preventAutoHideAsync();
+export default function RootLayout() {
+  const { theme } = useAppTheme();
+  const [ready, setReady] = useState(false);
 
-export default function TabLayout() {
-  const colorScheme = useColorScheme();
+  useEffect(() => {
+    initDb()
+      .catch((e) => log.error('init', 'db init failed', { err: String(e) }))
+      .finally(() => setReady(true));
+  }, []);
+
   return (
-    <ThemeProvider value={colorScheme === 'dark' ? DarkTheme : DefaultTheme}>
-      <AnimatedSplashOverlay />
-      <AppTabs />
-    </ThemeProvider>
+    <GestureHandlerRootView style={{ flex: 1 }}>
+      <SafeAreaProvider>
+        {ready ? (
+          <Stack screenOptions={{ headerShown: false, contentStyle: { backgroundColor: theme.bg } }}>
+            <Stack.Screen name="(tabs)" />
+            <Stack.Screen name="record" options={{ presentation: 'modal' }} />
+            <Stack.Screen name="meeting/[id]" />
+          </Stack>
+        ) : (
+          <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center', backgroundColor: theme.bg }}>
+            <ActivityIndicator color={theme.accent} />
+          </View>
+        )}
+      </SafeAreaProvider>
+    </GestureHandlerRootView>
   );
 }
