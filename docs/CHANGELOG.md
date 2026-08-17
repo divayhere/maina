@@ -3,6 +3,18 @@
 All notable changes to Maina are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions follow [Semantic Versioning](https://semver.org/).
 
+## [0.6.0] — Robustness pass (validated against reported bugs)
+
+### Added
+- **Never lose a meeting**: the meeting row is created when recording starts and the transcript is saved every 5s and on backgrounding. A crash/kill loses at most 5 seconds.
+- **Crash recovery**: meetings left mid-recording are recovered on next launch.
+- **Stall watchdog**: if no recogniser event arrives for 30s, force a restart (covers the silent-death-on-phone-call bug, upstream #135).
+- **Restart debounce** + longer delay after ERROR_RECOGNIZER_BUSY.
+- **Real audio paths** captured from the audioend event instead of assumed.
+- **Keep-awake** while recording so the screen cannot sleep mid-meeting.
+
+See docs/decisions/0004-native-speech-architecture.md for the full validation and risk register.
+
 ## [0.5.0] — Live transcription (Whisper removed) via the phone's own speech engine
 
 ### Changed (major)

@@ -5,6 +5,7 @@ import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 
 import { initDb } from '@/data/db';
+import { recoverInterruptedMeetings } from '@/data/meetings';
 import { ErrorBoundary } from '@/design/ErrorBoundary';
 import { useAppTheme } from '@/design/theme';
 import { log } from '@/services/logger';
@@ -20,6 +21,7 @@ export default function RootLayout() {
     installRemoteLog();
     log.info('app', 'launch');
     initDb()
+      .then(() => recoverInterruptedMeetings())
       .catch((e) => log.error('init', 'db init failed', { err: String(e) }))
       .finally(() => setReady(true));
   }, []);
