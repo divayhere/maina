@@ -1,35 +1,29 @@
+import { requestRecordingPermissionsAsync } from 'expo-audio';
 import { router } from 'expo-router';
-import {
-  RecordingPresets,
-  requestRecordingPermissionsAsync,
-  setAudioModeAsync,
-  useAudioRecorder,
-  useAudioRecorderState,
-} from 'expo-audio';
 import { useEffect, useRef, useState } from 'react';
 import { Pressable, StyleSheet, View } from 'react-native';
 
 import { createMeeting, newId } from '@/data/meetings';
 import { AppText, PrimaryButton } from '@/design/components';
 import { useAppTheme } from '@/design/theme';
-import { radius, space } from '@/design/tokens';
+import { space } from '@/design/tokens';
+import { startPcmRecording, stopPcmRecording } from '@/hardware/recording/pcmRecorder';
 import { log } from '@/services/logger';
 import { useMeetings } from '@/state/meetingsStore';
 import { formatDuration, formatTime } from '@/utils/format';
 
 export default function RecordScreen() {
   const { theme } = useAppTheme();
-  const recorder = useAudioRecorder(RecordingPresets.HIGH_QUALITY);
-  const recorderState = useAudioRecorderState(recorder);
   const { refresh } = useMeetings();
 
+  const idRef = useRef<string>(newId());
   const startedAtRef = useRef<number>(Date.now());
   const startingRef = useRef(false);
   const savingRef = useRef(false);
+  const [recording, setRecording] = useState(false);
   const [elapsed, setElapsed] = useState(0);
   const [error, setError] = useState<string | null>(null);
 
-  // Start recording once, on mount.
   useEffect(() => {
     (async () => {
       if (startingRef.current) return;
@@ -41,20 +35,16 @@ export default function RecordScreen() {
           log.warn('record', 'mic permission denied');
           return;
         }
-        await setAudioModeAsync({ allowsRecording: true, playsInSilentMode: true });
-        await recorder.prepareToRecordAsync();
-        recorder.record();
+        startPcmRecording(`maina-${idRef.current}.wav`);
         startedAtRef.current = Date.now();
-        log.info('record', 'started');
+        setRecording(true);
       } catch (e) {
         setError('Could not start recording.');
         log.error('record', 'start failed', { err: String(e) });
       }
     })();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Smooth on-screen timer.
   useEffect(() => {
     const t = setInterval(() => setElapsed(Date.now() - startedAtRef.current), 250);
     return () => clearInterval(t);
@@ -64,20 +54,20 @@ export default function RecordScreen() {
     if (savingRef.current) return;
     savingRef.current = true;
     try {
-      const durationMs = recorderState.durationMillis || Date.now() - startedAtRef.current;
-      await recorder.stop();
-      const uri = recorder.uri ?? null;
-      const id = newId();
+      const durationMs = Date.now() - startedAtRef.current;
+      const path = await stopPcmRecording();
+      setRecording(false);
+      const id = idRef.current;
       await createMeeting({
         id,
         title: `Meeting · ${formatTime(startedAtRef.current)}`,
         startedAt: startedAtRef.current,
         durationMs,
-        audioUri: uri,
+        audioUri: path,
         status: 'recorded',
       });
       await refresh();
-      log.info('record', 'saved', { id, durationMs, hasAudio: !!uri });
+      log.info('record', 'saved', { id, durationMs, hasAudio: !!path });
       router.replace(`/meeting/${id}`);
     } catch (e) {
       setError('Could not save the recording.');
@@ -88,7 +78,7 @@ export default function RecordScreen() {
 
   const cancel = async () => {
     try {
-      if (recorderState.isRecording) await recorder.stop();
+      if (recording) await stopPcmRecording();
     } catch (e) {
       log.warn('record', 'cancel stop error', { err: String(e) });
     }
@@ -111,7 +101,7 @@ export default function RecordScreen() {
       <View style={styles.status}>
         <View style={[styles.dot, { backgroundColor: theme.rec }]} />
         <AppText variant="label" color={theme.rec}>
-          {recorderState.isRecording ? 'RECORDING' : 'STARTING…'}
+          {recording ? 'RECORDING' : 'STARTING…'}
         </AppText>
       </View>
 
@@ -119,7 +109,7 @@ export default function RecordScreen() {
         {formatDuration(elapsed)}
       </AppText>
       <AppText variant="body" muted style={styles.center}>
-        Recording from the phone microphone
+        Recording in 16 kHz mono — ready for on-device transcription
       </AppText>
 
       <View style={styles.controls}>

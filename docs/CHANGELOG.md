@@ -3,6 +3,20 @@
 All notable changes to Maina are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions follow [Semantic Versioning](https://semver.org/).
 
+## [0.3.0] — Phase 2: On-device Transcription
+
+### Added
+- **Whisper on-device transcription** (whisper.rn): tap **Transcribe** on a meeting → model downloads once (~148 MB, base multilingual) → transcript generated fully offline. English, Hindi, and Hinglish.
+- **16 kHz mono WAV capture** via `@fugood/react-native-audio-pcm-stream` (replaces expo-audio recording; whisper-ready with no transcoding).
+- **Audio auto-deletion** after a transcript is saved (privacy; config-controlled).
+- Transcription engine behind the `TranscriptionEngine` swap-seam; model registry (base / small); download-with-progress UI.
+- `buffer` polyfill for whisper.rn's safe-buffer dependency.
+
+### Changed
+- Meeting detail shows live download %/transcribing state, the transcript, and an "audio deleted" indicator.
+
+See `docs/decisions/0002-audio-pipeline.md`.
+
 ## [0.2.0] — Phase 1: Record → Save
 
 ### Added

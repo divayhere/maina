@@ -24,7 +24,7 @@ export const DEFAULT_CONFIG: AppConfig = {
   autoSummarize: true,
   audioAutoDelete: true,
   transcriptionLanguage: 'auto',
-  transcriptionModel: 'whisper-large-v3-turbo',
+  transcriptionModel: 'base',
   providerId: DEFAULT_PROVIDER_ID,
   exportFormat: 'md',
 };

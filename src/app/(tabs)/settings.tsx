@@ -44,7 +44,7 @@ export default function SettingsScreen() {
       <Card style={{ gap: space.xs }}>
         <AppText variant="label" muted>ABOUT</AppText>
         <Row label="Version" value={version} />
-        <Row label="Phase" value="1 — recording" />
+        <Row label="Phase" value="2 — on-device transcription" />
       </Card>
     </ScrollView>
   );
