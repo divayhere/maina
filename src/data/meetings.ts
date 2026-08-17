@@ -12,11 +12,13 @@ export interface Meeting {
   title: string;
   startedAt: number;
   durationMs: number;
-  audioUri?: string | null;
+  audioUri?: string | null; // recording folder (segments) or null after cleanup
   transcript?: string | null;
   summary?: string | null;
   language?: string | null;
   status: MeetingStatus;
+  segmentCount: number;
+  transcribedSegments: number;
 }
 
 interface Row {
@@ -29,6 +31,8 @@ interface Row {
   summary: string | null;
   language: string | null;
   status: MeetingStatus;
+  segment_count: number;
+  transcribed_segments: number;
 }
 
 const toMeeting = (r: Row): Meeting => ({
@@ -41,6 +45,8 @@ const toMeeting = (r: Row): Meeting => ({
   summary: r.summary,
   language: r.language,
   status: r.status,
+  segmentCount: r.segment_count ?? 0,
+  transcribedSegments: r.transcribed_segments ?? 0,
 });
 
 export function newId(): string {
@@ -53,15 +59,16 @@ export async function createMeeting(m: {
   startedAt: number;
   durationMs: number;
   audioUri?: string | null;
+  segmentCount?: number;
   status?: MeetingStatus;
 }): Promise<void> {
   const db = await getDb();
   await db.runAsync(
-    `INSERT INTO meetings (id, title, started_at, duration_ms, audio_uri, status)
-     VALUES (?, ?, ?, ?, ?, ?)`,
-    [m.id, m.title, m.startedAt, m.durationMs, m.audioUri ?? null, m.status ?? 'recorded'],
+    `INSERT INTO meetings (id, title, started_at, duration_ms, audio_uri, status, segment_count)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    [m.id, m.title, m.startedAt, m.durationMs, m.audioUri ?? null, m.status ?? 'recorded', m.segmentCount ?? 0],
   );
-  log.info('meetings', 'created', { id: m.id, durationMs: m.durationMs });
+  log.info('meetings', 'created', { id: m.id, durationMs: m.durationMs, segments: m.segmentCount ?? 0 });
 }
 
 export async function listMeetings(): Promise<Meeting[]> {
@@ -85,6 +92,8 @@ export async function updateMeeting(id: string, patch: Partial<Meeting>): Promis
     summary: 'summary',
     language: 'language',
     status: 'status',
+    segmentCount: 'segment_count',
+    transcribedSegments: 'transcribed_segments',
   };
   const cols: string[] = [];
   const vals: (string | number | null)[] = [];
@@ -98,7 +107,6 @@ export async function updateMeeting(id: string, patch: Partial<Meeting>): Promis
   vals.push(id);
   const db = await getDb();
   await db.runAsync(`UPDATE meetings SET ${cols.join(', ')} WHERE id = ?`, vals);
-  log.info('meetings', 'updated', { id, fields: Object.keys(patch) });
 }
 
 export async function deleteMeeting(id: string): Promise<void> {

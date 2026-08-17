@@ -2,16 +2,15 @@ import { Ionicons } from '@expo/vector-icons';
 import Constants from 'expo-constants';
 import { router } from 'expo-router';
 import { useCallback, useEffect, useState } from 'react';
-import { Pressable, ScrollView, View } from 'react-native';
+import { ActivityIndicator, Pressable, ScrollView, View } from 'react-native';
 
-import { isModelDownloaded } from '@/core/transcription';
-import { MODEL_ORDER, WHISPER_MODELS } from '@/core/transcription/models';
-import { getSelectedModel, setSelectedModel } from '@/data/settings';
-import { AppText, Card } from '@/design/components';
+import { downloadModel, isModelDownloaded, LOCAL_MODEL } from '@/core/transcription';
+import { AppText, Card, PrimaryButton } from '@/design/components';
 import { useAppTheme } from '@/design/theme';
-import { radius, space } from '@/design/tokens';
+import { space } from '@/design/tokens';
 import { DEFAULT_CONFIG } from '@/services/config';
 import { getProvider } from '@/core/summarization/providers';
+import { log } from '@/services/logger';
 
 function Row({ label, value }: { label: string; value: string }) {
   return (
@@ -27,23 +26,28 @@ export default function SettingsScreen() {
   const version = Constants.expoConfig?.version ?? '1.0.0';
   const provider = getProvider(DEFAULT_CONFIG.providerId);
 
-  const [selected, setSelected] = useState('');
-  const [downloaded, setDownloaded] = useState<Record<string, boolean>>({});
+  const [downloaded, setDownloaded] = useState<boolean | null>(null);
+  const [dlPct, setDlPct] = useState<number | null>(null);
 
-  const loadModelState = useCallback(async () => {
-    setSelected(await getSelectedModel());
-    const map: Record<string, boolean> = {};
-    for (const id of MODEL_ORDER) map[id] = await isModelDownloaded(id);
-    setDownloaded(map);
+  const refreshModel = useCallback(async () => {
+    setDownloaded(await isModelDownloaded(LOCAL_MODEL.id));
   }, []);
 
   useEffect(() => {
-    loadModelState();
-  }, [loadModelState]);
+    refreshModel();
+  }, [refreshModel]);
 
-  const pick = async (id: string) => {
-    setSelected(id);
-    await setSelectedModel(id);
+  const download = async () => {
+    setDlPct(0);
+    try {
+      await downloadModel(LOCAL_MODEL.id, (p) => setDlPct(p));
+      setDownloaded(true);
+    } catch (e) {
+      log.error('settings', 'model download failed', { err: String(e) });
+    } finally {
+      setDlPct(null);
+      refreshModel();
+    }
   };
 
   return (
@@ -51,45 +55,22 @@ export default function SettingsScreen() {
       <AppText variant="display">Settings</AppText>
 
       <Card style={{ gap: space.sm }}>
-        <AppText variant="label" muted>TRANSCRIPTION MODEL</AppText>
-        <AppText variant="label" muted style={{ marginBottom: space.xs }}>
-          Bigger = better Hindi, slower, larger download. Downloads on first use.
-        </AppText>
-        {MODEL_ORDER.map((id) => {
-          const m = WHISPER_MODELS[id];
-          const isSel = selected === id;
-          return (
-            <Pressable
-              key={id}
-              onPress={() => pick(id)}
-              style={{
-                flexDirection: 'row',
-                alignItems: 'center',
-                gap: space.md,
-                paddingVertical: space.sm,
-                paddingHorizontal: space.md,
-                borderRadius: radius.md,
-                borderWidth: 1,
-                borderColor: isSel ? theme.accent : theme.border,
-                backgroundColor: isSel ? theme.accentWash : 'transparent',
-              }}>
-              <Ionicons
-                name={isSel ? 'radio-button-on' : 'radio-button-off'}
-                size={20}
-                color={isSel ? theme.accent : theme.muted}
-              />
-              <View style={{ flex: 1 }}>
-                <AppText variant="body">{m.label}</AppText>
-                <AppText variant="label" muted>{m.hint}</AppText>
-              </View>
-              {downloaded[id] ? (
-                <Ionicons name="checkmark-circle" size={18} color={theme.done} />
-              ) : (
-                <AppText variant="label" muted>download</AppText>
-              )}
-            </Pressable>
-          );
-        })}
+        <AppText variant="label" muted>TRANSCRIPTION MODEL (ON-DEVICE)</AppText>
+        <AppText variant="body">{LOCAL_MODEL.label}</AppText>
+        <AppText variant="label" muted>{LOCAL_MODEL.hint}</AppText>
+        {downloaded ? (
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.sm, marginTop: space.sm }}>
+            <Ionicons name="checkmark-circle" size={18} color={theme.done} />
+            <AppText variant="label" color={theme.done}>Downloaded &amp; ready</AppText>
+          </View>
+        ) : dlPct !== null ? (
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.md, marginTop: space.sm }}>
+            <ActivityIndicator color={theme.accent} />
+            <AppText variant="label" muted>Downloading… {Math.round(dlPct * 100)}%</AppText>
+          </View>
+        ) : (
+          <PrimaryButton label="Download model (~547 MB, Wi-Fi)" onPress={download} style={{ marginTop: space.sm }} />
+        )}
       </Card>
 
       <Card style={{ gap: space.xs }}>

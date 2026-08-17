@@ -3,6 +3,16 @@
 All notable changes to Maina are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions follow [Semantic Versioning](https://semver.org/).
 
+## [0.4.0] — Hours-long recording + resumable transcription
+
+### Changed (major)
+- **Recording streams to disk as ~30s WAV segments** (bounded memory) — hours-long meetings no longer risk filling RAM. Recording is the source of truth and never waits on transcription.
+- **Transcription is now chunked + resumable**: segments transcribed one at a time, transcript + progress persisted per segment; resumes after a crash/reload from the last finished segment.
+- **Model = Large v3 Turbo quantized (q5_0, ~547 MB)** — accuracy-with-reliability for Pixel 9 Pro; single local model (picker removed; summariser dropdown kept).
+- **Robust model download**: temp file → verify size → move into place; partials deleted. Fixes the corrupt-partial retry loop. Pre-download button in Settings.
+
+See docs/decisions/0003-hours-long-pipeline.md. DB migration v3.
+
 ## [0.3.4] — Model picker (fix Hindi)
 
 ### Added

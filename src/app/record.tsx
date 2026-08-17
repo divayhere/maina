@@ -7,7 +7,7 @@ import { createMeeting, newId } from '@/data/meetings';
 import { AppText, PrimaryButton } from '@/design/components';
 import { useAppTheme } from '@/design/theme';
 import { space } from '@/design/tokens';
-import { startPcmRecording, stopPcmRecording } from '@/hardware/recording/pcmRecorder';
+import { startSegmentedRecording, stopSegmentedRecording } from '@/hardware/recording/pcmRecorder';
 import { log } from '@/services/logger';
 import { useMeetings } from '@/state/meetingsStore';
 import { formatDuration, formatTime } from '@/utils/format';
@@ -35,8 +35,8 @@ export default function RecordScreen() {
           log.warn('record', 'mic permission denied');
           return;
         }
-        startPcmRecording();
         startedAtRef.current = Date.now();
+        await startSegmentedRecording(idRef.current);
         setRecording(true);
       } catch (e) {
         setError('Could not start recording.');
@@ -55,7 +55,7 @@ export default function RecordScreen() {
     savingRef.current = true;
     try {
       const durationMs = Date.now() - startedAtRef.current;
-      const path = await stopPcmRecording();
+      const { dir, segmentCount } = await stopSegmentedRecording();
       setRecording(false);
       const id = idRef.current;
       await createMeeting({
@@ -63,11 +63,12 @@ export default function RecordScreen() {
         title: `Meeting · ${formatTime(startedAtRef.current)}`,
         startedAt: startedAtRef.current,
         durationMs,
-        audioUri: path,
+        audioUri: dir,
+        segmentCount,
         status: 'recorded',
       });
       await refresh();
-      log.info('record', 'saved', { id, durationMs, hasAudio: !!path });
+      log.info('record', 'saved', { id, durationMs, segmentCount });
       router.replace(`/meeting/${id}`);
     } catch (e) {
       setError('Could not save the recording.');
@@ -78,7 +79,7 @@ export default function RecordScreen() {
 
   const cancel = async () => {
     try {
-      if (recording) await stopPcmRecording();
+      if (recording) await stopSegmentedRecording();
     } catch (e) {
       log.warn('record', 'cancel stop error', { err: String(e) });
     }

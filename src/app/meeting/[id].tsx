@@ -6,17 +6,15 @@ import { ActivityIndicator, Alert, Pressable, ScrollView, StyleSheet, View } fro
 
 import {
   downloadModel,
-  getTranscriptionEngine,
   isModelDownloaded,
-  resolveModel,
+  LOCAL_MODEL,
   setTranscriptionModel,
+  transcribeMeeting,
 } from '@/core/transcription';
-import { deleteMeeting, getMeeting, updateMeeting, type Meeting } from '@/data/meetings';
-import { getSelectedModel } from '@/data/settings';
+import { deleteMeeting, getMeeting, type Meeting } from '@/data/meetings';
 import { AppText, Card, PrimaryButton } from '@/design/components';
 import { useAppTheme } from '@/design/theme';
 import { radius, space } from '@/design/tokens';
-import { DEFAULT_CONFIG } from '@/services/config';
 import { log } from '@/services/logger';
 import { useMeetings } from '@/state/meetingsStore';
 import { formatDateTime, formatDuration } from '@/utils/format';
@@ -24,7 +22,7 @@ import { formatDateTime, formatDuration } from '@/utils/format';
 type Phase =
   | { kind: 'idle' }
   | { kind: 'downloading'; pct: number }
-  | { kind: 'transcribing' }
+  | { kind: 'transcribing'; done: number; total: number }
   | { kind: 'error'; msg: string };
 
 export default function MeetingDetail() {
@@ -33,7 +31,6 @@ export default function MeetingDetail() {
   const { refresh } = useMeetings();
   const [meeting, setMeeting] = useState<Meeting | null>(null);
   const [phase, setPhase] = useState<Phase>({ kind: 'idle' });
-  const [activeModelLabel, setActiveModelLabel] = useState('');
 
   const load = useCallback(() => {
     if (id) getMeeting(id).then(setMeeting);
@@ -43,57 +40,38 @@ export default function MeetingDetail() {
 
   const transcribe = async () => {
     if (!id || !meeting?.audioUri) return;
-    const modelId = await getSelectedModel();
-    const model = resolveModel(modelId);
-    setActiveModelLabel(model.label);
+    const modelId = LOCAL_MODEL.id;
     try {
-      const audioInfo = await FileSystem.getInfoAsync(meeting.audioUri);
-      log.info('meeting', 'transcribe start', {
+      setTranscriptionModel(modelId);
+      log.info('meeting', 'transcribe requested', {
         id,
-        audioUri: meeting.audioUri,
-        audioExists: audioInfo.exists,
-        audioBytes: audioInfo.exists ? (audioInfo as { size?: number }).size ?? 0 : 0,
+        segments: meeting.segmentCount,
+        done: meeting.transcribedSegments,
         model: modelId,
       });
-      setTranscriptionModel(modelId);
       if (!(await isModelDownloaded(modelId))) {
         setPhase({ kind: 'downloading', pct: 0 });
         await downloadModel(modelId, (pct) => setPhase({ kind: 'downloading', pct }));
       }
-      setPhase({ kind: 'transcribing' });
-      await updateMeeting(id, { status: 'transcribing' });
-
-      const engine = getTranscriptionEngine();
-      const result = await engine.transcribe(meeting.audioUri, {
-        language: DEFAULT_CONFIG.transcriptionLanguage,
+      setPhase({ kind: 'transcribing', done: meeting.transcribedSegments, total: meeting.segmentCount });
+      await transcribeMeeting(id, (done, total) => {
+        setPhase({ kind: 'transcribing', done, total });
+        load();
       });
-
-      await updateMeeting(id, {
-        transcript: result.text,
-        language: result.language,
-        status: 'transcribed',
-      });
-
-      // Privacy: delete the audio the moment we have the transcript.
-      if (DEFAULT_CONFIG.audioAutoDelete && meeting.audioUri) {
-        try {
-          await FileSystem.deleteAsync(meeting.audioUri, { idempotent: true });
-        } catch (e) {
-          log.warn('meeting', 'audio delete failed', { err: String(e) });
-        }
-        await updateMeeting(id, { audioUri: null });
-      }
-
       load();
       await refresh();
       setPhase({ kind: 'idle' });
     } catch (e) {
-      const msg = String(e).includes('model-not-downloaded')
-        ? 'The transcription model needs to download first.'
-        : 'Transcription failed. Your recording is safe — you can try again.';
-      setPhase({ kind: 'error', msg });
-      await updateMeeting(id, { status: 'recorded' });
-      log.error('meeting', 'transcribe failed', { err: String(e) });
+      const s = String(e);
+      const interrupted =
+        s.includes('download-incomplete') || s.includes('connection abort') || s.includes('Network');
+      setPhase({
+        kind: 'error',
+        msg: interrupted
+          ? 'Download was interrupted. Tap to resume — it picks up where it left off.'
+          : 'Transcription hit a snag. Your recording is safe — tap to resume.',
+      });
+      log.error('meeting', 'transcribe failed', { err: s });
     }
   };
 
@@ -106,9 +84,7 @@ export default function MeetingDetail() {
         onPress: async () => {
           if (!id) return;
           if (meeting?.audioUri) {
-            try {
-              await FileSystem.deleteAsync(meeting.audioUri, { idempotent: true });
-            } catch {}
+            await FileSystem.deleteAsync(meeting.audioUri, { idempotent: true }).catch(() => {});
           }
           await deleteMeeting(id);
           await refresh();
@@ -119,6 +95,9 @@ export default function MeetingDetail() {
   };
 
   const busy = phase.kind === 'downloading' || phase.kind === 'transcribing';
+  const complete = !!meeting && meeting.segmentCount > 0 && meeting.transcribedSegments >= meeting.segmentCount;
+  const canTranscribe = !!meeting?.audioUri && meeting.segmentCount > 0 && !complete;
+  const resuming = !!meeting && meeting.transcribedSegments > 0 && !complete;
 
   return (
     <View style={{ flex: 1, backgroundColor: theme.bg }}>
@@ -145,30 +124,32 @@ export default function MeetingDetail() {
         <Card style={{ gap: space.md }}>
           <AppText variant="label" muted>TRANSCRIPT</AppText>
 
-          {meeting?.transcript ? (
-            <AppText variant="body">{meeting.transcript}</AppText>
-          ) : busy ? (
+          {meeting?.transcript ? <AppText variant="body">{meeting.transcript}</AppText> : null}
+
+          {busy ? (
             <View style={styles.busy}>
               <ActivityIndicator color={theme.accent} />
-              <AppText variant="body" muted>
+              <AppText variant="body" muted style={{ flex: 1 }}>
                 {phase.kind === 'downloading'
-                  ? `Downloading ${activeModelLabel} model… ${Math.round(phase.pct * 100)}%`
-                  : 'Transcribing on your device…'}
+                  ? `Downloading ${LOCAL_MODEL.label}… ${Math.round(phase.pct * 100)}% (one-time, ~547 MB)`
+                  : `Transcribing on your device… segment ${phase.done}/${phase.total}`}
               </AppText>
             </View>
-          ) : meeting?.audioUri ? (
+          ) : canTranscribe ? (
             <>
-              <AppText variant="body" muted>
-                Runs fully on your phone. First time downloads the model (~148 MB); after that it&apos;s offline and free.
-              </AppText>
+              {!meeting?.transcript ? (
+                <AppText variant="body" muted>
+                  Runs fully on your phone. First time downloads the model (~547 MB, Wi-Fi); after that it&apos;s offline and free.
+                </AppText>
+              ) : null}
               {phase.kind === 'error' ? (
                 <AppText variant="label" color={theme.warn}>{phase.msg}</AppText>
               ) : null}
-              <PrimaryButton label="Transcribe" onPress={transcribe} />
+              <PrimaryButton label={resuming ? 'Resume transcription' : 'Transcribe'} onPress={transcribe} />
             </>
-          ) : (
+          ) : !meeting?.transcript ? (
             <AppText variant="body" muted>No audio available to transcribe.</AppText>
-          )}
+          ) : null}
         </Card>
 
         <Card style={{ gap: space.sm }}>
@@ -182,21 +163,15 @@ export default function MeetingDetail() {
 
         <View style={[styles.audioTag, { borderColor: theme.border }]}>
           <Ionicons
-            name={
-              meeting?.transcript
-                ? 'checkmark-circle-outline'
-                : meeting?.audioUri
-                  ? 'musical-note'
-                  : 'alert-circle-outline'
-            }
+            name={complete ? 'checkmark-circle-outline' : meeting?.audioUri ? 'musical-note' : 'alert-circle-outline'}
             size={16}
-            color={meeting?.transcript ? theme.done : meeting?.audioUri ? theme.accent : theme.warn}
+            color={complete ? theme.done : meeting?.audioUri ? theme.accent : theme.warn}
           />
           <AppText variant="label" muted>
-            {meeting?.transcript
+            {complete
               ? 'Transcribed · audio deleted'
               : meeting?.audioUri
-                ? 'Audio captured'
+                ? `Audio captured · ${meeting.segmentCount} segment${meeting.segmentCount === 1 ? '' : 's'}`
                 : 'No audio file'}
           </AppText>
         </View>

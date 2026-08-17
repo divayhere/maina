@@ -32,6 +32,9 @@ const MIGRATIONS: string[] = [
      key TEXT PRIMARY KEY NOT NULL,
      value TEXT
    );`,
+  // v3 — segmented recording + resumable transcription
+  `ALTER TABLE meetings ADD COLUMN segment_count INTEGER NOT NULL DEFAULT 0;
+   ALTER TABLE meetings ADD COLUMN transcribed_segments INTEGER NOT NULL DEFAULT 0;`,
 ];
 
 export async function initDb(): Promise<void> {

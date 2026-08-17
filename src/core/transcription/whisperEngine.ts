@@ -1,14 +1,14 @@
 /**
- * TranscriptionEngine implementation backed by whisper.rn (on-device).
- * Also owns model download/caching. This is the swap-seam implementation:
- * a future engine just needs to satisfy TranscriptionEngine.
+ * TranscriptionEngine backed by whisper.rn (on-device). Owns model download
+ * (robust: temp file → verify size → move into place; partials deleted) and
+ * caching. Swap-seam implementation.
  */
 import * as FileSystem from 'expo-file-system/legacy';
 import { initWhisper, type WhisperContext } from 'whisper.rn';
 
 import { log } from '../../services/logger';
-import type { TranscribeOptions, TranscriptionEngine, TranscriptionResult } from './types';
 import { DEFAULT_MODEL_ID, resolveModel } from './models';
+import type { TranscribeOptions, TranscriptionEngine, TranscriptionResult } from './types';
 
 const MODEL_DIR = `${FileSystem.documentDirectory}models/`;
 
@@ -26,28 +26,45 @@ async function ensureDir(): Promise<void> {
   if (!info.exists) await FileSystem.makeDirectoryAsync(MODEL_DIR, { intermediates: true });
 }
 
+/** Downloaded AND complete (guards against a half-downloaded partial). */
 export async function isModelDownloaded(id: string): Promise<boolean> {
   const info = await FileSystem.getInfoAsync(modelPath(id));
-  return info.exists && (info.size ?? 0) > 1_000_000;
+  if (!info.exists) return false;
+  const size = (info as { size?: number }).size ?? 0;
+  const expected = resolveModel(id).approxBytes;
+  return size >= expected * 0.95;
 }
 
-/** Download a model with progress (0..1). Idempotent. */
+/** Robust download: temp file, verify, move into place; delete partials on failure. */
 export async function downloadModel(id: string, onProgress?: (fraction: number) => void): Promise<void> {
   if (await isModelDownloaded(id)) return;
   await ensureDir();
   const model = resolveModel(id);
+  const finalPath = modelPath(id);
+  const partPath = `${finalPath}.part`;
+
+  // Clear any previous partial/corrupt file.
+  await FileSystem.deleteAsync(partPath, { idempotent: true }).catch(() => {});
+  await FileSystem.deleteAsync(finalPath, { idempotent: true }).catch(() => {});
+
   log.info('whisper', 'model download start', { id, url: model.url });
-  const resumable = FileSystem.createDownloadResumable(
-    model.url,
-    modelPath(id),
-    {},
-    (p) => {
-      const expected = p.totalBytesExpectedToWrite > 0 ? p.totalBytesExpectedToWrite : model.approxBytes;
-      onProgress?.(Math.min(1, p.totalBytesWritten / expected));
-    },
-  );
-  await resumable.downloadAsync();
-  log.info('whisper', 'model download done', { id });
+  const resumable = FileSystem.createDownloadResumable(model.url, partPath, {}, (p) => {
+    const expected = p.totalBytesExpectedToWrite > 0 ? p.totalBytesExpectedToWrite : model.approxBytes;
+    onProgress?.(Math.min(1, p.totalBytesWritten / expected));
+  });
+
+  const result = await resumable.downloadAsync();
+  if (!result) throw new Error('download-returned-nothing');
+
+  const info = await FileSystem.getInfoAsync(partPath);
+  const size = info.exists ? (info as { size?: number }).size ?? 0 : 0;
+  if (size < model.approxBytes * 0.95) {
+    await FileSystem.deleteAsync(partPath, { idempotent: true }).catch(() => {});
+    throw new Error(`download-incomplete (${size}/${model.approxBytes})`);
+  }
+
+  await FileSystem.moveAsync({ from: partPath, to: finalPath });
+  log.info('whisper', 'model download done', { id, bytes: size });
 }
 
 let context: WhisperContext | null = null;
@@ -59,13 +76,9 @@ class WhisperRnEngine implements TranscriptionEngine {
   modelId = DEFAULT_MODEL_ID;
 
   async init(): Promise<void> {
-    if (!(await isModelDownloaded(this.modelId))) {
-      throw new Error('model-not-downloaded');
-    }
+    if (!(await isModelDownloaded(this.modelId))) throw new Error('model-not-downloaded');
     if (context && loadedModelId === this.modelId) return;
-    if (context) {
-      await this.dispose();
-    }
+    if (context) await this.dispose();
     context = await initWhisper({ filePath: nativePath(modelPath(this.modelId)), useGpu: true });
     loadedModelId = this.modelId;
     log.info('whisper', 'context ready', { model: this.modelId });
@@ -79,18 +92,15 @@ class WhisperRnEngine implements TranscriptionEngine {
       maxThreads: 6,
     });
     const res = await promise;
-    const durationMs = Date.now() - started;
-    log.info('whisper', 'transcribed', { chars: res.result.length, lang: res.language, ms: durationMs });
     return {
       text: res.result.trim(),
-      // whisper segment times are in centiseconds (10ms units).
       segments: res.segments.map((s: { text: string; t0: number; t1: number }) => ({
         startMs: s.t0 * 10,
         endMs: s.t1 * 10,
         text: s.text.trim(),
       })),
       language: res.language,
-      durationMs,
+      durationMs: Date.now() - started,
       engineId: this.id,
     };
   }

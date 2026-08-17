@@ -16,4 +16,5 @@ export function setTranscriptionModel(id: string): void {
 
 export * from './types';
 export { downloadModel, isModelDownloaded } from './whisperEngine';
-export { WHISPER_MODELS, resolveModel, DEFAULT_MODEL_ID } from './models';
+export { transcribeMeeting } from './transcribeMeeting';
+export { WHISPER_MODELS, resolveModel, DEFAULT_MODEL_ID, LOCAL_MODEL } from './models';
