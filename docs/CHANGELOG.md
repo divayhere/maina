@@ -3,6 +3,13 @@
 All notable changes to Maina are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions follow [Semantic Versioning](https://semver.org/).
 
+## [0.3.2] — Live remote monitoring
+
+### Added
+- **Supabase remote log stream** enabled: every structured log entry flows to a `device_logs` table (RLS-protected, anon insert/select), letting the maintainer watch the app in near real time and diagnose without the user describing anything.
+
+_Includes everything from 0.3.1 (the whisper `file://` fix + on-device Diagnostics)._
+
 ## [0.3.1] — Transcription fix + Diagnostics
 
 ### Fixed
