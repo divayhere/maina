@@ -12,6 +12,7 @@ import {
   setTranscriptionModel,
 } from '@/core/transcription';
 import { deleteMeeting, getMeeting, updateMeeting, type Meeting } from '@/data/meetings';
+import { getSelectedModel } from '@/data/settings';
 import { AppText, Card, PrimaryButton } from '@/design/components';
 import { useAppTheme } from '@/design/theme';
 import { radius, space } from '@/design/tokens';
@@ -32,6 +33,7 @@ export default function MeetingDetail() {
   const { refresh } = useMeetings();
   const [meeting, setMeeting] = useState<Meeting | null>(null);
   const [phase, setPhase] = useState<Phase>({ kind: 'idle' });
+  const [activeModelLabel, setActiveModelLabel] = useState('');
 
   const load = useCallback(() => {
     if (id) getMeeting(id).then(setMeeting);
@@ -41,8 +43,9 @@ export default function MeetingDetail() {
 
   const transcribe = async () => {
     if (!id || !meeting?.audioUri) return;
-    const modelId = DEFAULT_CONFIG.transcriptionModel;
+    const modelId = await getSelectedModel();
     const model = resolveModel(modelId);
+    setActiveModelLabel(model.label);
     try {
       const audioInfo = await FileSystem.getInfoAsync(meeting.audioUri);
       log.info('meeting', 'transcribe start', {
@@ -149,7 +152,7 @@ export default function MeetingDetail() {
               <ActivityIndicator color={theme.accent} />
               <AppText variant="body" muted>
                 {phase.kind === 'downloading'
-                  ? `Downloading model… ${Math.round(phase.pct * 100)}% (${resolveModel(DEFAULT_CONFIG.transcriptionModel).label})`
+                  ? `Downloading ${activeModelLabel} model… ${Math.round(phase.pct * 100)}%`
                   : 'Transcribing on your device…'}
               </AppText>
             </View>

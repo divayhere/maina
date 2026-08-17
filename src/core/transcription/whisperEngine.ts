@@ -76,7 +76,7 @@ class WhisperRnEngine implements TranscriptionEngine {
     const started = Date.now();
     const { promise } = context!.transcribe(nativePath(audioPath), {
       language: opts?.language ?? 'auto',
-      maxThreads: 4,
+      maxThreads: 6,
     });
     const res = await promise;
     const durationMs = Date.now() - started;

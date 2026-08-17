@@ -27,6 +27,11 @@ const MIGRATIONS: string[] = [
      language TEXT,
      status TEXT NOT NULL DEFAULT 'recorded'
    );`,
+  // v2 — key/value settings
+  `CREATE TABLE IF NOT EXISTS settings (
+     key TEXT PRIMARY KEY NOT NULL,
+     value TEXT
+   );`,
 ];
 
 export async function initDb(): Promise<void> {

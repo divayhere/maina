@@ -3,6 +3,15 @@
 All notable changes to Maina are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions follow [Semantic Versioning](https://semver.org/).
 
+## [0.3.4] — Model picker (fix Hindi)
+
+### Added
+- In-app **model picker** (Settings → Transcription model): Base / Small / Medium / Large v3 Turbo. Bigger models transcribe Hindi far better; each downloads on first use. Selection persists (SQLite settings table).
+- whisper threads 4→6 for faster large-model transcription.
+
+### Why
+- Logs showed the base model detected Hindi but produced ~8 chars — too weak for Hindi. Default is now **Small**; try Medium/Large for best Hindi.
+
 ## [0.3.3] — Fix: recordings now actually save audio
 
 ### Fixed
