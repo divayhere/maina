@@ -15,4 +15,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); versions follow 
   - App config / feature flags module.
   - Multi-provider AI registry: Gemini, OpenAI (ChatGPT), Anthropic (Claude), Grok, DeepSeek.
 
-_This is Phase 0. No feature behaviour yet — the goal of 0.1 is: installs, opens, pipeline proven._
+### Build
+- **APK 0.1 produced via EAS** (Android, internal/preview, cloud keystore). Pipeline proven end to end: local code → GitHub → EAS cloud build → installable APK.
+
+_This is Phase 0. No feature behaviour yet — the goal of 0.1 was: installs, opens, pipeline proven. ✅ Achieved. Next: Phase 1 (record → save)._
