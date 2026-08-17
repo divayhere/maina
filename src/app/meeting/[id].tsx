@@ -44,6 +44,14 @@ export default function MeetingDetail() {
     const modelId = DEFAULT_CONFIG.transcriptionModel;
     const model = resolveModel(modelId);
     try {
+      const audioInfo = await FileSystem.getInfoAsync(meeting.audioUri);
+      log.info('meeting', 'transcribe start', {
+        id,
+        audioUri: meeting.audioUri,
+        audioExists: audioInfo.exists,
+        audioBytes: audioInfo.exists ? (audioInfo as { size?: number }).size ?? 0 : 0,
+        model: modelId,
+      });
       setTranscriptionModel(modelId);
       if (!(await isModelDownloaded(modelId))) {
         setPhase({ kind: 'downloading', pct: 0 });

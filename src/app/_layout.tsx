@@ -8,6 +8,7 @@ import { initDb } from '@/data/db';
 import { ErrorBoundary } from '@/design/ErrorBoundary';
 import { useAppTheme } from '@/design/theme';
 import { log } from '@/services/logger';
+import { installRemoteLog } from '@/services/remoteLog';
 import { installWatchdog } from '@/services/watchdog';
 
 export default function RootLayout() {
@@ -16,6 +17,7 @@ export default function RootLayout() {
 
   useEffect(() => {
     installWatchdog();
+    installRemoteLog();
     log.info('app', 'launch');
     initDb()
       .catch((e) => log.error('init', 'db init failed', { err: String(e) }))
