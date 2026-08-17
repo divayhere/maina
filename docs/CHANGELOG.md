@@ -13,6 +13,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); versions follow 
 - Vitest transcript-boundary tests plus working TypeScript and ESLint quality gates.
 
 ### Fixed
+- Declared the local recorder module's Android version metadata so Expo SDK 57 autolinking can configure release builds.
 - Replaced `expo-speech-recognition`'s stop-time whole-file `readBytes()` WAV conversion with incremental disk writing. WAV headers are checkpointed every five seconds, avoiding multi-hour heap spikes and making abrupt-kill recovery possible.
 - Audio files rotate every 10 minutes (~19.2 MB at 16 kHz mono) instead of relying on one unbounded file or 30-second transcription jobs.
 - Stop now waits for the recognizer `end` event with a bounded timeout, retaining the last partial and removing the fixed 700 ms race.
