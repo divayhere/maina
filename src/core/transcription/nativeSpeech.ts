@@ -83,6 +83,31 @@ export function startSession(opts: { dir: string; index: number; lang: string; o
   });
 }
 
+/**
+ * Re-transcribe a previously saved audio file with the same engine.
+ * This is the safety net that replaces Whisper: if live capture produced
+ * nothing (or the wrong language was selected), re-read the saved WAV.
+ */
+export function startFileSession(opts: { uri: string; lang: string }): void {
+  ExpoSpeechRecognitionModule.start({
+    lang: opts.lang,
+    interimResults: false,
+    continuous: true,
+    requiresOnDeviceRecognition: supportsOnDevice(),
+    addsPunctuation: true,
+    androidIntentOptions: {
+      EXTRA_ENABLE_LANGUAGE_SWITCH: 'balanced',
+    },
+    audioSource: {
+      uri: opts.uri,
+      audioChannels: 1,
+      sampleRate: 16000,
+      // On-device recognition needs a slower feed to keep up.
+      chunkDelayMillis: 25,
+    },
+  });
+}
+
 export function stopSession(): void {
   try {
     ExpoSpeechRecognitionModule.stop();

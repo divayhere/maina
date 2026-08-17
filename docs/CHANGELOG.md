@@ -3,13 +3,14 @@
 All notable changes to Maina are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions follow [Semantic Versioning](https://semver.org/).
 
-## [0.5.0] — Live transcription via the phone's own speech engine
+## [0.5.0] — Live transcription (Whisper removed) via the phone's own speech engine
 
 ### Changed (major)
 - **Primary engine is now Android on-device SpeechRecognizer** (expo-speech-recognition) instead of Whisper. Text appears **live as you speak**, free forever, offline, using the phone's speech hardware. Whisper on the CPU measured ~6x slower than realtime, degrading to 65 min for a 30 s segment (thermal throttling + decoder retry loops on quiet audio).
 - **Hinglish**: EXTRA_ENABLE_LANGUAGE_SWITCH lets the recognizer switch Hindi<->English mid-sentence. Language picker + one-tap offline language pack download in Settings.
 - **Sessions auto-restart** when Android ends one, so long meetings stay continuous; each session persists its own audio file into the meeting folder.
-- **Audio kept** after transcription so an optional **Whisper re-pass** stays available; Whisper switched from q5_0 (3-5.5x slower, my error) to **small q4_0**.
+- **Whisper removed entirely** — it could never be real-time on a phone CPU, and the small models are weak at Hindi. Removed whisper.rn, the PCM recorder, expo-audio and the buffer polyfill (4 native deps), shrinking the APK and cutting build risk.
+- **Audio kept** as a safety net, with **"Re-transcribe from saved audio"** using the same fast native engine (audioSource), plus a per-meeting **delete audio** action.
 
 ## [0.4.0] — Hours-long recording + resumable transcription
 

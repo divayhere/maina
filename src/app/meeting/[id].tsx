@@ -1,82 +1,110 @@
 import { Ionicons } from '@expo/vector-icons';
 import * as FileSystem from 'expo-file-system/legacy';
 import { router, useFocusEffect, useLocalSearchParams } from 'expo-router';
-import { useCallback, useState } from 'react';
+import { useSpeechRecognitionEvent } from 'expo-speech-recognition';
+import { useCallback, useRef, useState } from 'react';
 import { ActivityIndicator, Alert, Pressable, ScrollView, StyleSheet, View } from 'react-native';
 
-import {
-  downloadModel,
-  isModelDownloaded,
-  LOCAL_MODEL,
-  setTranscriptionModel,
-  transcribeMeeting,
-} from '@/core/transcription';
-import { deleteMeeting, getMeeting, type Meeting } from '@/data/meetings';
-import { AppText, Card, PrimaryButton } from '@/design/components';
+import { startFileSession, stopSession } from '@/core/transcription/nativeSpeech';
+import { deleteMeeting, getMeeting, updateMeeting, type Meeting } from '@/data/meetings';
+import { getLanguage } from '@/data/settings';
+import { AppText, Card } from '@/design/components';
 import { useAppTheme } from '@/design/theme';
 import { radius, space } from '@/design/tokens';
+import { segmentPath } from '@/hardware/recording/paths';
 import { log } from '@/services/logger';
 import { useMeetings } from '@/state/meetingsStore';
 import { formatDateTime, formatDuration } from '@/utils/format';
-
-type Phase =
-  | { kind: 'idle' }
-  | { kind: 'downloading'; pct: number }
-  | { kind: 'transcribing'; done: number; total: number }
-  | { kind: 'error'; msg: string };
 
 export default function MeetingDetail() {
   const { theme } = useAppTheme();
   const { id } = useLocalSearchParams<{ id: string }>();
   const { refresh } = useMeetings();
   const [meeting, setMeeting] = useState<Meeting | null>(null);
-  const [phase, setPhase] = useState<Phase>({ kind: 'idle' });
+  const [repassing, setRepassing] = useState(false);
+  const [repassIdx, setRepassIdx] = useState(0);
+
+  const repassRef = useRef(false);
+  const idxRef = useRef(0);
+  const textRef = useRef('');
+  const meetingRef = useRef<Meeting | null>(null);
+  const langRef = useRef('');
 
   const load = useCallback(() => {
-    if (id) getMeeting(id).then(setMeeting);
+    if (id)
+      getMeeting(id).then((m) => {
+        setMeeting(m);
+        meetingRef.current = m;
+      });
   }, [id]);
 
   useFocusEffect(useCallback(() => load(), [load]));
 
-  const transcribe = async () => {
-    if (!id || !meeting?.audioUri) return;
-    const modelId = LOCAL_MODEL.id;
-    try {
-      setTranscriptionModel(modelId);
-      log.info('meeting', 'transcribe requested', {
-        id,
-        segments: meeting.segmentCount,
-        done: meeting.transcribedSegments,
-        model: modelId,
-      });
-      if (!(await isModelDownloaded(modelId))) {
-        setPhase({ kind: 'downloading', pct: 0 });
-        await downloadModel(modelId, (pct) => setPhase({ kind: 'downloading', pct }));
-      }
-      setPhase({ kind: 'transcribing', done: meeting.transcribedSegments, total: meeting.segmentCount });
-      await transcribeMeeting(id, (done, total) => {
-        setPhase({ kind: 'transcribing', done, total });
-        load();
-      });
-      load();
-      await refresh();
-      setPhase({ kind: 'idle' });
-    } catch (e) {
-      const s = String(e);
-      const interrupted =
-        s.includes('download-incomplete') || s.includes('connection abort') || s.includes('Network');
-      setPhase({
-        kind: 'error',
-        msg: interrupted
-          ? 'Download was interrupted. Tap to resume — it picks up where it left off.'
-          : 'Transcription hit a snag. Your recording is safe — tap to resume.',
-      });
-      log.error('meeting', 'transcribe failed', { err: s });
+  // --- re-transcribe from the saved audio, using the same fast native engine ---
+  useSpeechRecognitionEvent('result', (e) => {
+    if (!repassRef.current) return;
+    const t = e.results?.[0]?.transcript ?? '';
+    if (e.isFinal && t) textRef.current = (textRef.current + ' ' + t).trim();
+  });
+
+  useSpeechRecognitionEvent('end', () => {
+    if (!repassRef.current) return;
+    const m = meetingRef.current;
+    if (!m) return;
+    const next = idxRef.current + 1;
+    if (next < m.segmentCount) {
+      idxRef.current = next;
+      setRepassIdx(next);
+      startFileSession({ uri: segmentPath(m.audioUri!, next), lang: langRef.current });
+    } else {
+      repassRef.current = false;
+      setRepassing(false);
+      finishRepass();
     }
+  });
+
+  const finishRepass = async () => {
+    if (!id) return;
+    const text = textRef.current.trim();
+    if (text) {
+      await updateMeeting(id, { transcript: text, status: 'transcribed' });
+      log.info('meeting', 're-pass complete', { id, chars: text.length });
+    } else {
+      log.warn('meeting', 're-pass produced no text', { id });
+    }
+    load();
+    await refresh();
+  };
+
+  const startRepass = async () => {
+    const m = meetingRef.current;
+    if (!m?.audioUri || m.segmentCount === 0) return;
+    langRef.current = await getLanguage();
+    textRef.current = '';
+    idxRef.current = 0;
+    setRepassIdx(0);
+    repassRef.current = true;
+    setRepassing(true);
+    log.info('meeting', 're-pass start', { id, segments: m.segmentCount, lang: langRef.current });
+    startFileSession({ uri: segmentPath(m.audioUri, 0), lang: langRef.current });
+  };
+
+  const cancelRepass = () => {
+    repassRef.current = false;
+    setRepassing(false);
+    stopSession();
+  };
+
+  const deleteAudio = async () => {
+    if (!id || !meeting?.audioUri) return;
+    await FileSystem.deleteAsync(meeting.audioUri, { idempotent: true }).catch(() => {});
+    await updateMeeting(id, { audioUri: null });
+    load();
+    await refresh();
   };
 
   const confirmDelete = () => {
-    Alert.alert('Delete meeting?', 'This removes the meeting and its transcript.', [
+    Alert.alert('Delete meeting?', 'This removes the meeting, its transcript and audio.', [
       { text: 'Cancel', style: 'cancel' },
       {
         text: 'Delete',
@@ -94,10 +122,8 @@ export default function MeetingDetail() {
     ]);
   };
 
-  const busy = phase.kind === 'downloading' || phase.kind === 'transcribing';
   const hasText = !!meeting?.transcript;
-  // Whisper re-pass is available whenever the audio is still on disk.
-  const canRepass = !!meeting?.audioUri && meeting.segmentCount > 0;
+  const hasAudio = !!meeting?.audioUri && meeting.segmentCount > 0;
 
   return (
     <View style={{ flex: 1, backgroundColor: theme.bg }}>
@@ -116,7 +142,7 @@ export default function MeetingDetail() {
           {meeting ? (
             <AppText variant="body" muted>
               {formatDateTime(meeting.startedAt)} · {formatDuration(meeting.durationMs)}
-              {meeting.language ? ` · ${meeting.language.toUpperCase()}` : ''}
+              {meeting.language ? ` · ${meeting.language}` : ''}
             </AppText>
           ) : null}
         </View>
@@ -124,36 +150,31 @@ export default function MeetingDetail() {
         <Card style={{ gap: space.md }}>
           <AppText variant="label" muted>TRANSCRIPT</AppText>
 
-          {meeting?.transcript ? <AppText variant="body">{meeting.transcript}</AppText> : null}
+          {hasText ? (
+            <AppText variant="body">{meeting!.transcript}</AppText>
+          ) : (
+            <AppText variant="body" muted>
+              No text was captured for this meeting.
+            </AppText>
+          )}
 
-          {busy ? (
+          {repassing ? (
             <View style={styles.busy}>
               <ActivityIndicator color={theme.accent} />
               <AppText variant="body" muted style={{ flex: 1 }}>
-                {phase.kind === 'downloading'
-                  ? `Downloading ${LOCAL_MODEL.label}… ${Math.round(phase.pct * 100)}%`
-                  : `Re-transcribing with Whisper… part ${phase.done}/${phase.total}`}
+                Re-reading saved audio… part {repassIdx + 1}/{meeting?.segmentCount ?? 1}
               </AppText>
+              <Pressable onPress={cancelRepass} hitSlop={8}>
+                <AppText variant="label" muted>stop</AppText>
+              </Pressable>
             </View>
-          ) : (
-            <>
-              {!meeting?.transcript ? (
-                <AppText variant="body" muted>
-                  No text was captured. If the audio was saved you can try a Whisper re-pass below.
-                </AppText>
-              ) : null}
-              {phase.kind === 'error' ? (
-                <AppText variant="label" color={theme.warn}>{phase.msg}</AppText>
-              ) : null}
-              {canRepass ? (
-                <Pressable onPress={transcribe} style={{ paddingVertical: space.sm }}>
-                  <AppText variant="label" color={theme.accent}>
-                    {meeting?.transcript ? 'Re-transcribe with Whisper (slower, offline)' : 'Try Whisper on the saved audio'}
-                  </AppText>
-                </Pressable>
-              ) : null}
-            </>
-          )}
+          ) : hasAudio ? (
+            <Pressable onPress={startRepass} style={{ paddingVertical: space.sm }}>
+              <AppText variant="label" color={theme.accent}>
+                {hasText ? 'Re-transcribe from saved audio' : 'Transcribe from saved audio'}
+              </AppText>
+            </Pressable>
+          ) : null}
         </Card>
 
         <Card style={{ gap: space.sm }}>
@@ -165,16 +186,23 @@ export default function MeetingDetail() {
           </AppText>
         </Card>
 
-        <View style={[styles.audioTag, { borderColor: theme.border }]}>
-          <Ionicons
-            name={hasText ? 'checkmark-circle-outline' : meeting?.audioUri ? 'musical-note' : 'alert-circle-outline'}
-            size={16}
-            color={hasText ? theme.done : meeting?.audioUri ? theme.accent : theme.warn}
-          />
-          <AppText variant="label" muted>
-            {hasText ? 'Transcribed live' : meeting?.audioUri ? 'Audio saved' : 'No audio'}
-            {meeting?.audioUri ? ' · audio kept for re-pass' : ''}
-          </AppText>
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.md, flexWrap: 'wrap' }}>
+          <View style={[styles.audioTag, { borderColor: theme.border }]}>
+            <Ionicons
+              name={hasText ? 'checkmark-circle-outline' : 'alert-circle-outline'}
+              size={16}
+              color={hasText ? theme.done : theme.warn}
+            />
+            <AppText variant="label" muted>
+              {hasText ? 'Transcribed live' : 'No transcript'}
+              {hasAudio ? ' · audio kept' : ''}
+            </AppText>
+          </View>
+          {hasAudio ? (
+            <Pressable onPress={deleteAudio} hitSlop={8}>
+              <AppText variant="label" color={theme.muted}>delete audio</AppText>
+            </Pressable>
+          ) : null}
         </View>
       </ScrollView>
     </View>
@@ -195,7 +223,6 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: space.sm,
-    alignSelf: 'flex-start',
     borderWidth: 1,
     borderRadius: radius.pill,
     paddingHorizontal: space.md,

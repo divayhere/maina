@@ -150,7 +150,10 @@ export default function SettingsScreen() {
 
       <Card style={{ gap: space.xs }}>
         <AppText variant="label" muted>PRIVACY</AppText>
-        <Row label="Delete audio after transcript" value={DEFAULT_CONFIG.audioAutoDelete ? 'On' : 'Off'} />
+        <Row label="Keep audio after transcript" value={DEFAULT_CONFIG.keepAudioAfterTranscript ? 'On' : 'Off'} />
+        <AppText variant="label" muted>
+          Audio stays on the phone so you can re-transcribe. Delete it any time from a meeting.
+        </AppText>
       </Card>
 
       <Card style={{ gap: space.xs }}>
