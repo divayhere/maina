@@ -3,6 +3,11 @@
 All notable changes to Maina are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions follow [Semantic Versioning](https://semver.org/).
 
+## [0.3.3] — Fix: recordings now actually save audio
+
+### Fixed
+- The PCM library only *streams* audio chunks (its `wavFile` option is ignored on Android) and its `stop()` returns nothing — so recordings had no audio file (`hasAudio:false`) and couldn't be transcribed. Now we collect the streamed PCM chunks and assemble a proper 16 kHz mono WAV ourselves. Diagnosed live via the Supabase log stream.
+
 ## [0.3.2] — Live remote monitoring
 
 ### Added

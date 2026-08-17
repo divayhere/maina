@@ -12,7 +12,7 @@ declare module '@fugood/react-native-audio-pcm-stream' {
     init: (options: Options) => void;
     start: () => void;
     stop: () => Promise<string>;
-    on: (event: 'data', callback: (data: string) => void) => void;
+    on: (event: 'data', callback: (data: string) => void) => { remove: () => void };
   }
   const AudioRecord: IAudioRecord;
   export default AudioRecord;

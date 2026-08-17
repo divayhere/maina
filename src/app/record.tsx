@@ -35,7 +35,7 @@ export default function RecordScreen() {
           log.warn('record', 'mic permission denied');
           return;
         }
-        startPcmRecording(`maina-${idRef.current}.wav`);
+        startPcmRecording();
         startedAtRef.current = Date.now();
         setRecording(true);
       } catch (e) {
