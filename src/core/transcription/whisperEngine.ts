@@ -16,6 +16,11 @@ function modelPath(id: string): string {
   return `${MODEL_DIR}ggml-${id}.bin`;
 }
 
+/** whisper.rn wants a plain filesystem path, not Expo's file:// URI. */
+function nativePath(uri: string): string {
+  return uri.replace(/^file:\/\//, '');
+}
+
 async function ensureDir(): Promise<void> {
   const info = await FileSystem.getInfoAsync(MODEL_DIR);
   if (!info.exists) await FileSystem.makeDirectoryAsync(MODEL_DIR, { intermediates: true });
@@ -61,7 +66,7 @@ class WhisperRnEngine implements TranscriptionEngine {
     if (context) {
       await this.dispose();
     }
-    context = await initWhisper({ filePath: modelPath(this.modelId), useGpu: true });
+    context = await initWhisper({ filePath: nativePath(modelPath(this.modelId)), useGpu: true });
     loadedModelId = this.modelId;
     log.info('whisper', 'context ready', { model: this.modelId });
   }
@@ -69,7 +74,7 @@ class WhisperRnEngine implements TranscriptionEngine {
   async transcribe(audioPath: string, opts?: TranscribeOptions): Promise<TranscriptionResult> {
     await this.init();
     const started = Date.now();
-    const { promise } = context!.transcribe(audioPath, {
+    const { promise } = context!.transcribe(nativePath(audioPath), {
       language: opts?.language ?? 'auto',
       maxThreads: 4,
     });

@@ -1,5 +1,7 @@
+import { Ionicons } from '@expo/vector-icons';
 import Constants from 'expo-constants';
-import { ScrollView, View } from 'react-native';
+import { router } from 'expo-router';
+import { Pressable, ScrollView, View } from 'react-native';
 
 import { AppText, Card } from '@/design/components';
 import { useAppTheme } from '@/design/theme';
@@ -46,6 +48,16 @@ export default function SettingsScreen() {
         <Row label="Version" value={version} />
         <Row label="Phase" value="2 — on-device transcription" />
       </Card>
+
+      <Pressable onPress={() => router.push('/diagnostics')}>
+        <Card style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.md }}>
+            <Ionicons name="pulse-outline" size={20} color={theme.accent} />
+            <AppText variant="body">Diagnostics &amp; logs</AppText>
+          </View>
+          <Ionicons name="chevron-forward" size={18} color={theme.muted} />
+        </Card>
+      </Pressable>
     </ScrollView>
   );
 }

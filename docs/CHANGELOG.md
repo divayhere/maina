@@ -3,6 +3,15 @@
 All notable changes to Maina are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions follow [Semantic Versioning](https://semver.org/).
 
+## [0.3.1] — Transcription fix + Diagnostics
+
+### Fixed
+- Pass whisper.cpp a plain filesystem path (strip Expo's `file://`) for both the model and the audio — the likely cause of transcription not running.
+
+### Added
+- **Diagnostics screen** (Settings → Diagnostics & logs): shows the in-app log, survives crashes (persisted to disk), and a **Share logs** button so issues can be sent without guesswork.
+- **Watchdog**: global JS-error capture + error boundary (calm recovery card instead of a white crash).
+
 ## [0.3.0] — Phase 2: On-device Transcription
 
 ### Added
