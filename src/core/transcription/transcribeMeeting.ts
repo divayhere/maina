@@ -8,7 +8,7 @@
 import * as FileSystem from 'expo-file-system/legacy';
 
 import { getMeeting, updateMeeting } from '../../data/meetings';
-import { segmentPath } from '../../hardware/recording/pcmRecorder';
+import { segmentPath } from '../../hardware/recording/paths';
 import { DEFAULT_CONFIG } from '../../services/config';
 import { log } from '../../services/logger';
 import { whisperEngine } from './whisperEngine';

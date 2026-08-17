@@ -12,6 +12,9 @@ import { Buffer } from 'buffer';
 import * as FileSystem from 'expo-file-system/legacy';
 
 import { log } from '../../services/logger';
+import { recordingDir, segmentPath } from './paths';
+
+export { recordingDir, segmentPath };
 
 const VOICE_RECOGNITION = 6; // Android AudioSource tuned for speech
 const SAMPLE_RATE = 16000;
@@ -25,14 +28,6 @@ let bufBytes = 0;
 let segIndex = 0;
 let sub: { remove: () => void } | null = null;
 let writeChain: Promise<void> = Promise.resolve();
-
-export function recordingDir(meetingId: string): string {
-  return `${FileSystem.documentDirectory}rec-${meetingId}/`;
-}
-
-export function segmentPath(recDir: string, index: number): string {
-  return `${recDir}seg-${String(index).padStart(4, '0')}.wav`;
-}
 
 export async function startSegmentedRecording(meetingId: string): Promise<string> {
   dir = recordingDir(meetingId);

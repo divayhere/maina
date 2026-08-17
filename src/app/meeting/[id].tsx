@@ -95,9 +95,9 @@ export default function MeetingDetail() {
   };
 
   const busy = phase.kind === 'downloading' || phase.kind === 'transcribing';
-  const complete = !!meeting && meeting.segmentCount > 0 && meeting.transcribedSegments >= meeting.segmentCount;
-  const canTranscribe = !!meeting?.audioUri && meeting.segmentCount > 0 && !complete;
-  const resuming = !!meeting && meeting.transcribedSegments > 0 && !complete;
+  const hasText = !!meeting?.transcript;
+  // Whisper re-pass is available whenever the audio is still on disk.
+  const canRepass = !!meeting?.audioUri && meeting.segmentCount > 0;
 
   return (
     <View style={{ flex: 1, backgroundColor: theme.bg }}>
@@ -131,25 +131,29 @@ export default function MeetingDetail() {
               <ActivityIndicator color={theme.accent} />
               <AppText variant="body" muted style={{ flex: 1 }}>
                 {phase.kind === 'downloading'
-                  ? `Downloading ${LOCAL_MODEL.label}… ${Math.round(phase.pct * 100)}% (one-time, ~547 MB)`
-                  : `Transcribing on your device… segment ${phase.done}/${phase.total}`}
+                  ? `Downloading ${LOCAL_MODEL.label}… ${Math.round(phase.pct * 100)}%`
+                  : `Re-transcribing with Whisper… part ${phase.done}/${phase.total}`}
               </AppText>
             </View>
-          ) : canTranscribe ? (
+          ) : (
             <>
               {!meeting?.transcript ? (
                 <AppText variant="body" muted>
-                  Runs fully on your phone. First time downloads the model (~547 MB, Wi-Fi); after that it&apos;s offline and free.
+                  No text was captured. If the audio was saved you can try a Whisper re-pass below.
                 </AppText>
               ) : null}
               {phase.kind === 'error' ? (
                 <AppText variant="label" color={theme.warn}>{phase.msg}</AppText>
               ) : null}
-              <PrimaryButton label={resuming ? 'Resume transcription' : 'Transcribe'} onPress={transcribe} />
+              {canRepass ? (
+                <Pressable onPress={transcribe} style={{ paddingVertical: space.sm }}>
+                  <AppText variant="label" color={theme.accent}>
+                    {meeting?.transcript ? 'Re-transcribe with Whisper (slower, offline)' : 'Try Whisper on the saved audio'}
+                  </AppText>
+                </Pressable>
+              ) : null}
             </>
-          ) : !meeting?.transcript ? (
-            <AppText variant="body" muted>No audio available to transcribe.</AppText>
-          ) : null}
+          )}
         </Card>
 
         <Card style={{ gap: space.sm }}>
@@ -163,16 +167,13 @@ export default function MeetingDetail() {
 
         <View style={[styles.audioTag, { borderColor: theme.border }]}>
           <Ionicons
-            name={complete ? 'checkmark-circle-outline' : meeting?.audioUri ? 'musical-note' : 'alert-circle-outline'}
+            name={hasText ? 'checkmark-circle-outline' : meeting?.audioUri ? 'musical-note' : 'alert-circle-outline'}
             size={16}
-            color={complete ? theme.done : meeting?.audioUri ? theme.accent : theme.warn}
+            color={hasText ? theme.done : meeting?.audioUri ? theme.accent : theme.warn}
           />
           <AppText variant="label" muted>
-            {complete
-              ? 'Transcribed · audio deleted'
-              : meeting?.audioUri
-                ? `Audio captured · ${meeting.segmentCount} segment${meeting.segmentCount === 1 ? '' : 's'}`
-                : 'No audio file'}
+            {hasText ? 'Transcribed live' : meeting?.audioUri ? 'Audio saved' : 'No audio'}
+            {meeting?.audioUri ? ' · audio kept for re-pass' : ''}
           </AppText>
         </View>
       </ScrollView>

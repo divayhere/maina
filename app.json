@@ -3,7 +3,7 @@
     "name": "Maina",
     "slug": "maina",
     "owner": "divayheres-team",
-    "version": "0.4.0",
+    "version": "0.5.0",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
     "scheme": "maina",
@@ -48,7 +48,17 @@
           "microphonePermission": "Maina uses the microphone to record your meetings when you tap record."
         }
       ],
-      "expo-sqlite"
+      "expo-sqlite",
+      [
+        "expo-speech-recognition",
+        {
+          "microphonePermission": "Maina uses the microphone to transcribe your meetings on-device.",
+          "speechRecognitionPermission": "Maina uses speech recognition to turn your meetings into text on your phone.",
+          "androidSpeechServicePackages": [
+            "com.google.android.as"
+          ]
+        }
+      ]
     ],
     "experiments": {
       "typedRoutes": true,

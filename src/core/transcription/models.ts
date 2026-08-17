@@ -15,11 +15,11 @@ export interface WhisperModel {
 const HF = 'https://huggingface.co/ggerganov/whisper.cpp/resolve/main';
 
 export const LOCAL_MODEL: WhisperModel = {
-  id: 'large-v3-turbo-q5_0',
-  label: 'Large v3 Turbo (quantized)',
-  hint: '~547 MB · strong Hindi + English · offline',
-  url: `${HF}/ggml-large-v3-turbo-q5_0.bin`,
-  approxBytes: 547_000_000,
+  id: 'small-q4_0',
+  label: 'Whisper Small (q4_0)',
+  hint: '~181 MB · optional accuracy re-pass · offline',
+  url: `${HF}/ggml-small-q4_0.bin`,
+  approxBytes: 181_000_000,
 };
 
 export const WHISPER_MODELS: Record<string, WhisperModel> = {

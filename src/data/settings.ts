@@ -4,8 +4,10 @@
  */
 import { getDb } from './db';
 import { DEFAULT_MODEL_ID } from '../core/transcription/models';
+import { DEFAULT_LANGUAGE } from '../core/transcription/nativeSpeech';
 
 const KEY_MODEL = 'transcription_model';
+const KEY_LANG = 'speech_language';
 
 export async function getSetting(key: string): Promise<string | null> {
   const db = await getDb();
@@ -27,4 +29,12 @@ export async function getSelectedModel(): Promise<string> {
 
 export async function setSelectedModel(id: string): Promise<void> {
   await setSetting(KEY_MODEL, id);
+}
+
+export async function getLanguage(): Promise<string> {
+  return (await getSetting(KEY_LANG)) ?? DEFAULT_LANGUAGE;
+}
+
+export async function setLanguage(code: string): Promise<void> {
+  await setSetting(KEY_LANG, code);
 }
