@@ -18,7 +18,19 @@ export interface LogEntry {
   context?: Record<string, unknown>;
 }
 
-const RING_SIZE = 500;
+const RING_SIZE = 2000;
+
+const SENSITIVE_KEY = /(?:key|token|authorization|transcript|audioUri|audio_uri|path|dsn)/i;
+
+function safeContext(context?: Record<string, unknown>): Record<string, unknown> | undefined {
+  if (!context) return undefined;
+  return Object.fromEntries(
+    Object.entries(context).map(([key, value]) => [
+      key,
+      SENSITIVE_KEY.test(key) ? '[redacted]' : value instanceof Error ? value.message : value,
+    ]),
+  );
+}
 
 class Logger {
   private ring: LogEntry[] = [];
@@ -30,7 +42,7 @@ class Logger {
   }
 
   private emit(level: LogLevel, scope: string, message: string, context?: Record<string, unknown>) {
-    const entry: LogEntry = { ts: Date.now(), level, scope, message, context };
+    const entry: LogEntry = { ts: Date.now(), level, scope, message, context: safeContext(context) };
     this.ring.push(entry);
     if (this.ring.length > RING_SIZE) this.ring.shift();
     for (const s of this.sinks) {

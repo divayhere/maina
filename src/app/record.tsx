@@ -1,5 +1,4 @@
 import * as FileSystem from 'expo-file-system/legacy';
-import { activateKeepAwakeAsync, deactivateKeepAwake } from 'expo-keep-awake';
 import { router } from 'expo-router';
 import { useSpeechRecognitionEvent } from 'expo-speech-recognition';
 import { useEffect, useRef, useState } from 'react';
@@ -7,160 +6,272 @@ import { AppState, Pressable, ScrollView, StyleSheet, View } from 'react-native'
 
 import {
   DEFAULT_LANGUAGE,
+  abortSession,
+  getOfflineLocales,
   requestSpeechPermissions,
   startSession,
   stopSession,
   supportsOnDevice,
 } from '@/core/transcription/nativeSpeech';
-import { createMeeting, newId, updateMeeting } from '@/data/meetings';
+import { mergeTranscript, transcriptWordCount } from '@/core/transcription/transcript';
+import {
+  createMeeting,
+  deleteMeeting,
+  finishRecordingSegment,
+  newId,
+  startRecordingSegment,
+  updateMeeting,
+} from '@/data/meetings';
 import { getLanguage } from '@/data/settings';
 import { AppText, PrimaryButton } from '@/design/components';
 import { useAppTheme } from '@/design/theme';
 import { space } from '@/design/tokens';
-import { recordingDir } from '@/hardware/recording/paths';
+import {
+  listAudioInputs,
+  startRecordingForegroundService,
+  stopRecordingForegroundService,
+} from '@/hardware/recording/foreground';
+import { recordingDir, segmentIndexFromUri, segmentPath } from '@/hardware/recording/paths';
 import { log } from '@/services/logger';
 import { useMeetings } from '@/state/meetingsStore';
 import { formatDuration, formatTime } from '@/utils/format';
 
-/** Save the transcript to disk at most this often while recording. */
 const SAVE_EVERY_MS = 5000;
-/** If no recogniser event arrives for this long, assume a silent stall and restart. */
-const STALL_MS = 30000;
-/** Wait before restarting a session so the recogniser isn't still busy. */
-const RESTART_DELAY_MS = 400;
-const RESTART_DELAY_BUSY_MS = 1500;
+const STALL_MS = 45000;
+const MAX_FILE_MS = 10 * 60 * 1000;
+const RESTART_DELAY_MS = 500;
+const RESTART_DELAY_BUSY_MS = 1600;
+const END_FALLBACK_MS = 2500;
+const FINAL_RESULT_TIMEOUT_MS = 6000;
+
+interface EndWaiter {
+  resolve: () => void;
+  timer: ReturnType<typeof setTimeout>;
+}
 
 export default function RecordScreen() {
   const { theme } = useAppTheme();
   const { refresh } = useMeetings();
 
-  const idRef = useRef<string>(newId());
-  const dirRef = useRef<string>('');
-  const langRef = useRef<string>(DEFAULT_LANGUAGE);
-  const onDeviceRef = useRef(true);
-  const startedAtRef = useRef<number>(Date.now());
-
-  const activeRef = useRef(false); // should we keep recognising?
-  const sessionRef = useRef(0); // audio file index
-  const finalRef = useRef(''); // confirmed text
-  const audioUris = useRef<string[]>([]);
-  const lastEventRef = useRef(Date.now());
+  const idRef = useRef(newId());
+  const dirRef = useRef('');
+  const langRef = useRef(DEFAULT_LANGUAGE);
+  const startedAtRef = useRef(0);
+  const sessionStartedAtRef = useRef(0);
+  const activeRef = useRef(false);
+  const meetingCreatedRef = useRef(false);
+  const sessionRef = useRef(0);
+  const restartCountRef = useRef(0);
+  const finalRef = useRef('');
+  const interimRef = useRef('');
+  const lastEventRef = useRef(0);
   const lastSaveRef = useRef(0);
-  const restartTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lastHealthRef = useRef(0);
+  const restartTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const endWaiterRef = useRef<EndWaiter | null>(null);
+  const persistChainRef = useRef<Promise<void>>(Promise.resolve());
   const savingRef = useRef(false);
   const startingRef = useRef(false);
+  const endingSessionRef = useRef(false);
   const busyRef = useRef(false);
+  const sessionErrorRef = useRef<string | undefined>(undefined);
 
   const [finalText, setFinalText] = useState('');
   const [interim, setInterim] = useState('');
   const [elapsed, setElapsed] = useState(0);
   const [listening, setListening] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [meetingCreated, setMeetingCreated] = useState(false);
 
-  /** Persist what we have so a crash or kill can never lose the meeting. */
-  const persist = async (force = false) => {
-    const now = Date.now();
-    if (!force && now - lastSaveRef.current < SAVE_EVERY_MS) return;
-    lastSaveRef.current = now;
-    try {
-      await updateMeeting(idRef.current, {
-        transcript: finalRef.current,
-        durationMs: now - startedAtRef.current,
-        segmentCount: audioUris.current.length,
-        language: langRef.current,
-      });
-    } catch (e) {
-      log.warn('record', 'persist failed', { err: String(e) });
-    }
+  const commitText = (text: string) => {
+    if (!text.trim()) return;
+    finalRef.current = mergeTranscript(finalRef.current, text);
+    interimRef.current = '';
+    setFinalText(finalRef.current);
+    setInterim('');
   };
 
-  const scheduleRestart = (delay: number) => {
-    if (restartTimer.current) clearTimeout(restartTimer.current);
-    restartTimer.current = setTimeout(() => {
+  const persist = (force = false): Promise<void> => {
+    if (!meetingCreatedRef.current) return Promise.resolve();
+    const now = Date.now();
+    if (!force && now - lastSaveRef.current < SAVE_EVERY_MS) return persistChainRef.current;
+    lastSaveRef.current = now;
+    const snapshot = {
+      transcript: finalRef.current,
+      durationMs: now - startedAtRef.current,
+      segmentCount: sessionRef.current + 1,
+      language: langRef.current,
+      restartCount: restartCountRef.current,
+    };
+    persistChainRef.current = persistChainRef.current
+      .catch(() => {})
+      .then(() => updateMeeting(idRef.current, snapshot))
+      .catch((cause) => {
+        log.warn('record', 'checkpoint failed', { err: String(cause) });
+      });
+    return persistChainRef.current;
+  };
+
+  const beginSession = async (index: number) => {
+    if (index > 0) {
+      await finishRecordingSegment(
+        idRef.current,
+        index - 1,
+        segmentPath(dirRef.current, index - 1),
+        sessionErrorRef.current,
+      ).catch(() => {});
+    }
+    const expectedUri = segmentPath(dirRef.current, index);
+    await startRecordingSegment(idRef.current, index, expectedUri);
+    sessionRef.current = index;
+    sessionStartedAtRef.current = Date.now();
+    endingSessionRef.current = false;
+    sessionErrorRef.current = undefined;
+    await updateMeeting(idRef.current, {
+      segmentCount: index + 1,
+      restartCount: restartCountRef.current,
+    });
+    startSession({ dir: dirRef.current, index, lang: langRef.current });
+  };
+
+  const scheduleRestart = (delay: number, reason: string) => {
+    if (!activeRef.current) return;
+    if (restartTimerRef.current) clearTimeout(restartTimerRef.current);
+    restartTimerRef.current = setTimeout(() => {
+      restartTimerRef.current = null;
       if (!activeRef.current) return;
-      sessionRef.current += 1;
-      try {
-        startSession({
-          dir: dirRef.current,
-          index: sessionRef.current,
-          lang: langRef.current,
-          onDevice: onDeviceRef.current,
+      const next = sessionRef.current + 1;
+      restartCountRef.current += 1;
+      beginSession(next)
+        .then(() => log.info('record', 'session restarted', { index: next, reason }))
+        .catch(async (cause) => {
+          const message = cause instanceof Error ? cause.message : String(cause);
+          log.error('record', 'restart failed', { err: message, index: next });
+          await updateMeeting(idRef.current, { lastError: message }).catch(() => {});
+          setError('Recording could not restart. Your audio and transcript checkpoints were kept.');
+          activeRef.current = false;
+          await stopRecordingForegroundService().catch(() => {});
         });
-        lastEventRef.current = Date.now();
-        log.info('record', 'session restarted', { index: sessionRef.current });
-      } catch (e) {
-        log.error('record', 'restart failed', { err: String(e) });
-        setError('Recording stopped unexpectedly. Your text so far is saved.');
-        activeRef.current = false;
-      }
     }, delay);
   };
 
-  // --- live results ---
-  useSpeechRecognitionEvent('result', (e) => {
+  const requestSessionEnd = (reason: string, graceful: boolean) => {
+    if (!activeRef.current || endingSessionRef.current) return;
+    endingSessionRef.current = true;
+    commitText(interimRef.current);
     lastEventRef.current = Date.now();
-    const text = e.results?.[0]?.transcript ?? '';
+    log.info('record', 'ending audio file', { index: sessionRef.current, reason, graceful });
+    if (graceful) stopSession();
+    else abortSession();
+    // Upstream has reported silent interruptions without an end event. This
+    // fallback is cancelled/replaced if end arrives normally.
+    scheduleRestart(END_FALLBACK_MS, `${reason}-fallback`);
+  };
+
+  useSpeechRecognitionEvent('result', (event) => {
+    lastEventRef.current = Date.now();
+    const text = event.results?.[0]?.transcript ?? '';
     if (!text) return;
-    if (e.isFinal) {
-      // Android continuous mode is segmented: each final is a NEW piece.
-      finalRef.current = (finalRef.current + (finalRef.current ? ' ' : '') + text).trim();
-      setFinalText(finalRef.current);
-      setInterim('');
-      persist();
+    if (event.isFinal) {
+      commitText(text);
+      void persist();
     } else {
+      interimRef.current = text;
       setInterim(text);
     }
   });
 
-  useSpeechRecognitionEvent('error', (e) => {
+  useSpeechRecognitionEvent('volumechange', () => {
     lastEventRef.current = Date.now();
-    busyRef.current = e.error === 'busy';
-    // no-speech during a pause is normal — the session ends and we restart.
-    const benign = e.error === 'no-speech' || e.error === 'speech-timeout' || e.error === 'busy';
-    log[benign ? 'info' : 'warn']('record', 'recognition error', { code: e.error, msg: e.message });
   });
 
-  // Any error or natural stop tears the session down; restart to stay continuous.
+  useSpeechRecognitionEvent('languagedetection', (event) => {
+    lastEventRef.current = Date.now();
+    log.debug('record', 'language detected', {
+      language: event.detectedLanguage,
+      confidence: event.confidence,
+    });
+  });
+
+  useSpeechRecognitionEvent('error', (event) => {
+    lastEventRef.current = Date.now();
+    busyRef.current = event.error === 'busy';
+    sessionErrorRef.current = event.error;
+    const benign = event.error === 'no-speech' || event.error === 'speech-timeout' || busyRef.current;
+    log[benign ? 'info' : 'warn']('record', 'recognition error', {
+      code: event.error,
+      nativeCode: event.code,
+      message: event.message,
+      index: sessionRef.current,
+    });
+  });
+
   useSpeechRecognitionEvent('end', () => {
     lastEventRef.current = Date.now();
     setListening(false);
+    endingSessionRef.current = false;
+    const waiter = endWaiterRef.current;
+    if (waiter) {
+      clearTimeout(waiter.timer);
+      endWaiterRef.current = null;
+      waiter.resolve();
+    }
     if (!activeRef.current) return;
-    scheduleRestart(busyRef.current ? RESTART_DELAY_BUSY_MS : RESTART_DELAY_MS);
+    scheduleRestart(busyRef.current ? RESTART_DELAY_BUSY_MS : RESTART_DELAY_MS, 'recognizer-end');
     busyRef.current = false;
   });
 
   useSpeechRecognitionEvent('start', () => {
     lastEventRef.current = Date.now();
     setListening(true);
+    log.info('record', 'recognizer ready', { index: sessionRef.current });
   });
 
-  // Each session writes its own audio file; record the real path it reports.
-  useSpeechRecognitionEvent('audioend', (e) => {
-    if (e?.uri) {
-      audioUris.current.push(e.uri);
-      log.info('record', 'audio segment saved', { count: audioUris.current.length });
-    }
+  useSpeechRecognitionEvent('audioend', (event) => {
+    const index = segmentIndexFromUri(event?.uri) ?? sessionRef.current;
+    void finishRecordingSegment(
+      idRef.current,
+      index,
+      event?.uri ?? null,
+      event?.uri ? sessionErrorRef.current : sessionErrorRef.current ?? 'missing-audio-uri',
+    ).catch((cause) => log.warn('record', 'audio checkpoint metadata failed', { err: String(cause), index }));
+    log.info('record', 'audio file closed', {
+      index,
+      saved: !!event?.uri,
+      errorCode: sessionErrorRef.current,
+    });
   });
 
-  // --- start ---
   useEffect(() => {
     (async () => {
       if (startingRef.current) return;
       startingRef.current = true;
       try {
         const granted = await requestSpeechPermissions();
-        if (!granted) {
-          setError('Microphone permission is needed. Enable it in Settings and try again.');
-          return;
+        if (!granted) throw new Error('Microphone permission was not granted.');
+        if (!supportsOnDevice()) {
+          throw new Error('On-device speech recognition is unavailable. Maina refused the network fallback.');
         }
+
         const dir = recordingDir(idRef.current);
         await FileSystem.makeDirectoryAsync(dir, { intermediates: true });
         dirRef.current = dir;
         langRef.current = await getLanguage();
-        onDeviceRef.current = supportsOnDevice();
-        startedAtRef.current = Date.now();
+        const locales = await getOfflineLocales();
+        const installed = locales.installed.some(
+          (locale) => locale.toLocaleLowerCase() === langRef.current.toLocaleLowerCase(),
+        );
+        log.info('record', 'offline speech check', {
+          language: langRef.current,
+          installed,
+          installedCount: locales.installed.length,
+          supportedCount: locales.supported.length,
+        });
+        if (locales.installed.length > 0 && !installed) {
+          throw new Error(`The ${langRef.current} offline language pack is not installed. Download it in Settings.`);
+        }
 
-        // Create the row up-front so the meeting exists even if we crash later.
+        startedAtRef.current = Date.now();
         await createMeeting({
           id: idRef.current,
           title: `Meeting · ${formatTime(startedAtRef.current)}`,
@@ -170,85 +281,137 @@ export default function RecordScreen() {
           segmentCount: 0,
           status: 'recording',
         });
-
+        meetingCreatedRef.current = true;
+        setMeetingCreated(true);
+        await startRecordingForegroundService();
+        const inputs = await listAudioInputs().catch(() => []);
+        log.info('record', 'audio inputs visible', {
+          inputs: inputs.map((input) => `${input.type}:${input.name}`),
+        });
         activeRef.current = true;
-        await activateKeepAwakeAsync('maina-recording').catch(() => {});
-        startSession({ dir, index: 0, lang: langRef.current, onDevice: onDeviceRef.current });
-        log.info('record', 'started', { id: idRef.current, lang: langRef.current, onDevice: onDeviceRef.current });
-      } catch (e) {
-        setError('Could not start recording.');
-        log.error('record', 'start failed', { err: String(e) });
+        await beginSession(0);
+        log.info('record', 'meeting capture started', {
+          language: langRef.current,
+          segmentMinutes: MAX_FILE_MS / 60000,
+          offlineOnly: true,
+        });
+      } catch (cause) {
+        const message = cause instanceof Error ? cause.message : String(cause);
+        setError(message);
+        activeRef.current = false;
+        await updateMeeting(idRef.current, { status: 'interrupted', lastError: message }).catch(() => {});
+        await stopRecordingForegroundService().catch(() => {});
+        log.error('record', 'capture start failed', { err: message });
       }
     })();
+
     return () => {
       activeRef.current = false;
-      if (restartTimer.current) clearTimeout(restartTimer.current);
-      deactivateKeepAwake('maina-recording').catch(() => {});
+      if (restartTimerRef.current) clearTimeout(restartTimerRef.current);
+      void persist(true);
+      abortSession();
+      void stopRecordingForegroundService().catch(() => {});
     };
   }, []);
 
-  // Timer + stall watchdog (covers silent failures, e.g. an incoming call).
   useEffect(() => {
-    const t = setInterval(() => {
-      setElapsed(Date.now() - startedAtRef.current);
-      if (activeRef.current && Date.now() - lastEventRef.current > STALL_MS) {
-        log.warn('record', 'stalled — forcing restart');
-        lastEventRef.current = Date.now();
-        stopSession();
-        scheduleRestart(RESTART_DELAY_BUSY_MS);
+    const timer = setInterval(() => {
+      const now = Date.now();
+      if (!activeRef.current || startedAtRef.current === 0) return;
+      setElapsed(now - startedAtRef.current);
+      void persist();
+
+      if (now - lastHealthRef.current >= 60000) {
+        lastHealthRef.current = now;
+        log.info('record-health', 'capture heartbeat', {
+          elapsedMs: now - startedAtRef.current,
+          words: transcriptWordCount(finalRef.current),
+          index: sessionRef.current,
+          restarts: restartCountRef.current,
+          listening,
+        });
+      }
+      if (now - sessionStartedAtRef.current >= MAX_FILE_MS) {
+        requestSessionEnd('ten-minute-rotation', true);
+      } else if (now - lastEventRef.current >= STALL_MS) {
+        log.warn('record', 'recognizer heartbeat stalled', {
+          silentMs: now - lastEventRef.current,
+          index: sessionRef.current,
+        });
+        requestSessionEnd('stall-watchdog', false);
       }
     }, 1000);
-    return () => clearInterval(t);
+    return () => clearInterval(timer);
+    // The watchdog reads mutable capture refs by design; rebuilding it for
+    // every helper identity would reset its timing window.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [listening]);
+
+  useEffect(() => {
+    const subscription = AppState.addEventListener('change', (state) => {
+      log.info('record', 'app state changed', { state });
+      if (state !== 'active') void persist(true);
+    });
+    return () => subscription.remove();
   }, []);
 
-  // Save whenever the app is backgrounded.
-  useEffect(() => {
-    const sub = AppState.addEventListener('change', (s) => {
-      if (s !== 'active') persist(true);
+  const waitForRecognizerEnd = (): Promise<void> =>
+    new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        endWaiterRef.current = null;
+        log.warn('record', 'final result timeout', { index: sessionRef.current });
+        abortSession();
+        resolve();
+      }, FINAL_RESULT_TIMEOUT_MS);
+      endWaiterRef.current = { resolve, timer };
     });
-    return () => sub.remove();
-  }, []);
 
   const stopAndSave = async () => {
-    if (savingRef.current) return;
+    if (savingRef.current || !meetingCreatedRef.current) return;
     savingRef.current = true;
     activeRef.current = false;
-    if (restartTimer.current) clearTimeout(restartTimer.current);
+    if (restartTimerRef.current) clearTimeout(restartTimerRef.current);
+    commitText(interimRef.current);
+    const endPromise = waitForRecognizerEnd();
     stopSession();
-    await new Promise((r) => setTimeout(r, 700)); // let the last final land
-    deactivateKeepAwake('maina-recording').catch(() => {});
+    await endPromise;
+    await stopRecordingForegroundService().catch((cause) => {
+      log.warn('record', 'foreground service stop failed', { err: String(cause) });
+    });
 
-    const transcript = (finalRef.current + (interim ? ' ' + interim : '')).trim();
-    finalRef.current = transcript;
     const id = idRef.current;
     try {
       await persist(true);
-      await updateMeeting(id, { status: transcript ? 'transcribed' : 'recorded' });
+      await updateMeeting(id, {
+        transcript: finalRef.current,
+        status: finalRef.current ? 'transcribed' : 'recorded',
+        lastError: null,
+      });
       await refresh();
-      log.info('record', 'saved', {
-        id,
+      log.info('record', 'meeting saved', {
         durationMs: Date.now() - startedAtRef.current,
-        chars: transcript.length,
-        sessions: sessionRef.current + 1,
+        words: transcriptWordCount(finalRef.current),
+        files: sessionRef.current + 1,
+        restarts: restartCountRef.current,
       });
       router.replace(`/meeting/${id}`);
-    } catch (e) {
-      setError('Could not save the recording.');
-      log.error('record', 'save failed', { err: String(e) });
+    } catch (cause) {
+      const message = cause instanceof Error ? cause.message : String(cause);
+      setError('Maina could not finish the database checkpoint. Your WAV files remain on the phone.');
+      log.error('record', 'meeting save failed', { err: message });
       savingRef.current = false;
     }
   };
 
   const cancel = async () => {
     activeRef.current = false;
-    if (restartTimer.current) clearTimeout(restartTimer.current);
-    stopSession();
-    deactivateKeepAwake('maina-recording').catch(() => {});
-    const { deleteMeeting } = await import('@/data/meetings');
-    await deleteMeeting(idRef.current).catch(() => {});
+    if (restartTimerRef.current) clearTimeout(restartTimerRef.current);
+    abortSession();
+    await stopRecordingForegroundService().catch(() => {});
+    if (meetingCreatedRef.current) await deleteMeeting(idRef.current).catch(() => {});
     if (dirRef.current) await FileSystem.deleteAsync(dirRef.current, { idempotent: true }).catch(() => {});
     await refresh();
-    log.info('record', 'cancelled');
+    log.info('record', 'meeting discarded');
     router.back();
   };
 
@@ -257,10 +420,16 @@ export default function RecordScreen() {
       <View style={[styles.container, { backgroundColor: theme.bg }]}>
         <AppText variant="heading" style={styles.center}>Recording problem</AppText>
         <AppText variant="body" muted style={styles.center}>{error}</AppText>
-        <PrimaryButton label="Save what we have" onPress={stopAndSave} style={{ marginTop: space.lg }} />
-        <Pressable onPress={cancel} style={{ marginTop: space.lg }}>
-          <AppText variant="body" muted>Discard</AppText>
-        </Pressable>
+        {meetingCreated ? (
+          <PrimaryButton label="Save what Maina kept" onPress={stopAndSave} style={{ marginTop: space.lg }} />
+        ) : (
+          <PrimaryButton label="Go back" onPress={() => router.back()} style={{ marginTop: space.lg }} />
+        )}
+        {meetingCreated ? (
+          <Pressable onPress={cancel} style={{ marginTop: space.lg }}>
+            <AppText variant="body" muted>Discard</AppText>
+          </Pressable>
+        ) : null}
       </View>
     );
   }
@@ -269,12 +438,13 @@ export default function RecordScreen() {
     <View style={[styles.screen, { backgroundColor: theme.bg }]}>
       <View style={styles.header}>
         <View style={styles.status}>
-          <View style={[styles.dot, { backgroundColor: listening ? theme.rec : theme.muted }]} />
-          <AppText variant="label" color={listening ? theme.rec : theme.muted}>
-            {listening ? 'LISTENING' : 'RECONNECTING…'}
+          <View style={[styles.dot, { backgroundColor: listening ? theme.rec : theme.warn }]} />
+          <AppText variant="label" color={listening ? theme.rec : theme.warn}>
+            {listening ? 'RECORDING · OFFLINE' : 'RECOVERING SPEECH…'}
           </AppText>
         </View>
         <AppText variant="display" style={styles.timer}>{formatDuration(elapsed)}</AppText>
+        <AppText variant="label" muted>Background service active · audio checkpoints every 10 minutes</AppText>
       </View>
 
       <ScrollView style={styles.transcriptBox} contentContainerStyle={{ padding: space.lg }}>
@@ -285,7 +455,7 @@ export default function RecordScreen() {
           </AppText>
         ) : (
           <AppText variant="body" muted style={styles.center}>
-            Start speaking — your words appear here live.
+            Maina is keeping the audio. Live words appear here when the on-device recognizer is confident.
           </AppText>
         )}
       </ScrollView>
@@ -303,7 +473,7 @@ export default function RecordScreen() {
 const styles = StyleSheet.create({
   screen: { flex: 1, paddingTop: space.xxxl },
   container: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: space.xl, gap: space.md },
-  header: { alignItems: 'center', gap: space.sm, paddingVertical: space.lg },
+  header: { alignItems: 'center', gap: space.sm, paddingVertical: space.lg, paddingHorizontal: space.lg },
   status: { flexDirection: 'row', alignItems: 'center', gap: space.sm },
   dot: { width: 10, height: 10, borderRadius: 5 },
   timer: { fontSize: 56, lineHeight: 62, fontVariant: ['tabular-nums'] },

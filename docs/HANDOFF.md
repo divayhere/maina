@@ -1,7 +1,7 @@
 # Maina — Full Context & Handoff Pack
 
 **For:** whoever picks up development next (Codex/other agent/human).
-**State:** v0.6.0 — experimental baseline. Locally verified (typecheck/bundle/prebuild), **never installed on a device**. Do not trust it for a real meeting.
+**State:** v0.7.0 release candidate is implemented on `codex/reliability-v0.7`. See ADR 0005 and the changelog; the detailed v0.6 audit below remains historical evidence. Device endurance testing is still required before trusting a real meeting.
 **Date:** 18 Aug 2026
 
 ---
@@ -12,10 +12,10 @@ These credentials were pasted into a chat transcript and must be **rotated/revok
 
 1. **GitHub fine-grained PAT** (`github_pat_11BSD…`) — repo `divayhere/maina`, Contents R/W. Revoke at GitHub → Settings → Developer settings → Personal access tokens.
 2. **Supabase Management token** (`sbp_…`) — full account access. Revoke at supabase.com/dashboard/account/tokens.
-3. **Expo robot token** (`JehmEi0P…`) — revoke at expo.dev → account → Access tokens.
+3. **Expo tokens pasted in chat** — revoke all exposed tokens at expo.dev → account → Access tokens after this authorized build.
 4. **Supabase RLS is currently unsafe.** The `device_logs` table has an `anon can read logs` SELECT policy. The anon key is embedded in the APK, so **anyone with the APK can read every log**. Fix: drop the SELECT policy, keep insert-only, and read logs via a service-role key from the maintainer side only.
 
-Also: the Supabase anon key + URL are hardcoded at `src/services/remoteConfig.ts`.
+v0.7 removes the embedded key and leaves remote logging disabled until RLS is repaired.
 
 ---
 

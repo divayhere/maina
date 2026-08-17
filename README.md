@@ -1,56 +1,42 @@
-# Welcome to your Expo app 👋
+# Maina
 
-This is an [Expo](https://expo.dev) project created with [`create-expo-app`](https://www.npmjs.com/package/create-expo-app).
+Maina is a private Android meeting recorder for the Pixel 9 Pro: durable local audio, best-effort live Hindi/English/Hinglish transcription, meeting history, and transcript export. It is a personal project, not a public service.
 
-## Get started
+## Current release candidate
 
-1. Install dependencies
+v0.7.0 adds a native microphone foreground service, 10-minute recoverable WAV checkpoints, five-second database/transcript checkpoints, strict on-device speech, interruption recovery, and detailed local Diagnostics.
 
-   ```bash
-   npm install
-   ```
+Android's own documentation does not guarantee `SpeechRecognizer` for continuous multi-hour recognition. Audio is therefore the source of truth; live text is a convenience. Do not trust a critical meeting until the physical-device endurance checklist in ADR 0005 has passed.
 
-2. Start the app
+## Development
 
-   ```bash
-   npx expo start
-   ```
-
-In the output, you'll find options to open the app in a
-
-- [development build](https://docs.expo.dev/develop/development-builds/introduction/)
-- [Android emulator](https://docs.expo.dev/workflow/android-studio-emulator/)
-- [iOS simulator](https://docs.expo.dev/workflow/ios-simulator/)
-- [Expo Go](https://expo.dev/go), a limited sandbox for trying out app development with Expo
-
-You can start developing by editing the files inside the **app** directory. This project uses [file-based routing](https://docs.expo.dev/router/introduction).
-
-## Get a fresh project
-
-When you're ready, run:
+Requirements: Node compatible with Expo SDK 57, npm, and network access for dependencies. A native development build or APK is required; Expo Go cannot load the local recorder module.
 
 ```bash
-npm run reset-project
+npm install
+npm run check
 ```
 
-This command will move the starter code to the **app-example** directory and create a blank **app** directory where you can start developing.
+Useful commands:
 
-### Other setup steps
+```bash
+npm run typecheck
+npm test
+npm run lint
+npx expo export --platform android
+```
 
-- To set up ESLint for linting, run `npx expo lint`, or follow our guide on ["Using ESLint and Prettier"](https://docs.expo.dev/guides/using-eslint/)
-- If you'd like to set up unit testing, follow our guide on ["Unit Testing with Jest"](https://docs.expo.dev/develop/unit-testing/)
-- Learn more about the TypeScript setup in this template in our guide on ["Using TypeScript"](https://docs.expo.dev/guides/typescript/)
+EAS builds are intentionally submitted only after the local gate passes and the owner explicitly authorizes a build.
 
-## Learn more
+## Architecture and decisions
 
-To learn more about developing your project with Expo, look at the following resources:
+- `docs/decisions/0005-durable-background-capture.md` — current recording architecture and residual risks.
+- `docs/CHANGELOG.md` — version history.
+- `docs/HANDOFF.md` — product context, audit evidence, and security notes.
+- `src/core/transcription/` — swappable speech wrapper and transcript merge logic.
+- `modules/maina-recorder/` — app-owned Android foreground/recovery module.
+- `patches/` — reviewed upstream package patch applied after every install.
 
-- [Expo documentation](https://docs.expo.dev/): Learn fundamentals, or go into advanced topics with our [guides](https://docs.expo.dev/guides).
-- [Learn Expo tutorial](https://docs.expo.dev/tutorial/introduction/): Follow a step-by-step tutorial where you'll create a project that runs on Android, iOS, and the web.
+## Privacy
 
-## Join the community
-
-Join our community of developers creating universal apps.
-
-- [Expo on GitHub](https://github.com/expo/expo): View our open source platform and contribute.
-- [Discord community](https://chat.expo.dev): Chat with Expo users and ask questions.
+Speech is forced on-device. Android Auto Backup is disabled. Supabase remote logging is disabled until its anonymous read policy is removed. Never commit provider, Expo, GitHub, Supabase management, Sentry, or LLM API tokens.

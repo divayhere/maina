@@ -12,6 +12,7 @@ import { formatDateTime, formatDuration } from '@/utils/format';
 
 const STATUS_LABEL: Record<string, string> = {
   recording: 'Recording',
+  interrupted: 'Recovered',
   recorded: 'Recorded',
   transcribing: 'Transcribing',
   transcribed: 'Transcript',

@@ -1,17 +1,27 @@
 import { Ionicons } from '@expo/vector-icons';
+import * as Clipboard from 'expo-clipboard';
 import * as FileSystem from 'expo-file-system/legacy';
 import { router, useFocusEffect, useLocalSearchParams } from 'expo-router';
 import { useSpeechRecognitionEvent } from 'expo-speech-recognition';
 import { useCallback, useRef, useState } from 'react';
-import { ActivityIndicator, Alert, Pressable, ScrollView, StyleSheet, View } from 'react-native';
+import { ActivityIndicator, Alert, Pressable, ScrollView, Share, StyleSheet, View } from 'react-native';
 
-import { startFileSession, stopSession } from '@/core/transcription/nativeSpeech';
-import { deleteMeeting, getMeeting, updateMeeting, type Meeting } from '@/data/meetings';
+import { startFileSession, stopSession, supportsOnDevice } from '@/core/transcription/nativeSpeech';
+import { mergeTranscript } from '@/core/transcription/transcript';
+import {
+  deleteMeeting,
+  getMeeting,
+  listRecordingSegments,
+  updateMeeting,
+  type Meeting,
+  type RecordingSegment,
+} from '@/data/meetings';
 import { getLanguage } from '@/data/settings';
 import { AppText, Card } from '@/design/components';
 import { useAppTheme } from '@/design/theme';
 import { radius, space } from '@/design/tokens';
 import { segmentPath } from '@/hardware/recording/paths';
+import { repairWavFiles } from '@/hardware/recording/foreground';
 import { log } from '@/services/logger';
 import { useMeetings } from '@/state/meetingsStore';
 import { formatDateTime, formatDuration } from '@/utils/format';
@@ -23,12 +33,16 @@ export default function MeetingDetail() {
   const [meeting, setMeeting] = useState<Meeting | null>(null);
   const [repassing, setRepassing] = useState(false);
   const [repassIdx, setRepassIdx] = useState(0);
+  const [repassError, setRepassError] = useState<string | null>(null);
 
   const repassRef = useRef(false);
   const idxRef = useRef(0);
   const textRef = useRef('');
   const meetingRef = useRef<Meeting | null>(null);
   const langRef = useRef('');
+  const segmentsRef = useRef<RecordingSegment[]>([]);
+  const errorRef = useRef<string | null>(null);
+  const retriesRef = useRef<Record<number, number>>({});
 
   const load = useCallback(() => {
     if (id)
@@ -44,18 +58,67 @@ export default function MeetingDetail() {
   useSpeechRecognitionEvent('result', (e) => {
     if (!repassRef.current) return;
     const t = e.results?.[0]?.transcript ?? '';
-    if (e.isFinal && t) textRef.current = (textRef.current + ' ' + t).trim();
+    if (e.isFinal && t) textRef.current = mergeTranscript(textRef.current, t);
   });
+
+  useSpeechRecognitionEvent('error', (event) => {
+    if (!repassRef.current) return;
+    errorRef.current = event.error;
+    log.warn('meeting', 'saved-audio recognition error', {
+      index: idxRef.current,
+      code: event.error,
+      nativeCode: event.code,
+    });
+  });
+
+  async function finishRepass() {
+    if (!id) return;
+    const text = textRef.current.trim();
+    if (text) {
+      await updateMeeting(id, {
+        transcript: text,
+        status: 'transcribed',
+        transcribedSegments: segmentsRef.current.length,
+        lastError: null,
+      });
+      log.info('meeting', 'saved-audio pass complete', { chars: text.length, files: segmentsRef.current.length });
+    } else {
+      log.warn('meeting', 're-pass produced no text', { id });
+    }
+    load();
+    await refresh();
+  }
 
   useSpeechRecognitionEvent('end', () => {
     if (!repassRef.current) return;
     const m = meetingRef.current;
     if (!m) return;
+    if (errorRef.current) {
+      const attempts = retriesRef.current[idxRef.current] ?? 0;
+      if (attempts < 2) {
+        retriesRef.current[idxRef.current] = attempts + 1;
+        const retryIndex = idxRef.current;
+        const code = errorRef.current;
+        errorRef.current = null;
+        log.info('meeting', 'retrying saved audio', { index: retryIndex, attempt: attempts + 1, code });
+        setTimeout(() => {
+          if (!repassRef.current) return;
+          startFileSession({ uri: segmentsRef.current[retryIndex].audioUri, lang: langRef.current });
+        }, 1000 * (attempts + 1));
+        return;
+      }
+      const failedCode = errorRef.current;
+      repassRef.current = false;
+      setRepassing(false);
+      setRepassError(`Part ${idxRef.current + 1} failed after 3 attempts (${failedCode}). The original transcript was kept.`);
+      void updateMeeting(m.id, { status: m.transcript ? 'transcribed' : 'recorded', lastError: failedCode });
+      return;
+    }
     const next = idxRef.current + 1;
-    if (next < m.segmentCount) {
+    if (next < segmentsRef.current.length) {
       idxRef.current = next;
       setRepassIdx(next);
-      startFileSession({ uri: segmentPath(m.audioUri!, next), lang: langRef.current });
+      startFileSession({ uri: segmentsRef.current[next].audioUri, lang: langRef.current });
     } else {
       repassRef.current = false;
       setRepassing(false);
@@ -63,36 +126,67 @@ export default function MeetingDetail() {
     }
   });
 
-  const finishRepass = async () => {
-    if (!id) return;
-    const text = textRef.current.trim();
-    if (text) {
-      await updateMeeting(id, { transcript: text, status: 'transcribed' });
-      log.info('meeting', 're-pass complete', { id, chars: text.length });
-    } else {
-      log.warn('meeting', 're-pass produced no text', { id });
-    }
-    load();
-    await refresh();
-  };
-
   const startRepass = async () => {
     const m = meetingRef.current;
     if (!m?.audioUri || m.segmentCount === 0) return;
+    setRepassError(null);
+    if (!supportsOnDevice()) {
+      setRepassError('On-device speech is unavailable. Maina refused to upload the meeting audio.');
+      return;
+    }
     langRef.current = await getLanguage();
+    let segments = await listRecordingSegments(m.id);
+    if (segments.length === 0) {
+      // Compatibility with recordings made before the segment table existed.
+      segments = Array.from({ length: m.segmentCount }, (_, index) => ({
+        meetingId: m.id,
+        index,
+        audioUri: segmentPath(m.audioUri!, index),
+        startedAt: m.startedAt,
+        status: 'recorded' as const,
+      }));
+    }
+    await repairWavFiles(segments.map((segment) => segment.audioUri));
+    segmentsRef.current = segments;
     textRef.current = '';
     idxRef.current = 0;
+    errorRef.current = null;
+    retriesRef.current = {};
     setRepassIdx(0);
     repassRef.current = true;
     setRepassing(true);
-    log.info('meeting', 're-pass start', { id, segments: m.segmentCount, lang: langRef.current });
-    startFileSession({ uri: segmentPath(m.audioUri, 0), lang: langRef.current });
+    await updateMeeting(m.id, { status: 'transcribing', lastError: null });
+    log.info('meeting', 'saved-audio pass started', { files: segments.length, lang: langRef.current });
+    startFileSession({ uri: segments[0].audioUri, lang: langRef.current });
   };
 
   const cancelRepass = () => {
     repassRef.current = false;
     setRepassing(false);
     stopSession();
+    const m = meetingRef.current;
+    if (m) void updateMeeting(m.id, { status: m.transcript ? 'transcribed' : 'recorded' });
+  };
+
+  const copyTranscript = async () => {
+    if (!meeting?.transcript) return;
+    await Clipboard.setStringAsync(meeting.transcript);
+    Alert.alert('Copied', 'The complete transcript is on your clipboard.');
+  };
+
+  const shareMeeting = async () => {
+    if (!meeting) return;
+    const body = [
+      `# ${meeting.title}`,
+      '',
+      `_${formatDateTime(meeting.startedAt)} · ${formatDuration(meeting.durationMs)}_`,
+      '',
+      '## Transcript',
+      '',
+      meeting.transcript || '_No transcript_',
+      meeting.summary ? `\n\n## Summary\n\n${meeting.summary}` : '',
+    ].join('\n');
+    await Share.share({ title: meeting.title, message: body });
   };
 
   const deleteAudio = async () => {
@@ -175,6 +269,19 @@ export default function MeetingDetail() {
               </AppText>
             </Pressable>
           ) : null}
+
+          {repassError ? <AppText variant="body" color={theme.warn}>{repassError}</AppText> : null}
+
+          {hasText ? (
+            <View style={{ flexDirection: 'row', gap: space.lg, flexWrap: 'wrap' }}>
+              <Pressable onPress={copyTranscript}>
+                <AppText variant="label" color={theme.accent}>Copy all</AppText>
+              </Pressable>
+              <Pressable onPress={shareMeeting}>
+                <AppText variant="label" color={theme.accent}>Share as Markdown</AppText>
+              </Pressable>
+            </View>
+          ) : null}
         </Card>
 
         <Card style={{ gap: space.sm }}>
@@ -182,7 +289,7 @@ export default function MeetingDetail() {
           <AppText variant="body" muted>
             {meeting?.summary
               ? meeting.summary
-              : 'Summaries and to-dos arrive in Phase 3, generated by your chosen AI.'}
+              : 'Not generated yet. Maina keeps this manual so no meeting text leaves your phone without your action.'}
           </AppText>
         </Card>
 

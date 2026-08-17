@@ -1,12 +1,20 @@
 import { Ionicons } from '@expo/vector-icons';
+import Constants from 'expo-constants';
+import * as Device from 'expo-device';
 import { router } from 'expo-router';
 import { useCallback, useEffect, useState } from 'react';
 import { Pressable, ScrollView, Share, StyleSheet, View } from 'react-native';
 
 import { AppText, PrimaryButton } from '@/design/components';
+import { supportsOnDevice } from '@/core/transcription/nativeSpeech';
 import { useAppTheme } from '@/design/theme';
 import { space } from '@/design/tokens';
+import {
+  isRecordingForegroundServiceRunning,
+  listAudioInputs,
+} from '@/hardware/recording/foreground';
 import { log } from '@/services/logger';
+import { REMOTE_LOG } from '@/services/remoteConfig';
 import { readPersistedLog } from '@/services/watchdog';
 
 export default function Diagnostics() {
@@ -16,8 +24,21 @@ export default function Diagnostics() {
   const refresh = useCallback(async () => {
     const live = log.dump();
     const persisted = await readPersistedLog();
+    const inputs = await listAudioInputs().catch(() => []);
+    const snapshot = [
+      '=== MAINA HEALTH SNAPSHOT ===',
+      `capturedAt=${new Date().toISOString()}`,
+      `version=${Constants.expoConfig?.version ?? 'unknown'}`,
+      `device=${Device.manufacturer ?? ''} ${Device.modelName ?? ''}`.trim(),
+      `os=${Device.osName ?? ''} ${Device.osVersion ?? ''}`.trim(),
+      `onDeviceSpeech=${supportsOnDevice()}`,
+      `foregroundRecording=${isRecordingForegroundServiceRunning()}`,
+      `remoteLogging=${REMOTE_LOG.enabled ? 'enabled' : 'disabled-for-privacy'}`,
+      `audioInputs=${inputs.map((input) => `${input.type}:${input.name}`).join(', ') || 'none reported'}`,
+      '=== STRUCTURED LOG ===',
+    ].join('\n');
     // Prefer the richer of the two.
-    setText(live.length >= persisted.length ? live : persisted);
+    setText(`${snapshot}\n${live.length >= persisted.length ? live : persisted}`);
   }, []);
 
   useEffect(() => {

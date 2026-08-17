@@ -1,0 +1,316 @@
+diff --git a/node_modules/expo-speech-recognition/android/src/main/java/expo/modules/speechrecognition/ExpoAudioRecorder.kt b/node_modules/expo-speech-recognition/android/src/main/java/expo/modules/speechrecognition/ExpoAudioRecorder.kt
+index aaa462a..355bd91 100644
+--- a/node_modules/expo-speech-recognition/android/src/main/java/expo/modules/speechrecognition/ExpoAudioRecorder.kt
++++ b/node_modules/expo-speech-recognition/android/src/main/java/expo/modules/speechrecognition/ExpoAudioRecorder.kt
+@@ -10,11 +10,12 @@ import android.os.ParcelFileDescriptor.AutoCloseOutputStream
+ import android.os.Build
+ import android.util.Log
+ import androidx.annotation.RequiresApi
++import java.io.BufferedOutputStream
+ import java.io.DataOutputStream
+ import java.io.File
+ import java.io.FileOutputStream
+ import java.io.IOException
+-import java.util.UUID
++import java.io.RandomAccessFile
+ import kotlin.concurrent.thread
+ 
+ interface AudioRecorder {
+@@ -39,13 +40,18 @@ class ExpoAudioRecorder(
+     var outputFile: File? = null
+     var outputFileUri = "file://$outputFilePath"
+ 
+-    /** The file where the mic stream is being output to */
+-    private val tempPcmFile: File
++    /** A valid, incrementally checkpointed WAV file; no stop-time copy is required. */
++    private val wavFile: File?
+     val recordingParcel: ParcelFileDescriptor
+     private var outputStream: AutoCloseOutputStream?
+ 
+     init {
+-        tempPcmFile = createTempPcmFile()
++        wavFile = outputFilePath?.let { path ->
++            File(path).apply {
++                parentFile?.mkdirs()
++                initialiseWav(this)
++            }
++        }
+         try {
+             val pipe = ParcelFileDescriptor.createPipe()
+             recordingParcel = pipe[0]
+@@ -73,62 +79,44 @@ class ExpoAudioRecorder(
+                 .reverseBytes(s)
+                 .toInt()
+ 
+-        fun appendWavHeader(
+-            outputFilePath: String,
+-            pcmFile: File,
+-            sampleRateInHz: Int,
+-        ): File {
+-            val outputFile = File(outputFilePath)
+-            val audioDataLength = pcmFile.length()
+-            val numChannels = 1
+-            val bitsPerSample = 16
+-
+-            DataOutputStream(FileOutputStream(outputFile)).use { out ->
+-                val totalDataLen = 36 + audioDataLength
+-                val byteRate = sampleRateInHz * numChannels * bitsPerSample / 8
+-                val blockAlign = numChannels * bitsPerSample / 8
+-
+-                // Write the RIFF chunk descriptor
+-                out.writeBytes("RIFF") // ChunkID
+-                out.writeInt(Integer.reverseBytes(totalDataLen.toInt())) // ChunkSize
+-                out.writeBytes("WAVE")
+-                out.writeBytes("fmt ")
+-                out.writeInt(Integer.reverseBytes(16)) // Subchunk1Size (16 for PCM)
+-                out.writeShort(shortReverseBytes(1)) // AudioFormat (1 for PCM)
+-                out.writeShort(shortReverseBytes(numChannels.toShort())) // NumChannels
+-                out.writeInt(Integer.reverseBytes(sampleRateInHz)) // SampleRate
+-                out.writeInt(Integer.reverseBytes(byteRate)) // ByteRate
+-                out.writeShort(shortReverseBytes(blockAlign.toShort())) // BlockAlign
+-                out.writeShort(shortReverseBytes(bitsPerSample.toShort())) // BitsPerSample
+-
+-                // Write the data sub-chunk
+-                out.writeBytes("data")
+-                out.writeInt(Integer.reverseBytes(audioDataLength.toInt()))
+-
+-                try {
+-                    val pcmData = pcmFile.readBytes()
+-                    out.write(pcmData)
+-                    pcmFile.delete()
+-                } catch (e: IOException) {
+-                    Log.e(TAG, "Failed to read PCM file", e)
+-                    e.printStackTrace()
+-                }
++        private fun initialiseWav(file: File) {
++            DataOutputStream(FileOutputStream(file, false)).use { out ->
++                writeHeader(out, 0L, 16000)
+             }
++        }
+ 
+-            return outputFile
++        private fun writeHeader(out: DataOutputStream, audioDataLength: Long, sampleRateInHz: Int) {
++            val numChannels = 1
++            val bitsPerSample = 16
++            val totalDataLen = 36L + audioDataLength
++            require(totalDataLen <= 0xffffffffL) { "WAV file exceeds the RIFF size limit" }
++            val byteRate = sampleRateInHz * numChannels * bitsPerSample / 8
++            val blockAlign = numChannels * bitsPerSample / 8
++            out.writeBytes("RIFF")
++            out.writeInt(Integer.reverseBytes(totalDataLen.toInt()))
++            out.writeBytes("WAVE")
++            out.writeBytes("fmt ")
++            out.writeInt(Integer.reverseBytes(16))
++            out.writeShort(shortReverseBytes(1))
++            out.writeShort(shortReverseBytes(numChannels.toShort()))
++            out.writeInt(Integer.reverseBytes(sampleRateInHz))
++            out.writeInt(Integer.reverseBytes(byteRate))
++            out.writeShort(shortReverseBytes(blockAlign.toShort()))
++            out.writeShort(shortReverseBytes(bitsPerSample.toShort()))
++            out.writeBytes("data")
++            out.writeInt(Integer.reverseBytes(audioDataLength.toInt()))
+         }
+-    }
+ 
+-    private fun createTempPcmFile(): File {
+-        val file = File(context.cacheDir, "temp_${UUID.randomUUID()}.pcm")
+-        if (!file.exists()) {
+-            try {
+-                file.createNewFile()
+-            } catch (e: IOException) {
+-                e.printStackTrace()
++        private fun checkpointHeader(file: File) {
++            val audioDataLength = (file.length() - 44L).coerceAtLeast(0L)
++            if (audioDataLength > 0xffffffffL - 36L) return
++            RandomAccessFile(file, "rw").use { wav ->
++                wav.seek(4L)
++                wav.writeInt(Integer.reverseBytes((36L + audioDataLength).toInt()))
++                wav.seek(40L)
++                wav.writeInt(Integer.reverseBytes(audioDataLength.toInt()))
+             }
+         }
+-        return file
+     }
+ 
+     @SuppressLint("MissingPermission")
+@@ -163,22 +151,29 @@ class ExpoAudioRecorder(
+ 
+     override fun stop() {
+         isRecordingAudio = false
+-        audioRecorder?.stop()
++        try {
++            audioRecorder?.stop()
++        } catch (_: IllegalStateException) {}
++        // A pipe write can remain blocked after AudioRecord stops. Closing the
++        // writer first guarantees the capture thread can reach its WAV flush.
++        try {
++            outputStream?.close()
++            outputStream = null
++        } catch (_: IOException) {}
++        val thread = recordingThread
++        if (thread != null && thread !== Thread.currentThread()) {
++            try {
++                thread.join(5000)
++            } catch (_: InterruptedException) {
++                Thread.currentThread().interrupt()
++            }
++        }
+         audioRecorder?.release()
+         audioRecorder = null
+         recordingThread = null
+-        if (outputFilePath != null) {
+-            try {
+-                outputFile =
+-                    appendWavHeader(
+-                        outputFilePath,
+-                        tempPcmFile,
+-                        sampleRateInHz,
+-                    )
+-            } catch (e: IOException) {
+-                Log.e(TAG, "Failed to append WAV header", e)
+-                e.printStackTrace()
+-            }
++        wavFile?.let {
++            checkpointHeader(it)
++            outputFile = it
+         }
+         // Close the ParcelFileDescriptor
+         try {
+@@ -186,74 +181,83 @@ class ExpoAudioRecorder(
+         } catch (e: IOException) {
+             e.printStackTrace()
+         }
+-        // And the output stream
+-        try {
+-            outputStream?.close()
+-            outputStream = null
+-        } catch (e: IOException) {
+-            e.printStackTrace()
+-        }
+     }
+ 
+     private fun streamAudioToPipe() {
+-        val tempFileOutputStream = FileOutputStream(tempPcmFile)
++        val wavOutputStream = wavFile?.let {
++            BufferedOutputStream(FileOutputStream(it, true), 64 * 1024)
++        }
+         val data = ByteArray(bufferSizeInBytes)
++        var bytesSinceCheckpoint = 0L
++        // A process kill loses at most five seconds from the WAV header length.
++        val checkpointBytes = sampleRateInHz * 2L * 5L
+ 
+-        while (isRecordingAudio) {
+-            val recorder = audioRecorder ?: break
+-
+-            val read =
+-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+-                    // avoid empty reads
+-                    recorder.read(data, 0, data.size, AudioRecord.READ_BLOCKING)
+-                } else {
+-                    recorder.read(data, 0, data.size)
+-                }
+-
+-            when {
+-                read > 0 -> {
+-                    try {
+-                        outputStream?.write(data, 0, read)
+-                        outputStream?.flush()
++        try {
++            while (isRecordingAudio) {
++                val recorder = audioRecorder ?: break
++
++                val read =
++                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
++                        recorder.read(data, 0, data.size, AudioRecord.READ_BLOCKING)
++                    } else {
++                        recorder.read(data, 0, data.size)
++                    }
+ 
+-                        // Write to the temp PCM file
+-                        if (outputFilePath != null) {
+-                            tempFileOutputStream.write(data, 0, read)
+-                            tempFileOutputStream.flush()
++                when {
++                    read > 0 -> {
++                        try {
++                            outputStream?.write(data, 0, read)
++                            wavOutputStream?.write(data, 0, read)
++                            bytesSinceCheckpoint += read
++                            if (bytesSinceCheckpoint >= checkpointBytes) {
++                                wavOutputStream?.flush()
++                                wavFile?.let(::checkpointHeader)
++                                bytesSinceCheckpoint = 0L
++                            }
++                        } catch (e: IOException) {
++                            Log.e(TAG, "Failed to write microphone audio", e)
++                            break
+                         }
+-                    } catch (e: IOException) {
+-                        Log.e(TAG, "Failed to write to output stream", e)
+-                        e.printStackTrace()
+                     }
+-                }
+ 
+-                // (this should only happen on API 22 and below)
+-                read == 0 -> {
+-                    try {
+-                        Thread.sleep(10)
+-                    } catch (_: InterruptedException) {}
+-                }
++                    read == 0 -> {
++                        try {
++                            Thread.sleep(10)
++                        } catch (_: InterruptedException) {
++                            Thread.currentThread().interrupt()
++                            break
++                        }
++                    }
+ 
+-                read == AudioRecord.ERROR_DEAD_OBJECT -> {
+-                    Log.w(TAG, "AudioRecord returned ERROR_DEAD_OBJECT; breaking out of the loop")
+-                    // todo: we should probably emit an error event here
+-                    break
+-                }
++                    read == AudioRecord.ERROR_DEAD_OBJECT -> {
++                        Log.w(TAG, "AudioRecord returned ERROR_DEAD_OBJECT; ending capture")
++                        break
++                    }
+ 
+-                read == AudioRecord.ERROR_INVALID_OPERATION || read == AudioRecord.ERROR_BAD_VALUE -> {
+-                    Log.w(TAG, "AudioRecord read error: $read; backing off briefly")
+-                    try {
+-                        Thread.sleep(10)
+-                    } catch (_: InterruptedException) {}
+-                }
++                    read == AudioRecord.ERROR_INVALID_OPERATION || read == AudioRecord.ERROR_BAD_VALUE -> {
++                        Log.w(TAG, "AudioRecord read error: $read; backing off briefly")
++                        try {
++                            Thread.sleep(10)
++                        } catch (_: InterruptedException) {
++                            Thread.currentThread().interrupt()
++                            break
++                        }
++                    }
+ 
+-                else -> {
+-                    // todo: we should probably emit an error event here
+-                    Log.w(TAG, "AudioRecord read returned '$read'; breaking out of the loop")
+-                    break
++                    else -> {
++                        Log.w(TAG, "AudioRecord read returned '$read'; ending capture")
++                        break
++                    }
+                 }
+             }
++        } finally {
++            try {
++                wavOutputStream?.flush()
++                wavOutputStream?.close()
++                wavFile?.let(::checkpointHeader)
++            } catch (e: IOException) {
++                Log.e(TAG, "Failed to finalize WAV checkpoint", e)
++            }
+         }
+-        tempFileOutputStream.close()
+     }
+ }

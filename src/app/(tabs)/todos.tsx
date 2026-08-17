@@ -14,7 +14,7 @@ export default function TodosScreen() {
       <EmptyState
         emoji="✅"
         title="Your to-dos will gather here"
-        subtitle="They're created automatically when a meeting is summarized — arriving in Phase 3."
+        subtitle="This stays empty until summary generation is configured. Maina will never upload a transcript automatically."
       />
     </View>
   );

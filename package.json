@@ -1,18 +1,18 @@
 {
   "name": "maina",
   "main": "expo-router/entry",
-  "version": "1.0.0",
+  "version": "0.7.0",
   "dependencies": {
     "@expo/ui": "~57.0.11",
     "@expo/vector-icons": "^15.0.2",
     "expo": "~57.0.14",
+    "expo-clipboard": "~57.0.1",
     "expo-constants": "~57.0.11",
     "expo-device": "~57.0.1",
     "expo-file-system": "~57.0.4",
     "expo-font": "~57.0.1",
     "expo-glass-effect": "~57.0.1",
     "expo-image": "~57.0.3",
-    "expo-keep-awake": "~57.0.1",
     "expo-linking": "~57.0.6",
     "expo-router": "~57.0.14",
     "expo-speech-recognition": "^56.0.1",
@@ -35,7 +35,12 @@
   },
   "devDependencies": {
     "@types/react": "~19.2.2",
-    "typescript": "~6.0.3"
+    "eslint": "^9.39.5",
+    "eslint-config-expo": "~57.0.1",
+    "eslint-import-resolver-typescript": "^4.4.5",
+    "patch-package": "^8.0.1",
+    "typescript": "~6.0.3",
+    "vitest": "^4.1.10"
   },
   "scripts": {
     "start": "expo start",
@@ -43,7 +48,16 @@
     "android": "expo run:android",
     "ios": "expo run:ios",
     "web": "expo start --web",
-    "lint": "expo lint"
+    "lint": "expo lint",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "check": "npm run typecheck && npm run test && npm run lint && npx expo-doctor@latest",
+    "postinstall": "patch-package"
+  },
+  "expo": {
+    "autolinking": {
+      "nativeModulesDir": "./modules"
+    }
   },
   "private": true
 }

@@ -18,7 +18,7 @@ export interface AppConfig {
 }
 
 export const DEFAULT_CONFIG: AppConfig = {
-  autoSummarize: true,
+  autoSummarize: false,
   keepAudioAfterTranscript: true,
   providerId: DEFAULT_PROVIDER_ID,
   exportFormat: 'md',

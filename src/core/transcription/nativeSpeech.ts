@@ -2,9 +2,9 @@
  * Primary transcription engine: the phone's own speech recognition
  * (Android SpeechRecognizer via expo-speech-recognition).
  *
- * Why: it streams text live as you speak, runs on the device's dedicated
- * speech hardware, is free forever, works offline, and handles Hindi/English
- * code-switching natively. Whisper on the CPU could never be real-time.
+ * Why: it streams text live as you speak and is the fastest zero-cost path on
+ * the Pixel. Android does not guarantee the hardware used, hours-long uptime,
+ * or code-switch quality, so the durable audio remains the source of truth.
  *
  * Audio is persisted alongside so a Whisper re-pass stays possible.
  */
@@ -62,23 +62,30 @@ export async function downloadOfflineLanguage(locale: string): Promise<string> {
  * silence, internal limits), so the caller restarts with the next index —
  * each session writes its own audio file into the meeting's folder.
  */
-export function startSession(opts: { dir: string; index: number; lang: string; onDevice: boolean }): void {
+export function startSession(opts: { dir: string; index: number; lang: string }): void {
   ExpoSpeechRecognitionModule.start({
     lang: opts.lang,
     interimResults: true,
     continuous: true,
-    requiresOnDeviceRecognition: opts.onDevice,
+    requiresOnDeviceRecognition: true,
     addsPunctuation: true,
-    ...(opts.onDevice ? { androidRecognitionServicePackage: ON_DEVICE_SERVICE } : {}),
+    androidRecognitionServicePackage: ON_DEVICE_SERVICE,
     androidIntentOptions: {
       // Lets the recognizer switch between Hindi and English mid-speech (Hinglish).
       EXTRA_ENABLE_LANGUAGE_SWITCH: 'balanced',
+      EXTRA_ENABLE_LANGUAGE_DETECTION: true,
+      EXTRA_LANGUAGE_SWITCH_ALLOWED_LANGUAGES: ['hi-IN', 'en-IN', 'en-US'],
+      EXTRA_LANGUAGE_DETECTION_ALLOWED_LANGUAGES: ['hi-IN', 'en-IN', 'en-US'],
       EXTRA_MASK_OFFENSIVE_WORDS: false,
     },
     recordingOptions: {
       persist: true,
       outputDirectory: opts.dir,
       outputFileName: segmentName(opts.index),
+    },
+    volumeChangeEventOptions: {
+      enabled: true,
+      intervalMillis: 1000,
     },
   });
 }
@@ -93,10 +100,14 @@ export function startFileSession(opts: { uri: string; lang: string }): void {
     lang: opts.lang,
     interimResults: false,
     continuous: true,
-    requiresOnDeviceRecognition: supportsOnDevice(),
+    requiresOnDeviceRecognition: true,
+    androidRecognitionServicePackage: ON_DEVICE_SERVICE,
     addsPunctuation: true,
     androidIntentOptions: {
       EXTRA_ENABLE_LANGUAGE_SWITCH: 'balanced',
+      EXTRA_ENABLE_LANGUAGE_DETECTION: true,
+      EXTRA_LANGUAGE_SWITCH_ALLOWED_LANGUAGES: ['hi-IN', 'en-IN', 'en-US'],
+      EXTRA_LANGUAGE_DETECTION_ALLOWED_LANGUAGES: ['hi-IN', 'en-IN', 'en-US'],
     },
     audioSource: {
       uri: opts.uri,

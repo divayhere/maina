@@ -81,7 +81,7 @@ export default function SettingsScreen() {
       <Card style={{ gap: space.sm }}>
         <AppText variant="label" muted>SPEECH LANGUAGE</AppText>
         <AppText variant="label" muted style={{ marginBottom: space.xs }}>
-          Transcribes live on your phone. Hindi handles Hinglish (mixed) best.
+          Live text is best-effort; the saved audio is the safety copy. Hindi is the preferred Hinglish mode.
         </AppText>
         {LANGUAGES.map((l) => {
           const sel = lang === l.code;
@@ -134,7 +134,7 @@ export default function SettingsScreen() {
               ? 'Checking on-device support…'
               : onDevice
                 ? 'On-device recognition supported'
-                : 'On-device not available — will use Google servers'}
+                : 'On-device unavailable — recording is blocked to protect privacy'}
           </AppText>
         </View>
       </Card>
@@ -144,7 +144,7 @@ export default function SettingsScreen() {
         <Row label="Provider" value={provider?.label ?? '—'} />
         <Row label="Auto-summarize" value={DEFAULT_CONFIG.autoSummarize ? 'On' : 'Off'} />
         <AppText variant="label" muted style={{ marginTop: space.sm }}>
-          Full provider setup and API keys arrive in Phase 3.
+          Not active in this build. No transcript is sent to an AI provider automatically.
         </AppText>
       </Card>
 
@@ -159,7 +159,8 @@ export default function SettingsScreen() {
       <Card style={{ gap: space.xs }}>
         <AppText variant="label" muted>ABOUT</AppText>
         <Row label="Version" value={version} />
-        <Row label="Engine" value="Phone speech engine (live)" />
+        <Row label="Engine" value="Android on-device speech + durable WAV" />
+        <Row label="Audio files" value="10-minute checkpoints" />
       </Card>
 
       <Pressable onPress={() => router.push('/diagnostics')}>

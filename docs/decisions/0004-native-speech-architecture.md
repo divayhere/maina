@@ -1,6 +1,6 @@
 # ADR 0004 — Native speech engine: validation, risks, and the plan
 
-Status: **Partly superseded by audit — see docs/HANDOFF.md §5** · Date: 2026-08-18 · Version: 0.6.0
+Status: **Superseded by ADR 0005** · Date: 2026-08-18 · Version: 0.6.0
 
 ## Why we changed engines
 

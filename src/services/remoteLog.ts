@@ -28,13 +28,15 @@ let base: Pick<Payload, 'session_id' | 'app_version' | 'device' | 'platform'> | 
 const queue: Payload[] = [];
 let flushing = false;
 let installed = false;
+let retryAfter = 0;
+const MAX_QUEUE = 500;
 
 async function flush(): Promise<void> {
-  if (flushing || queue.length === 0 || !REMOTE_LOG.enabled) return;
+  if (flushing || queue.length === 0 || !REMOTE_LOG.enabled || Date.now() < retryAfter) return;
   flushing = true;
   const batch = queue.splice(0, 50);
   try {
-    await fetch(`${REMOTE_LOG.url}/rest/v1/device_logs`, {
+    const response = await fetch(`${REMOTE_LOG.url}/rest/v1/device_logs`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -44,9 +46,12 @@ async function flush(): Promise<void> {
       },
       body: JSON.stringify(batch),
     });
+    if (!response.ok) throw new Error(`remote log HTTP ${response.status}`);
+    retryAfter = 0;
   } catch {
     // Network hiccup — put them back and try next tick.
     queue.unshift(...batch);
+    retryAfter = Date.now() + 30000;
   } finally {
     flushing = false;
   }
@@ -73,6 +78,7 @@ export function installRemoteLog(): void {
       context: e.context ?? null,
       ...base!,
     });
+    if (queue.length > MAX_QUEUE) queue.splice(0, queue.length - MAX_QUEUE);
     if (queue.length >= 15) flush();
   });
 

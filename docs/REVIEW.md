@@ -4,7 +4,7 @@
 
 **⚠️ PARTLY SUPERSEDED — see docs/HANDOFF.md §5.** An independent audit confirmed several claims here are wrong (notably "transcript saved every 5s" and "never lose a meeting"). Read HANDOFF.md first.
 
-**Status:** v0.6.0, code complete and locally verified, **not yet installed on a device.**
+**Status:** Historical v0.6.0 review. Superseded for implementation details by `docs/decisions/0005-durable-background-capture.md` and the v0.7.0 changelog.
 **Date:** 18 Aug 2026
 
 ---

@@ -3,6 +3,33 @@
 All notable changes to Maina are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions follow [Semantic Versioning](https://semver.org/).
 
+## [0.7.0] — Durable background recording release candidate
+
+### Added
+- A real Android `microphone` foreground service with an ongoing recording notification for screen-off/background capture.
+- Native audio-input inventory in Diagnostics so USB-C/Bluetooth routing can be checked from logs.
+- Per-audio-file SQLite checkpoints, interruption recovery metadata, transactional/idempotent migrations, and WAV repair on next launch.
+- Full transcript copy and Markdown sharing.
+- Vitest transcript-boundary tests plus working TypeScript and ESLint quality gates.
+
+### Fixed
+- Replaced `expo-speech-recognition`'s stop-time whole-file `readBytes()` WAV conversion with incremental disk writing. WAV headers are checkpointed every five seconds, avoiding multi-hour heap spikes and making abrupt-kill recovery possible.
+- Audio files rotate every 10 minutes (~19.2 MB at 16 kHz mono) instead of relying on one unbounded file or 30-second transcription jobs.
+- Stop now waits for the recognizer `end` event with a bounded timeout, retaining the last partial and removing the fixed 700 ms race.
+- Transcript checkpoints now run every five seconds even when Android has not emitted a final result.
+- Saved-audio re-transcription retries failed files and never silently skips one.
+- On-device speech now fails closed: no silent network recognizer fallback.
+- Database startup failures now show a safe retry screen instead of opening a broken app.
+
+### Security
+- Disabled Supabase remote logs until anonymous SELECT is removed from `device_logs`.
+- Removed the embedded legacy Supabase key from source and redacted sensitive log context.
+- Disabled Android Auto Backup for meeting audio/database data.
+
+### Known limits
+- Android explicitly does not guarantee `SpeechRecognizer` for continuous recognition; multi-hour device testing remains mandatory.
+- Speaker diarisation, AI summaries/to-dos, and the physical Bluetooth trigger are not included in this release.
+
 ## [0.6.0] — Robustness pass (validated against reported bugs)
 
 ### Added

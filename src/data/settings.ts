@@ -1,6 +1,6 @@
 /**
- * Persisted key/value settings (SQLite). Currently holds the selected Whisper
- * model so the user can switch models in-app without a rebuild.
+ * Persisted key/value settings (SQLite). Speech language is intentionally
+ * independent from the recognition implementation so engines remain swappable.
  */
 import { getDb } from './db';
 import { DEFAULT_LANGUAGE } from '../core/transcription/nativeSpeech';

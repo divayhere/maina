@@ -25,9 +25,10 @@ export function installWatchdog(): void {
   if (installed) return;
   installed = true;
 
-  // Persist whenever something notable happens.
-  log.addSink((e: LogEntry) => {
-    if (e.level === 'error' || e.level === 'warn') persistSoon();
+  // Persist every event on a short debounce. This retains the lead-up to a
+  // crash, not just the crash line itself.
+  log.addSink((_entry: LogEntry) => {
+    persistSoon();
   });
 
   // Catch uncaught JS errors.
