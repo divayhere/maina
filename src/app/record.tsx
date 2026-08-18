@@ -31,9 +31,11 @@ import {
   listAudioInputs,
   startRecordingForegroundService,
   stopRecordingForegroundService,
+  subscribeAudioRouteChanges,
 } from '@/hardware/recording/foreground';
 import { CaptureHealthTracker } from '@/hardware/recording/health';
 import { recordingDir, segmentIndexFromUri, segmentPath } from '@/hardware/recording/paths';
+import { registerActiveTriggerHandler } from '@/hardware/trigger/hardwareTrigger';
 import { log } from '@/services/logger';
 import {
   clearDiagnosticContext,
@@ -58,6 +60,17 @@ interface EndWaiter {
   timer: ReturnType<typeof setTimeout>;
 }
 
+interface AsrQualityMetrics {
+  finalResults: number;
+  partialResults: number;
+  confidenceSamples: number;
+  confidenceTotal: number;
+  languageSwitchSucceeded: number;
+  languageSwitchFailed: number;
+  detectedEnglish: number;
+  detectedHindi: number;
+}
+
 export default function RecordScreen() {
   const { theme } = useAppTheme();
   const { refresh } = useMeetings();
@@ -69,6 +82,17 @@ export default function RecordScreen() {
   const sessionStartedAtRef = useRef(0);
   const sessionStartsRef = useRef<Record<number, number>>({});
   const healthRef = useRef(new CaptureHealthTracker());
+  const asrQualityRef = useRef<AsrQualityMetrics>({
+    finalResults: 0,
+    partialResults: 0,
+    confidenceSamples: 0,
+    confidenceTotal: 0,
+    languageSwitchSucceeded: 0,
+    languageSwitchFailed: 0,
+    detectedEnglish: 0,
+    detectedHindi: 0,
+  });
+  const lastLanguageLogRef = useRef({ language: '', at: 0 });
   const recordingSessionIdRef = useRef(newId());
   const activeRef = useRef(false);
   const meetingCreatedRef = useRef(false);
@@ -84,6 +108,7 @@ export default function RecordScreen() {
   const persistChainRef = useRef<Promise<void>>(Promise.resolve());
   const artifactQueueRef = useRef<Promise<void>>(Promise.resolve());
   const savingRef = useRef(false);
+  const stopAndSaveRef = useRef<() => Promise<void>>(async () => {});
   const startingRef = useRef(false);
   const endingSessionRef = useRef(false);
   const busyRef = useRef(false);
@@ -190,6 +215,14 @@ export default function RecordScreen() {
     lastEventRef.current = Date.now();
     const text = event.results?.[0]?.transcript ?? '';
     if (!text) return;
+    const quality = asrQualityRef.current;
+    if (event.isFinal) quality.finalResults += 1;
+    else quality.partialResults += 1;
+    const confidence = event.results?.[0]?.confidence;
+    if (typeof confidence === 'number' && confidence > 0) {
+      quality.confidenceSamples += 1;
+      quality.confidenceTotal += confidence;
+    }
     if (event.isFinal) {
       commitText(text);
       void persist();
@@ -205,7 +238,22 @@ export default function RecordScreen() {
 
   useSpeechRecognitionEvent('languagedetection', (event) => {
     lastEventRef.current = Date.now();
-    log.debug('record', 'language detected', {
+    const language = event.detectedLanguage?.toLocaleLowerCase() ?? 'unknown';
+    const quality = asrQualityRef.current;
+    if (language.startsWith('en')) quality.detectedEnglish += 1;
+    if (language.startsWith('hi')) quality.detectedHindi += 1;
+    if (event.languageSwitchResult === 'succeeded') quality.languageSwitchSucceeded += 1;
+    if (event.languageSwitchResult === 'failed' || event.languageSwitchResult === 'skipped-no-model-or-not-allowed') {
+      quality.languageSwitchFailed += 1;
+    }
+    const now = Date.now();
+    const important = event.languageSwitchResult === 'succeeded' ||
+      event.languageSwitchResult === 'failed' ||
+      (event.confidence ?? 0) >= 0.8;
+    const changed = lastLanguageLogRef.current.language !== language;
+    if (!important && !changed && now - lastLanguageLogRef.current.at < 10_000) return;
+    lastLanguageLogRef.current = { language, at: now };
+    log[important ? 'info' : 'debug']('record', 'language detected', {
       language: event.detectedLanguage,
       confidence: event.confidence,
       alternatives: event.topLocaleAlternatives,
@@ -217,6 +265,14 @@ export default function RecordScreen() {
 
   useSpeechRecognitionEvent('error', (event) => {
     lastEventRef.current = Date.now();
+    const intentionalStop = event.error === 'client' && (savingRef.current || endingSessionRef.current);
+    if (intentionalStop) {
+      log.info('record', 'recognizer acknowledged stop', {
+        nativeCode: event.code,
+        index: sessionRef.current,
+      });
+      return;
+    }
     busyRef.current = event.error === 'busy';
     sessionErrorRef.current = event.error;
     const benign = event.error === 'no-speech' || event.error === 'speech-timeout' || busyRef.current;
@@ -372,6 +428,28 @@ export default function RecordScreen() {
     };
   }, []);
 
+  useEffect(() => subscribeAudioRouteChanges((event) => {
+    log.warn('record-route', `external audio input ${event.change}`, {
+      deviceId: event.deviceId,
+      deviceType: event.deviceType,
+      deviceName: event.deviceName,
+      index: sessionRef.current,
+    });
+    if (!activeRef.current) return;
+    if (event.change === 'removed') {
+      requestSessionEnd('external-mic-disconnected', false);
+    } else if (event.change === 'added') {
+      // Give Android USB enumeration a moment, then create a clean segment so
+      // the new AudioRecord can select the external input.
+      setTimeout(() => {
+        if (activeRef.current) requestSessionEnd('external-mic-connected', true);
+      }, 800);
+    }
+  // The route handler intentionally reads current capture refs and must remain
+  // registered once for the lifetime of this recording screen.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }), []);
+
   useEffect(() => {
     const timer = setInterval(() => {
       const now = Date.now();
@@ -388,6 +466,7 @@ export default function RecordScreen() {
           index: sessionRef.current,
           restarts: restartCountRef.current,
           listening,
+          asr: asrQualityRef.current,
           ...health,
         });
       }
@@ -459,6 +538,7 @@ export default function RecordScreen() {
           });
         }
         const health = healthRef.current.snapshot();
+        const quality = asrQualityRef.current;
         await finalizeDiagnosticRun({
           runId: recordingSessionIdRef.current,
           meetingId: id,
@@ -479,6 +559,12 @@ export default function RecordScreen() {
             allowedLanguages: ACTIVE_LANGUAGES,
             failedSegments: health.failedSegments,
             largestGapMs: health.largestGapMs,
+            asrQuality: {
+              ...quality,
+              averageConfidence: quality.confidenceSamples > 0
+                ? quality.confidenceTotal / quality.confidenceSamples
+                : null,
+            },
             uploadedSegmentsMeasuredAt: 'run-finalization-before-background-worker',
             captureOwner: 'expo-speech-recognition-native-audio-recorder',
             foregroundServiceRole: 'process-priority-and-microphone-disclosure',
@@ -503,6 +589,11 @@ export default function RecordScreen() {
       savingRef.current = false;
     }
   };
+
+  useEffect(() => {
+    stopAndSaveRef.current = stopAndSave;
+  });
+  useEffect(() => registerActiveTriggerHandler(() => stopAndSaveRef.current()), []);
 
   const cancel = async () => {
     activeRef.current = false;

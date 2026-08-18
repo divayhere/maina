@@ -1,7 +1,7 @@
 # Maina — Full Context & Handoff Pack
 
 **For:** whoever picks up development next (Codex/other agent/human).
-**State:** v0.8.1 source candidate is implemented on `codex/v0.8-observability`. It hardens v0.8 diagnostics delivery, measures real capture gaps, adds retry recovery and versions the native diagnostics database. See ADRs 0005–0006 and the changelog; the detailed v0.6 audit below remains historical evidence. Device endurance testing is still required before trusting a real meeting. No v0.8.x EAS build has been submitted.
+**State:** v0.9.0 is implemented on `codex/v0.8-observability`. It adds a foreground generic-HID shutter trigger, native route evidence/recovery boundaries, isolated transcript/audio delivery, stable AAC-first diagnostics, seven-day/3 GiB recoverable audio, strict re-pass preflight and ASR quality telemetry. See ADRs 0005–0007 and the changelog. Physical Pixel validation is still required before trusting a critical meeting.
 **Date:** 18 Aug 2026
 
 ---
@@ -13,9 +13,7 @@ These credentials were pasted into a chat transcript and must be **rotated/revok
 1. **GitHub fine-grained PAT pasted in chat** — repo `divayhere/maina`, Contents R/W. Revoke at GitHub → Settings → Developer settings → Personal access tokens.
 2. **Supabase Management token pasted in chat** — full account access. Revoke at supabase.com/dashboard/account/tokens.
 3. **Expo tokens pasted in chat** — revoke all exposed tokens at expo.dev → account → Access tokens after this authorized build.
-4. **Supabase RLS is currently unsafe.** The `device_logs` table has an `anon can read logs` SELECT policy. The anon key is embedded in the APK, so **anyone with the APK can read every log**. Fix: drop the SELECT policy, keep insert-only, and read logs via a service-role key from the maintainer side only.
-
-v0.7 removes the embedded key and leaves remote logging disabled until RLS is repaired.
+4. Supabase diagnostic tables and private Storage are insert-only from the APK; the latest Supabase security advisor reports no findings. Re-run advisors after every policy/schema change.
 
 ---
 
@@ -31,10 +29,10 @@ A personal meeting recorder for **one user** (not a public product). Replaces Fi
 |---|---|---|
 | 1 | Zero/near-zero recurring cost (per-meeting LLM pennies OK; per-minute ASR not) | Met by on-device ASR |
 | 2 | Accurate transcription; speed matters too (see §7 note) | Unproven |
-| 3 | Hours-long continuous recording, seamless, recording = source of truth | **NOT met** |
+| 3 | Hours-long continuous recording, seamless, recording = source of truth | Partially; durable audio built, soak test pending |
 | 4 | Hindi, English, mixed Hinglish — top priority | Unproven |
-| 5 | Physical Bluetooth button, hands-free (non-negotiable) | **Not built** |
-| 6 | Private — audio should not go to third-party servers | **Currently fails open** |
+| 5 | Physical Bluetooth button, hands-free (non-negotiable) | Foreground generic HID built; device test pending |
+| 6 | Private — audio should not go to third-party servers | Speech local; development backup intentionally goes to private Supabase |
 | 7 | Modular — swap AI models/providers without breaking things | Partially |
 | 8 | Self-diagnosing — owner never has to describe a bug | Partially |
 | 9 | Simple Apple-like UI, some personality ("Electric Grape" palette) | Done |

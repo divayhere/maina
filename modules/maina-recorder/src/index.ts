@@ -6,6 +6,24 @@ export interface AudioInput {
   type: string;
 }
 
+export interface HardwareTriggerEvent {
+  keyCode: number;
+  deviceId: number;
+  occurredAt: number;
+}
+
+export interface AudioRouteChangedEvent {
+  change: 'added' | 'removed' | 'active-route' | string;
+  deviceId: number;
+  deviceType: number;
+  deviceName: string;
+  occurredAt: number;
+}
+
+export interface NativeEventSubscription {
+  remove(): void;
+}
+
 export interface DiagnosticsConfig {
   enabled: boolean;
   supabaseUrl: string;
@@ -83,6 +101,14 @@ export interface DiagnosticRunSummary {
 }
 
 interface MainaRecorderNativeModule {
+  addListener(
+    eventName: 'onHardwareTrigger',
+    listener: (event: HardwareTriggerEvent) => void,
+  ): NativeEventSubscription;
+  addListener(
+    eventName: 'onAudioRouteChanged',
+    listener: (event: AudioRouteChangedEvent) => void,
+  ): NativeEventSubscription;
   startForegroundSession(): Promise<boolean>;
   stopForegroundSession(): Promise<void>;
   isForegroundSessionRunning(): boolean;

@@ -6,6 +6,7 @@
   "build": {
     "preview": {
       "distribution": "internal",
+      "autoIncrement": true,
       "env": {
         "EXPO_PUBLIC_SENTRY_DSN": "https://894a70f97e6abf8eaf1ff9b539ba5296@o4511926312960000.ingest.us.sentry.io/4511930620248064"
       },

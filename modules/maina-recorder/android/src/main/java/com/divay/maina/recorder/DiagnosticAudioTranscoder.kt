@@ -66,35 +66,36 @@ internal object DiagnosticAudioTranscoder {
         outputDir.mkdirs()
         val wav = readWavInfo(source)
 
-        val opus = File(outputDir, "${artifact.artifactId}.ogg")
+        // AAC-LC is Android's most broadly exercised low-bitrate recorder
+        // path. On the Pixel 9 Pro the software Opus codec stalled for minutes,
+        // so AAC is primary and Opus remains the fallback.
+        val aac = File(outputDir, "${artifact.artifactId}.m4a")
         val prepared = runCatching {
             encode(
                 source = source,
                 wav = wav,
-                destination = opus,
-                mime = MediaFormat.MIMETYPE_AUDIO_OPUS,
-                muxerFormat = MediaMuxer.OutputFormat.MUXER_OUTPUT_OGG,
+                destination = aac,
+                mime = MediaFormat.MIMETYPE_AUDIO_AAC,
+                muxerFormat = MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4,
                 bitRate = 32_000,
-                codecName = "opus",
-                contentType = "audio/ogg",
-                extension = "ogg",
+                codecName = "aac-lc",
+                contentType = "audio/mp4",
+                extension = "m4a",
             )
-        }.getOrElse { opus.delete(); null }
+        }.getOrElse { aac.delete(); null }
         if (prepared != null) return prepared
 
-        // AAC-LC is the stability fallback if a vendor Opus encoder rejects
-        // 16 kHz PCM. It is still roughly 7x smaller than the source WAV.
-        val aac = File(outputDir, "${artifact.artifactId}.m4a")
+        val opus = File(outputDir, "${artifact.artifactId}.ogg")
         return encode(
             source = source,
             wav = wav,
-            destination = aac,
-            mime = MediaFormat.MIMETYPE_AUDIO_AAC,
-            muxerFormat = MediaMuxer.OutputFormat.MUXER_OUTPUT_MPEG_4,
-            bitRate = 48_000,
-            codecName = "aac-lc",
-            contentType = "audio/mp4",
-            extension = "m4a",
+            destination = opus,
+            mime = MediaFormat.MIMETYPE_AUDIO_OPUS,
+            muxerFormat = MediaMuxer.OutputFormat.MUXER_OUTPUT_OGG,
+            bitRate = 32_000,
+            codecName = "opus",
+            contentType = "audio/ogg",
+            extension = "ogg",
         )
     }
 

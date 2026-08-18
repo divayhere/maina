@@ -1,7 +1,9 @@
 package com.divay.maina.recorder
 
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.media.AudioDeviceInfo
 import android.media.AudioManager
 import android.os.Build
@@ -12,8 +14,44 @@ import java.io.RandomAccessFile
 import java.net.URI
 
 class MainaRecorderModule : Module() {
+    private var triggerReceiverRegistered = false
+
+    private val triggerReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            when (intent?.action) {
+                MainaHardwareTrigger.ACTION_TRIGGER -> sendEvent(
+                    "onHardwareTrigger",
+                    mapOf(
+                        "keyCode" to intent.getIntExtra(MainaHardwareTrigger.EXTRA_KEY_CODE, -1),
+                        "deviceId" to intent.getIntExtra(MainaHardwareTrigger.EXTRA_DEVICE_ID, -1),
+                        "occurredAt" to intent.getLongExtra(MainaHardwareTrigger.EXTRA_OCCURRED_AT, System.currentTimeMillis()),
+                    ),
+                )
+                MainaAudioRouteBridge.ACTION_ROUTE_CHANGED -> sendEvent(
+                    "onAudioRouteChanged",
+                    mapOf(
+                        "change" to (intent.getStringExtra(MainaAudioRouteBridge.EXTRA_CHANGE) ?: "unknown"),
+                        "deviceId" to intent.getIntExtra(MainaAudioRouteBridge.EXTRA_DEVICE_ID, -1),
+                        "deviceType" to intent.getIntExtra(MainaAudioRouteBridge.EXTRA_DEVICE_TYPE, -1),
+                        "deviceName" to (intent.getStringExtra(MainaAudioRouteBridge.EXTRA_DEVICE_NAME) ?: "unknown"),
+                        "occurredAt" to intent.getLongExtra(MainaAudioRouteBridge.EXTRA_OCCURRED_AT, System.currentTimeMillis()),
+                    ),
+                )
+            }
+        }
+    }
+
     override fun definition() = ModuleDefinition {
         Name("MainaRecorder")
+        Events("onHardwareTrigger", "onAudioRouteChanged")
+
+        OnCreate {
+            registerTriggerReceiver()
+        }
+
+        OnDestroy {
+            unregisterTriggerReceiver()
+        }
 
         AsyncFunction("startForegroundSession") {
             val context = requireContext()
@@ -158,6 +196,28 @@ class MainaRecorderModule : Module() {
 
     private fun requireContext(): Context =
         appContext.reactContext ?: throw IllegalStateException("React context is unavailable")
+
+    private fun registerTriggerReceiver() {
+        if (triggerReceiverRegistered) return
+        val context = appContext.reactContext ?: return
+        val filter = IntentFilter().apply {
+            addAction(MainaHardwareTrigger.ACTION_TRIGGER)
+            addAction(MainaAudioRouteBridge.ACTION_ROUTE_CHANGED)
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            context.registerReceiver(triggerReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
+        } else {
+            @Suppress("DEPRECATION")
+            context.registerReceiver(triggerReceiver, filter)
+        }
+        triggerReceiverRegistered = true
+    }
+
+    private fun unregisterTriggerReceiver() {
+        if (!triggerReceiverRegistered) return
+        runCatching { appContext.reactContext?.unregisterReceiver(triggerReceiver) }
+        triggerReceiverRegistered = false
+    }
 
     private fun repairWav(uri: String): Boolean {
         val file = fileFromUri(uri)

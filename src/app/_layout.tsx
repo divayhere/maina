@@ -1,4 +1,4 @@
-import { Stack } from 'expo-router';
+import { router, Stack } from 'expo-router';
 import { useEffect, useState } from 'react';
 import { ActivityIndicator, View } from 'react-native';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
@@ -21,6 +21,7 @@ import {
   repairWavFiles,
   stopRecordingForegroundService,
 } from '@/hardware/recording/foreground';
+import { installHardwareTriggerListener } from '@/hardware/trigger/hardwareTrigger';
 import { log } from '@/services/logger';
 import {
   finalizeDiagnosticRun,
@@ -147,6 +148,13 @@ function RootLayout() {
       });
     }, 15000);
     return () => clearInterval(timer);
+  }, [ready]);
+
+  useEffect(() => {
+    if (!ready) return;
+    return installHardwareTriggerListener(() => {
+      router.push('/record');
+    });
   }, [ready]);
 
   return (

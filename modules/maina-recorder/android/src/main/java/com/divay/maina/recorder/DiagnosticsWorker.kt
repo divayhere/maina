@@ -75,12 +75,12 @@ internal class DiagnosticsWorker(
                 return@withContext Result.success()
             }
             flushOutbox(store, config)
-            uploadArtifacts(store, config)
+            val artifactFailures = uploadArtifacts(store, config)
             flushOutbox(store, config)
             deleteExpiredArtifacts(store, config)
-            store.cleanupSafeLocalSources()
+            store.cleanupRetainedLocalSources()
             store.markUploadSuccess()
-            Result.success()
+            if (artifactFailures) Result.retry() else Result.success()
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (error: Throwable) {
@@ -121,13 +121,16 @@ internal class DiagnosticsWorker(
         }
     }
 
-    private suspend fun uploadArtifacts(store: DiagnosticsStore, config: DiagnosticConfig) {
+    private suspend fun uploadArtifacts(store: DiagnosticsStore, config: DiagnosticConfig): Boolean {
         val outputDir = File(applicationContext.cacheDir, "maina-diagnostic-compressed")
+        val attempted = mutableSetOf<String>()
+        var hadFailures = false
         while (true) {
             currentCoroutineContext().ensureActive()
-            val batch = store.pendingArtifacts(ARTIFACT_BATCH_SIZE)
+            val batch = store.pendingArtifacts(ARTIFACT_BATCH_SIZE).filterNot { it.artifactId in attempted }
             if (batch.isEmpty()) break
             for (artifact in batch) {
+                attempted += artifact.artifactId
                 currentCoroutineContext().ensureActive()
                 try {
                     val prepared = DiagnosticAudioTranscoder.prepare(artifact, outputDir)
@@ -161,11 +164,49 @@ internal class DiagnosticsWorker(
                 } catch (cancelled: CancellationException) {
                     throw cancelled
                 } catch (error: Throwable) {
-                    store.markArtifactFailure(artifact.artifactId, error.message ?: error.javaClass.simpleName)
-                    throw error
+                    val message = error.message ?: error.javaClass.simpleName
+                    store.markArtifactFailure(artifact.artifactId, message)
+                    enqueueArtifactFailure(store, artifact, message, error)
+                    hadFailures = true
                 }
             }
         }
+        return hadFailures
+    }
+
+    private fun enqueueArtifactFailure(
+        store: DiagnosticsStore,
+        artifact: ArtifactRecord,
+        message: String,
+        error: Throwable,
+    ) {
+        val now = System.currentTimeMillis()
+        store.enqueueEvents(
+            listOf(
+                mapOf(
+                    "eventId" to java.util.UUID.randomUUID().toString(),
+                    "occurredAt" to java.time.Instant.ofEpochMilli(now).toString(),
+                    "elapsedMs" to 0L,
+                    "sequence" to 0L,
+                    "level" to "error",
+                    "category" to "native-diagnostics",
+                    "eventName" to "artifact-processing-failed",
+                    "message" to "Diagnostic artifact processing failed",
+                    "meetingId" to artifact.meetingId,
+                    "segmentIndex" to artifact.segmentIndex,
+                    "payload" to mapOf(
+                        "artifactId" to artifact.artifactId,
+                        "kind" to artifact.kind,
+                        "sourcePath" to artifact.sourcePath,
+                        "sourceExists" to File(artifact.sourcePath).isFile,
+                        "sourceBytes" to File(artifact.sourcePath).takeIf { it.isFile }?.length(),
+                        "attempt" to artifact.attempts + 1,
+                        "errorClass" to error.javaClass.name,
+                        "error" to message.take(1000),
+                    ),
+                ),
+            ),
+        )
     }
 
     private suspend fun deleteExpiredArtifacts(store: DiagnosticsStore, config: DiagnosticConfig) {
@@ -235,7 +276,7 @@ internal class DiagnosticsWorker(
     }
 
     companion object {
-        private const val ARTIFACT_BATCH_SIZE = 4
+        private const val ARTIFACT_BATCH_SIZE = 16
         private const val RETENTION_BATCH_SIZE = 20
         private val TABLES = listOf("diagnostic_events", "diagnostic_runs", "diagnostic_artifacts")
     }

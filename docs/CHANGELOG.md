@@ -8,6 +8,29 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); versions follow 
 ### Fixed
 - Accept the installed v0.8.1 app's UTF-8 transcript upload content type in the private diagnostics bucket, while future uploads use the bucket's canonical `text/plain` type.
 
+## [0.9.0] — Transcription trust, hardware trigger and recovery
+
+### Added
+- Foreground support for generic OS-paired Bluetooth HID shutter remotes. Common Android/iOS shutter key codes toggle recording without changing phone volume.
+- Native active-recording-route diagnostics: actual input device, source, client/actual formats, channel count and silenced state.
+- USB microphone add/remove events with controlled recognizer segment rotation, reducing the long automatic Android fallback delay.
+- ASR quality telemetry for final/partial results, confidence samples, detected Hindi/English and successful/failed Android language switches.
+
+### Fixed
+- Upload transcript artifacts before audio and isolate failures so a slow/broken encoder cannot block the transcript.
+- Use stable 32 kbps AAC-LC/M4A first on the Pixel, retaining Opus as fallback after the measured Opus stall.
+- Send native artifact exception, path, existence, bytes, attempt, meeting and segment evidence to Supabase.
+- Keep recoverable source audio for seven days with a 3 GiB oldest-safe-first cap and 5 GiB phone-free-space floor; never evict active, failed, incomplete or unsynced meetings.
+- Preflight every saved-audio file before re-transcription and hide the stale action instead of making three doomed `audio-capture` attempts.
+- Treat Android's client error emitted during an intentional stop as an acknowledgement rather than a recording failure.
+- Throttle low-value language-detection noise while retaining actual switch decisions.
+
+### Verification
+- TypeScript, 15 unit tests, ESLint and all 21 Expo Doctor checks pass.
+- Clean Expo prebuild passes and the generated Kotlin `MainActivity` contains the HID bridge.
+- Both `maina-recorder` and the complete release app compile successfully against Android SDK 36/Kotlin 2.1.20 using project-local tooling.
+- Physical Pixel validation remains required; see ADR 0007.
+
 ## [0.8.1] — Diagnostics reliability correction
 
 ### Fixed

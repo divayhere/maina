@@ -36,6 +36,7 @@ yarn-error.*
 
 # portable local development tools
 .tools/
+modules/*/android/build/
 
 # typescript
 *.tsbuildinfo

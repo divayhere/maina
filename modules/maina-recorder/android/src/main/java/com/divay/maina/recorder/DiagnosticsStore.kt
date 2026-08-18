@@ -46,6 +46,8 @@ internal data class ArtifactRecord(
     val sha256: String?,
     val status: String,
     val expiresAt: Long?,
+    val attempts: Int,
+    val lastError: String?,
 )
 
 /**
@@ -126,6 +128,11 @@ internal class DiagnosticsStore(context: Context) :
             db.execSQL("ALTER TABLE outbox_records ADD COLUMN last_attempt_at INTEGER")
             db.execSQL("ALTER TABLE artifacts ADD COLUMN last_attempt_at INTEGER")
             version = 2
+        }
+        if (version < 3) {
+            // v3 changes retention and queue ordering in code only. Bumping the
+            // version records the behavioural migration for field diagnostics.
+            version = 3
         }
         check(version == newVersion) {
             "Unsupported diagnostics database migration $oldVersion -> $newVersion"
@@ -311,16 +318,16 @@ internal class DiagnosticsStore(context: Context) :
                 """UPDATE outbox_records
                    SET attempts = attempts + 1, last_error = ?, last_attempt_at = ?
                    WHERE record_id = ?""",
-                arrayOf(error.take(1000), System.currentTimeMillis(), id),
+                arrayOf<Any>(error.take(1000), System.currentTimeMillis(), id),
             )
         }
         setLastError(error)
     }
 
-    fun pendingArtifacts(limit: Int = 4): List<ArtifactRecord> = queryArtifacts(
+    fun pendingArtifacts(limit: Int = 16): List<ArtifactRecord> = queryArtifacts(
         "status IN ('pending', 'prepared', 'failed') AND attempts < 8",
         emptyArray(),
-        "created_at ASC",
+        "CASE WHEN kind = 'audio' THEN 1 ELSE 0 END ASC, created_at ASC",
         limit,
     )
 
@@ -409,7 +416,7 @@ internal class DiagnosticsStore(context: Context) :
             """UPDATE artifacts
                SET status = 'failed', attempts = attempts + 1, last_error = ?, last_attempt_at = ?
                WHERE artifact_id = ?""",
-            arrayOf(error.take(1000), System.currentTimeMillis(), artifactId),
+            arrayOf<Any>(error.take(1000), System.currentTimeMillis(), artifactId),
         )
         setLastError(error)
     }
@@ -421,9 +428,13 @@ internal class DiagnosticsStore(context: Context) :
         )
     }
 
-    /** Delete local sources only after final transcript + every queued artifact uploaded. */
-    fun cleanupSafeLocalSources(): List<String> {
-        val meetings = mutableListOf<String>()
+    /**
+     * Keep recoverable audio for seven days, then evict oldest completed audio
+     * on a 3 GiB rolling cap or when the phone has less than 5 GiB free. Active,
+     * failed, incomplete and unsynced meetings are never eligible.
+     */
+    fun cleanupRetainedLocalSources(now: Long = System.currentTimeMillis()): List<String> {
+        val safeMeetings = mutableSetOf<String>()
         readableDatabase.rawQuery(
             """SELECT fr.meeting_id
                FROM finalized_runs fr
@@ -437,35 +448,37 @@ internal class DiagnosticsStore(context: Context) :
                  WHERE a.meeting_id = fr.meeting_id AND a.status != 'uploaded'
                )""",
             null,
-        ).use { cursor -> while (cursor.moveToNext()) meetings += cursor.getString(0) }
+        ).use { cursor -> while (cursor.moveToNext()) safeMeetings += cursor.getString(0) }
 
-        meetings.forEach { meetingId ->
-            val artifacts = queryArtifacts("meeting_id = ? AND source_deleted = 0", arrayOf(meetingId), "created_at", 1000)
-            artifacts.forEach { artifact ->
-                val source = File(artifact.sourcePath)
-                val sourceRemoved = !source.exists() || runCatching { source.delete() }.getOrDefault(false)
-                val prepared = artifact.preparedPath
-                    ?.takeIf { it != artifact.sourcePath }
-                    ?.let(::File)
-                val preparedRemoved = prepared == null || !prepared.exists() ||
-                    runCatching { prepared.delete() }.getOrDefault(false)
-                if (sourceRemoved && preparedRemoved) {
-                    writableDatabase.execSQL(
-                        "UPDATE artifacts SET source_deleted = 1 WHERE artifact_id = ?",
-                        arrayOf(artifact.artifactId),
-                    )
-                } else {
-                    setLastError("Could not delete local source for artifact ${artifact.artifactId}")
-                }
+        val candidates = queryArtifacts(
+            "kind = 'audio' AND status = 'uploaded' AND source_deleted = 0",
+            emptyArray(),
+            "created_at ASC",
+            10_000,
+        ).filter { it.meetingId in safeMeetings }
+        var retainedBytes = candidates.sumOf(::localBytes)
+        val deletedMeetings = mutableSetOf<String>()
+        candidates.forEach { artifact ->
+            val expired = artifact.expiresAt?.let { it <= now } ?: false
+            val overCap = retainedBytes > LOCAL_AUDIO_CAP_BYTES
+            val storageLow = appContext.filesDir.usableSpace in 1 until MIN_FREE_STORAGE_BYTES
+            if (!expired && !overCap && !storageLow) return@forEach
+            val bytes = localBytes(artifact)
+            if (deleteLocalFiles(artifact)) {
+                retainedBytes = (retainedBytes - bytes).coerceAtLeast(0L)
+                deletedMeetings += artifact.meetingId
             }
         }
-        return meetings
+        return deletedMeetings.toList()
     }
 
     fun meetingsWithDeletedAudio(): List<String> {
         val result = mutableListOf<String>()
         readableDatabase.rawQuery(
-            "SELECT DISTINCT meeting_id FROM artifacts WHERE kind = 'audio' AND source_deleted = 1",
+            """SELECT meeting_id FROM artifacts
+               WHERE kind = 'audio'
+               GROUP BY meeting_id
+               HAVING COUNT(*) > 0 AND SUM(CASE WHEN source_deleted = 1 THEN 1 ELSE 0 END) = COUNT(*)""",
             null,
         ).use { cursor -> while (cursor.moveToNext()) result += cursor.getString(0) }
         return result
@@ -544,7 +557,7 @@ internal class DiagnosticsStore(context: Context) :
             arrayOf(
                 "artifact_id", "meeting_id", "segment_index", "kind", "source_path",
                 "prepared_path", "object_path", "content_type", "codec", "duration_ms",
-                "bytes", "sha256", "status", "expires_at",
+                "bytes", "sha256", "status", "expires_at", "attempts", "last_error",
             ),
             selection,
             args,
@@ -569,6 +582,8 @@ internal class DiagnosticsStore(context: Context) :
                     sha256 = if (cursor.isNull(11)) null else cursor.getString(11),
                     status = cursor.getString(12),
                     expiresAt = if (cursor.isNull(13)) null else cursor.getLong(13),
+                    attempts = cursor.getInt(14),
+                    lastError = if (cursor.isNull(15)) null else cursor.getString(15),
                 )
             }
         }
@@ -587,6 +602,27 @@ internal class DiagnosticsStore(context: Context) :
             val index = if (cursor.isNull(2)) "final" else "segment-${cursor.getInt(2).toString().padStart(4, '0')}"
             return "${safePath(installId())}/$meeting/$kind/$index-${safePath(artifactId)}.$extension"
         }
+    }
+
+    private fun localBytes(artifact: ArtifactRecord): Long {
+        val paths = listOfNotNull(artifact.sourcePath, artifact.preparedPath).distinct()
+        return paths.sumOf { path -> File(path).takeIf(File::isFile)?.length() ?: 0L }
+    }
+
+    private fun deleteLocalFiles(artifact: ArtifactRecord): Boolean {
+        val files = listOfNotNull(artifact.sourcePath, artifact.preparedPath)
+            .distinct()
+            .map(::File)
+        val removed = files.all { file -> !file.exists() || runCatching { file.delete() }.getOrDefault(false) }
+        if (removed) {
+            writableDatabase.execSQL(
+                "UPDATE artifacts SET source_deleted = 1 WHERE artifact_id = ?",
+                arrayOf(artifact.artifactId),
+            )
+        } else {
+            setLastError("Could not delete retained audio for artifact ${artifact.artifactId}")
+        }
+        return removed
     }
 
     private fun scalarLong(sql: String): Long = readableDatabase.rawQuery(sql, null).use { cursor ->
@@ -632,7 +668,7 @@ internal class DiagnosticsStore(context: Context) :
 
     companion object {
         private const val DB_NAME = "maina-diagnostics.db"
-        private const val DB_VERSION = 2
+        private const val DB_VERSION = 3
         private const val PREFS_NAME = "maina_diagnostics_config"
         private const val KEY_INSTALL_ID = "install_id"
         private const val KEY_ENABLED = "enabled"
@@ -649,6 +685,8 @@ internal class DiagnosticsStore(context: Context) :
         private const val KEY_LAST_UPLOAD_AT = "last_upload_at"
         private const val KEY_LAST_ERROR = "last_error"
         private const val DAY_MS = 24L * 60L * 60L * 1000L
+        private const val LOCAL_AUDIO_CAP_BYTES = 3L * 1024L * 1024L * 1024L
+        private const val MIN_FREE_STORAGE_BYTES = 5L * 1024L * 1024L * 1024L
 
         private fun uriToPath(uri: String): String = when {
             uri.startsWith("file://") -> runCatching { File(URI(uri)).absolutePath }.getOrDefault(uri.removePrefix("file://"))

@@ -1,6 +1,10 @@
 import { Platform } from 'react-native';
 
-import { MainaRecorder, type AudioInput } from '../../../modules/maina-recorder/src';
+import {
+  MainaRecorder,
+  type AudioInput,
+  type AudioRouteChangedEvent,
+} from '../../../modules/maina-recorder/src';
 
 function requireAndroidModule() {
   if (Platform.OS !== 'android' || !MainaRecorder) {
@@ -37,4 +41,12 @@ export async function getPcmWavDurationsMs(uris: string[]): Promise<Record<strin
 export async function listAudioInputs(): Promise<AudioInput[]> {
   if (Platform.OS !== 'android' || !MainaRecorder) return [];
   return MainaRecorder.getAudioInputs();
+}
+
+export function subscribeAudioRouteChanges(
+  listener: (event: AudioRouteChangedEvent) => void,
+): () => void {
+  if (Platform.OS !== 'android' || !MainaRecorder) return () => {};
+  const subscription = MainaRecorder.addListener('onAudioRouteChanged', listener);
+  return () => subscription.remove();
 }

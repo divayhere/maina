@@ -30,6 +30,7 @@ export default function MeetingDetail() {
   const { id } = useLocalSearchParams<{ id: string }>();
   const { refresh } = useMeetings();
   const [meeting, setMeeting] = useState<Meeting | null>(null);
+  const [audioAvailable, setAudioAvailable] = useState(false);
   const [repassing, setRepassing] = useState(false);
   const [repassIdx, setRepassIdx] = useState(0);
   const [repassError, setRepassError] = useState<string | null>(null);
@@ -45,9 +46,19 @@ export default function MeetingDetail() {
 
   const load = useCallback(() => {
     if (id)
-      getMeeting(id).then((m) => {
+      getMeeting(id).then(async (m) => {
         setMeeting(m);
         meetingRef.current = m;
+        if (!m?.audioUri || m.segmentCount === 0) {
+          setAudioAvailable(false);
+          return;
+        }
+        const rows = await listRecordingSegments(m.id);
+        const uris = rows.length > 0
+          ? rows.map((segment) => segment.audioUri)
+          : Array.from({ length: m.segmentCount }, (_, index) => segmentPath(m.audioUri!, index));
+        const checks = await Promise.all(uris.map((uri) => FileSystem.getInfoAsync(uri).catch(() => ({ exists: false }))));
+        setAudioAvailable(checks.length > 0 && checks.every((info) => info.exists));
       });
   }, [id]);
 
@@ -67,6 +78,8 @@ export default function MeetingDetail() {
       index: idxRef.current,
       code: event.error,
       nativeCode: event.code,
+      message: event.message,
+      uri: segmentsRef.current[idxRef.current]?.audioUri,
     });
   });
 
@@ -146,6 +159,28 @@ export default function MeetingDetail() {
       }));
     }
     await repairWavFiles(segments.map((segment) => segment.audioUri));
+    const fileChecks = await Promise.all(segments.map(async (segment) => {
+      const info = await FileSystem.getInfoAsync(segment.audioUri).catch(() => ({ exists: false }));
+      return {
+        index: segment.index,
+        uri: segment.audioUri,
+        exists: info.exists,
+        size: info.exists && 'size' in info ? info.size : null,
+      };
+    }));
+    const missing = fileChecks.filter((file) => !file.exists || !file.size);
+    log.info('meeting', 'saved-audio preflight', {
+      meetingId: m.id,
+      files: fileChecks,
+      missing: missing.length,
+    });
+    if (missing.length > 0) {
+      setAudioAvailable(false);
+      setRepassError('The recovery audio is no longer on this phone, so Maina kept the existing transcript and did not retry.');
+      await updateMeeting(m.id, { audioUri: null });
+      load();
+      return;
+    }
     segmentsRef.current = segments;
     textRef.current = '';
     idxRef.current = 0;
@@ -216,7 +251,7 @@ export default function MeetingDetail() {
   };
 
   const hasText = !!meeting?.transcript;
-  const hasAudio = !!meeting?.audioUri && meeting.segmentCount > 0;
+  const hasAudio = !!meeting?.audioUri && meeting.segmentCount > 0 && audioAvailable;
 
   return (
     <View style={{ flex: 1, backgroundColor: theme.bg }}>
