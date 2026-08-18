@@ -16,6 +16,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/); versions follow 
 ### Added
 - Queue age, last failed attempt, exhausted retry count and a manual “Retry failed uploads” action in System Status.
 - Pure unit tests for recording-health measurements.
+- Runtime Sentry crash/ANR reporting for organization `divayhere`, project `maina-android`. Source-map upload remains pending a separately stored Sentry auth token.
 
 ### Verification
 - TypeScript, ESLint and 15 unit tests pass.
