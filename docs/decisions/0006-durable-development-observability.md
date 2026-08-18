@@ -41,3 +41,9 @@ Model download remains an Android/Google service operation and can be deferred b
 The worker drains all available artifacts in bounded batches, exposes and resets terminal failures on explicit user request, and records queue age/attempt state. Capture-health values come from observed `audiostart`, `audioend`, recognizer start and recognizer end events. `uploaded_segments = 0` remains a truthful run-finalization snapshot because background upload happens afterward; `diagnostic_artifacts` is the authoritative upload-completion record.
 
 The microphone foreground service raises process importance and provides Android's required recording disclosure. It does not own `AudioRecord`; the native recorder inside `expo-speech-recognition` does. This design remains a device-test candidate rather than a guarantee of uninterrupted multi-hour capture.
+
+## Next-build microphone observability amendment
+
+The first Hollyland Lark M2 USB-C test proved that Android enumerates the receiver as `USB-Audio - Wireless microphone`, not that the recognizer used it. The next native diagnostics revision must observe `AudioManager.getActiveRecordingConfigurations()` after recording starts and subscribe to `AudioRecordingCallback`. It must record the active input device, audio source, client/actual format, channel count, capture effects and every route transition. A visible external receiver paired with an active built-in route is a warning.
+
+The app must not present route forcing as guaranteed while `SpeechRecognizer` owns capture. `AudioRecord.setPreferredDevice()` and `getRoutedDevice()` are useful only when Maina owns that `AudioRecord`; preferred routing is not itself proof of actual routing. Hollyland firmware, gain and noise-cancellation strength remain vendor-side settings in LarkSound. The Lark M2 mobile receiver is mono, so two transmitters do not provide isolated speaker channels.

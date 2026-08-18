@@ -230,7 +230,7 @@ internal class DiagnosticsStore(context: Context) :
             put("kind", kind)
             put("source_path", source.absolutePath)
             put("prepared_path", source.absolutePath)
-            put("content_type", "text/plain; charset=utf-8")
+            put("content_type", "text/plain")
             put("codec", "utf-8")
             put("duration_ms", 0)
             put("status", "prepared")

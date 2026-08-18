@@ -3,6 +3,11 @@
 All notable changes to Maina are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions follow [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+- Accept the installed v0.8.1 app's UTF-8 transcript upload content type in the private diagnostics bucket, while future uploads use the bucket's canonical `text/plain` type.
+
 ## [0.8.1] — Diagnostics reliability correction
 
 ### Fixed

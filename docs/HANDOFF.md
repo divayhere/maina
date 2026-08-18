@@ -50,7 +50,7 @@ A personal meeting recorder for **one user** (not a public product). Replaces Fi
 
 - **Android only, Pixel 9 Pro.** iOS rejected: background mic blocked for normal apps, BLE HID button restricted, and free sideloading expires every 7 days. (Audit note: iOS *can* continue a recording started in the foreground via the audio background mode — the reasoning was partly wrong, but the conclusion stands.)
 - **Native app, not a PWA/Lovable.** Web can't do background audio, BLE HID, or on-device ASR.
-- **Mic:** Hollyland Lark M2 (2 TX + USB-C RX, ~₹10k) — covert, battery + case, multi-speaker. USB-C not Bluetooth: (a) BT mics often don't feed third-party recording apps on Android, (b) keeps Bluetooth free for the button. *Not yet purchased.*
+- **Mic:** Hollyland Lark M2 (2 TX + USB-C mobile RX, ~₹10k) — purchased and first tested in v0.8.1. Android exposed it as `USB-Audio - Wireless microphone`, but v0.8.1 only inventories available inputs and cannot prove which device the recognizer actually routed. USB-C keeps Bluetooth free for the button.
 - **Button:** must connect **directly to the phone** — BLE HID shutter clicker, or Flic 2 (has an Android SDK). Aqara/Tapo rejected: they need a hub + cloud, useless in a client's meeting room. *Not yet purchased.*
 
 ---
@@ -205,7 +205,9 @@ Single native AudioRecord owner (not a React component)
 - Segments carry **sequence numbers + timestamps** so transcripts can be merged, retried, deduplicated, and gaps measured across recognizer restarts.
 - Finalize every segment incrementally; a damaged final segment should be repairable from byte length.
 - Preserve the original **Hindi/Hinglish** transcript; English translation is a **derived view**; summaries default to English.
-- If the Hollyland RX can expose two transmitters as separate channels, **preserve split-channel capture** (a free diarization signal). The current library forces mono and discards it.
+- The Hollyland Lark M2 **mobile** receiver officially exposes mono only, so its two transmitters cannot be treated as separate diarization channels on the phone. Speaker attribution must remain a separate ASR/diarization problem.
+
+**Next-build microphone requirement (no UX change):** while recognition is active, query Android's active recording configurations and log the actual routed `AudioDeviceInfo`, source, client/actual formats, channel count and enabled capture effects. Register the recording callback so USB attach/detach or route changes are timestamped. If the Hollyland is visible but the active route is the built-in microphone, raise a remote diagnostic warning. Do not claim that Maina can force the route: `SpeechRecognizer` owns its internal `AudioRecord`, whereas `setPreferredDevice()` only applies to an `AudioRecord` owned by the app.
 
 ⚠️ **Scope warning:** this requires real **native Kotlin** work (a foreground service + recorder, exposed via an Expo config plugin / native module). That is a meaningful step up from the current managed-workflow JS app. Plan for it explicitly.
 

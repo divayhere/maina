@@ -36,7 +36,7 @@ internal object DiagnosticAudioTranscoder {
             require(file.isFile) { "Artifact source does not exist: ${file.absolutePath}" }
             return PreparedArtifact(
                 path = file.absolutePath,
-                contentType = artifact.contentType ?: "text/plain; charset=utf-8",
+                contentType = artifact.contentType ?: "text/plain",
                 codec = artifact.codec ?: "utf-8",
                 extension = file.extension.ifBlank { "txt" },
                 bytes = file.length(),
