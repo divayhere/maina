@@ -12,14 +12,17 @@ import { ExpoSpeechRecognitionModule } from 'expo-speech-recognition';
 
 import { segmentName } from '../../hardware/recording/paths';
 import { log } from '../../services/logger';
+import { selectRecognitionLanguage } from './languageSelection';
+
+export { selectRecognitionLanguage } from './languageSelection';
 
 export const LANGUAGES = [
-  { code: 'hi-IN', label: 'Hindi (India)', hint: 'best for Hindi + Hinglish' },
-  { code: 'en-IN', label: 'English (India)', hint: 'best for English-dominant' },
-  { code: 'en-US', label: 'English (US)', hint: '' },
+  { code: 'en-IN', label: 'Indian English' },
+  { code: 'hi-IN', label: 'Hindi' },
 ] as const;
 
-export const DEFAULT_LANGUAGE = 'hi-IN';
+export const DEFAULT_LANGUAGE = 'en-IN';
+export const ACTIVE_LANGUAGES = LANGUAGES.map((language) => language.code);
 
 /** Google's on-device recognition service — the one with offline language packs. */
 export const ON_DEVICE_SERVICE = 'com.google.android.as';
@@ -57,6 +60,67 @@ export async function downloadOfflineLanguage(locale: string): Promise<string> {
   return res.status;
 }
 
+export interface LanguageProvisioningState {
+  ready: boolean;
+  installed: string[];
+  pending: string[];
+  unsupported: string[];
+}
+
+const sameLocale = (left: string, right: string) => left.toLowerCase() === right.toLowerCase();
+
+/** Provision English + Hindi without presenting a language picker. */
+export async function provisionCoreLanguages(): Promise<LanguageProvisioningState> {
+  let locales = await getOfflineLocales();
+  const unsupported: string[] = [];
+  const pending: string[] = [];
+  for (const locale of ACTIVE_LANGUAGES) {
+    if (locales.installed.some((item) => sameLocale(item, locale))) continue;
+    if (locales.supported.length > 0 && !locales.supported.some((item) => sameLocale(item, locale))) {
+      unsupported.push(locale);
+      continue;
+    }
+    try {
+      const status = await downloadOfflineLanguage(locale);
+      if (status !== 'download_success') pending.push(locale);
+      locales = await getOfflineLocales();
+    } catch (cause) {
+      pending.push(locale);
+      log.warn('native-speech', 'automatic model provisioning failed', { locale, err: String(cause) });
+    }
+  }
+  const installed = locales.installed;
+  const missing = ACTIVE_LANGUAGES.filter(
+    (locale) => !installed.some((item) => sameLocale(item, locale)) && !unsupported.includes(locale),
+  );
+  const state = {
+    ready: unsupported.length === 0 && missing.length === 0,
+    installed,
+    pending: [...new Set([...pending, ...missing])],
+    unsupported,
+  };
+  log.info('native-speech', 'core language provisioning checked', {
+    ready: state.ready,
+    activeLanguages: ACTIVE_LANGUAGES,
+    installed,
+    pending: state.pending,
+    unsupported,
+  });
+  return state;
+}
+
+/** Never block recording for a missing preferred pack: use the best installed fallback. */
+export async function chooseRecognitionLanguage(): Promise<string> {
+  const { installed } = await getOfflineLocales();
+  const selected = selectRecognitionLanguage(installed);
+  if (selected) return selected;
+  log.warn('native-speech', 'no offline model reported; recorder will attempt default while provisioning continues', {
+    defaultLanguage: DEFAULT_LANGUAGE,
+  });
+  return DEFAULT_LANGUAGE;
+}
+
+
 /**
  * Start a recognition session. Android may end a session on its own (long
  * silence, internal limits), so the caller restarts with the next index —
@@ -72,10 +136,10 @@ export function startSession(opts: { dir: string; index: number; lang: string })
     androidRecognitionServicePackage: ON_DEVICE_SERVICE,
     androidIntentOptions: {
       // Lets the recognizer switch between Hindi and English mid-speech (Hinglish).
-      EXTRA_ENABLE_LANGUAGE_SWITCH: 'balanced',
+      EXTRA_ENABLE_LANGUAGE_SWITCH: 'high_precision',
       EXTRA_ENABLE_LANGUAGE_DETECTION: true,
-      EXTRA_LANGUAGE_SWITCH_ALLOWED_LANGUAGES: ['hi-IN', 'en-IN', 'en-US'],
-      EXTRA_LANGUAGE_DETECTION_ALLOWED_LANGUAGES: ['hi-IN', 'en-IN', 'en-US'],
+      EXTRA_LANGUAGE_SWITCH_ALLOWED_LANGUAGES: ACTIVE_LANGUAGES,
+      EXTRA_LANGUAGE_DETECTION_ALLOWED_LANGUAGES: ACTIVE_LANGUAGES,
       EXTRA_MASK_OFFENSIVE_WORDS: false,
     },
     recordingOptions: {
@@ -104,10 +168,10 @@ export function startFileSession(opts: { uri: string; lang: string }): void {
     androidRecognitionServicePackage: ON_DEVICE_SERVICE,
     addsPunctuation: true,
     androidIntentOptions: {
-      EXTRA_ENABLE_LANGUAGE_SWITCH: 'balanced',
+      EXTRA_ENABLE_LANGUAGE_SWITCH: 'high_precision',
       EXTRA_ENABLE_LANGUAGE_DETECTION: true,
-      EXTRA_LANGUAGE_SWITCH_ALLOWED_LANGUAGES: ['hi-IN', 'en-IN', 'en-US'],
-      EXTRA_LANGUAGE_DETECTION_ALLOWED_LANGUAGES: ['hi-IN', 'en-IN', 'en-US'],
+      EXTRA_LANGUAGE_SWITCH_ALLOWED_LANGUAGES: ACTIVE_LANGUAGES,
+      EXTRA_LANGUAGE_DETECTION_ALLOWED_LANGUAGES: ACTIVE_LANGUAGES,
     },
     audioSource: {
       uri: opts.uri,

@@ -5,9 +5,11 @@ import { useEffect, useRef, useState } from 'react';
 import { AppState, Pressable, ScrollView, StyleSheet, View } from 'react-native';
 
 import {
-  DEFAULT_LANGUAGE,
+  ACTIVE_LANGUAGES,
   abortSession,
+  chooseRecognitionLanguage,
   getOfflineLocales,
+  provisionCoreLanguages,
   requestSpeechPermissions,
   startSession,
   stopSession,
@@ -22,7 +24,6 @@ import {
   startRecordingSegment,
   updateMeeting,
 } from '@/data/meetings';
-import { getLanguage } from '@/data/settings';
 import { AppText, PrimaryButton } from '@/design/components';
 import { useAppTheme } from '@/design/theme';
 import { space } from '@/design/tokens';
@@ -33,6 +34,13 @@ import {
 } from '@/hardware/recording/foreground';
 import { recordingDir, segmentIndexFromUri, segmentPath } from '@/hardware/recording/paths';
 import { log } from '@/services/logger';
+import {
+  clearDiagnosticContext,
+  finalizeDiagnosticRun,
+  queueAudioArtifact,
+  queueTextArtifact,
+  setDiagnosticContext,
+} from '@/services/remoteLog';
 import { useMeetings } from '@/state/meetingsStore';
 import { formatDuration, formatTime } from '@/utils/format';
 
@@ -55,9 +63,11 @@ export default function RecordScreen() {
 
   const idRef = useRef(newId());
   const dirRef = useRef('');
-  const langRef = useRef(DEFAULT_LANGUAGE);
+  const langRef = useRef('en-IN');
   const startedAtRef = useRef(0);
   const sessionStartedAtRef = useRef(0);
+  const sessionStartsRef = useRef<Record<number, number>>({});
+  const recordingSessionIdRef = useRef(newId());
   const activeRef = useRef(false);
   const meetingCreatedRef = useRef(false);
   const sessionRef = useRef(0);
@@ -70,6 +80,7 @@ export default function RecordScreen() {
   const restartTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const endWaiterRef = useRef<EndWaiter | null>(null);
   const persistChainRef = useRef<Promise<void>>(Promise.resolve());
+  const artifactQueueRef = useRef<Promise<void>>(Promise.resolve());
   const savingRef = useRef(false);
   const startingRef = useRef(false);
   const endingSessionRef = useRef(false);
@@ -125,6 +136,8 @@ export default function RecordScreen() {
     await startRecordingSegment(idRef.current, index, expectedUri);
     sessionRef.current = index;
     sessionStartedAtRef.current = Date.now();
+    sessionStartsRef.current[index] = sessionStartedAtRef.current;
+    setDiagnosticContext({ segmentIndex: index });
     endingSessionRef.current = false;
     sessionErrorRef.current = undefined;
     await updateMeeting(idRef.current, {
@@ -190,6 +203,10 @@ export default function RecordScreen() {
     log.debug('record', 'language detected', {
       language: event.detectedLanguage,
       confidence: event.confidence,
+      alternatives: event.topLocaleAlternatives,
+      switchResult: event.languageSwitchResult,
+      switchResultCode: event.languageSwitchResultCode,
+      allowedLanguages: ACTIVE_LANGUAGES,
     });
   });
 
@@ -229,12 +246,24 @@ export default function RecordScreen() {
 
   useSpeechRecognitionEvent('audioend', (event) => {
     const index = segmentIndexFromUri(event?.uri) ?? sessionRef.current;
-    void finishRecordingSegment(
+    const durationMs = Math.max(0, Date.now() - (sessionStartsRef.current[index] ?? sessionStartedAtRef.current));
+    artifactQueueRef.current = artifactQueueRef.current.catch(() => {}).then(() => finishRecordingSegment(
       idRef.current,
       index,
       event?.uri ?? null,
       event?.uri ? sessionErrorRef.current : sessionErrorRef.current ?? 'missing-audio-uri',
-    ).catch((cause) => log.warn('record', 'audio checkpoint metadata failed', { err: String(cause), index }));
+    )
+      .then(async () => {
+        if (!event?.uri) return;
+        await queueAudioArtifact({
+          artifactId: `${idRef.current}-audio-${index}`,
+          meetingId: idRef.current,
+          segmentIndex: index,
+          sourceUri: event.uri,
+          durationMs,
+        });
+      })
+      .catch((cause) => log.warn('record', 'audio checkpoint/artifact queue failed', { err: String(cause), index })));
     log.info('record', 'audio file closed', {
       index,
       saved: !!event?.uri,
@@ -256,7 +285,8 @@ export default function RecordScreen() {
         const dir = recordingDir(idRef.current);
         await FileSystem.makeDirectoryAsync(dir, { intermediates: true });
         dirRef.current = dir;
-        langRef.current = await getLanguage();
+        langRef.current = await chooseRecognitionLanguage();
+        void provisionCoreLanguages().catch(() => {});
         const locales = await getOfflineLocales();
         const installed = locales.installed.some(
           (locale) => locale.toLocaleLowerCase() === langRef.current.toLocaleLowerCase(),
@@ -267,9 +297,10 @@ export default function RecordScreen() {
           installedCount: locales.installed.length,
           supportedCount: locales.supported.length,
         });
-        if (locales.installed.length > 0 && !installed) {
-          throw new Error(`The ${langRef.current} offline language pack is not installed. Download it in Settings.`);
-        }
+        if (!installed) log.warn('record', 'preferred offline pack missing; capture will use best-effort fallback', {
+          language: langRef.current,
+          installedLocales: locales.installed,
+        });
 
         startedAtRef.current = Date.now();
         await createMeeting({
@@ -283,6 +314,11 @@ export default function RecordScreen() {
         });
         meetingCreatedRef.current = true;
         setMeetingCreated(true);
+        setDiagnosticContext({
+          meetingId: idRef.current,
+          recordingSessionId: recordingSessionIdRef.current,
+          segmentIndex: 0,
+        });
         await startRecordingForegroundService();
         const inputs = await listAudioInputs().catch(() => []);
         log.info('record', 'audio inputs visible', {
@@ -294,6 +330,7 @@ export default function RecordScreen() {
           language: langRef.current,
           segmentMinutes: MAX_FILE_MS / 60000,
           offlineOnly: true,
+          allowedLanguages: ACTIVE_LANGUAGES,
         });
       } catch (cause) {
         const message = cause instanceof Error ? cause.message : String(cause);
@@ -387,6 +424,37 @@ export default function RecordScreen() {
         status: finalRef.current ? 'transcribed' : 'recorded',
         lastError: null,
       });
+      const endedAt = Date.now();
+      await artifactQueueRef.current.catch(() => {});
+      try {
+        if (finalRef.current.trim()) {
+          await queueTextArtifact({
+            artifactId: `${id}-transcript-final`,
+            meetingId: id,
+            kind: 'transcript',
+            content: finalRef.current,
+          });
+        }
+        await finalizeDiagnosticRun({
+          runId: recordingSessionIdRef.current,
+          meetingId: id,
+          startedAt: new Date(startedAtRef.current).toISOString(),
+          endedAt: new Date(endedAt).toISOString(),
+          status: finalRef.current ? 'transcribed' : 'recorded',
+          wallDurationMs: endedAt - startedAtRef.current,
+          audioDurationMs: endedAt - startedAtRef.current,
+          expectedSegments: sessionRef.current + 1,
+          closedSegments: sessionRef.current + 1,
+          uploadedSegments: 0,
+          transcriptWords: transcriptWordCount(finalRef.current),
+          recognizerRestarts: restartCountRef.current,
+          recognizerDowntimeMs: 0,
+          measuredGapMs: 0,
+          payload: { language: langRef.current, allowedLanguages: ACTIVE_LANGUAGES },
+        });
+      } catch (cause) {
+        log.warn('remote', 'meeting artifacts remained local for later diagnostics retry', { err: String(cause) });
+      }
       await refresh();
       log.info('record', 'meeting saved', {
         durationMs: Date.now() - startedAtRef.current,
@@ -394,6 +462,7 @@ export default function RecordScreen() {
         files: sessionRef.current + 1,
         restarts: restartCountRef.current,
       });
+      clearDiagnosticContext();
       router.replace(`/meeting/${id}`);
     } catch (cause) {
       const message = cause instanceof Error ? cause.message : String(cause);

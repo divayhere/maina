@@ -6,7 +6,7 @@ import { useSpeechRecognitionEvent } from 'expo-speech-recognition';
 import { useCallback, useRef, useState } from 'react';
 import { ActivityIndicator, Alert, Pressable, ScrollView, Share, StyleSheet, View } from 'react-native';
 
-import { startFileSession, stopSession, supportsOnDevice } from '@/core/transcription/nativeSpeech';
+import { chooseRecognitionLanguage, startFileSession, stopSession, supportsOnDevice } from '@/core/transcription/nativeSpeech';
 import { mergeTranscript } from '@/core/transcription/transcript';
 import {
   deleteMeeting,
@@ -16,7 +16,6 @@ import {
   type Meeting,
   type RecordingSegment,
 } from '@/data/meetings';
-import { getLanguage } from '@/data/settings';
 import { AppText, Card } from '@/design/components';
 import { useAppTheme } from '@/design/theme';
 import { radius, space } from '@/design/tokens';
@@ -134,7 +133,7 @@ export default function MeetingDetail() {
       setRepassError('On-device speech is unavailable. Maina refused to upload the meeting audio.');
       return;
     }
-    langRef.current = await getLanguage();
+    langRef.current = await chooseRecognitionLanguage();
     let segments = await listRecordingSegments(m.id);
     if (segments.length === 0) {
       // Compatibility with recordings made before the segment table existed.

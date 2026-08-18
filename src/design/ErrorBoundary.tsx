@@ -2,6 +2,7 @@ import { Component, type ReactNode } from 'react';
 import { Pressable, Text, View } from 'react-native';
 
 import { log } from '@/services/logger';
+import { captureException } from '@/services/sentry';
 import { lightTheme } from './tokens';
 
 interface Props {
@@ -22,6 +23,7 @@ export class ErrorBoundary extends Component<Props, State> {
 
   componentDidCatch(error: Error, info: { componentStack?: string }) {
     log.error('boundary', error.message, { stack: info.componentStack });
+    captureException(error, { componentStack: info.componentStack });
   }
 
   render() {

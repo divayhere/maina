@@ -3,6 +3,29 @@
 All notable changes to Maina are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions follow [Semantic Versioning](https://semver.org/).
 
+## [0.8.0] — Durable observability and automatic bilingual setup
+
+### Added
+- A native SQLite diagnostic outbox drained by Android WorkManager, so events survive process death and upload when connectivity returns.
+- Append-only Supabase event/run/artifact tables with anonymous insert-only RLS and a private seven-day diagnostic artifact bucket.
+- Native WAV compression to 32 kbps Opus/Ogg, with 48 kbps AAC fallback, before diagnostic upload.
+- Deterministic artifact IDs, SHA-256 metadata, bounded retries, periodic phone-driven remote expiry, and source-WAV deletion only after the transcript and every compressed segment are confirmed uploaded.
+- Recovery upload for WAV segments left behind by an app/process interruption.
+- Optional Sentry crash capture; it remains disabled until a DSN is configured.
+
+### Changed
+- Indian English and Hindi offline packs are provisioned automatically. Recording chooses the best installed core model and enables a tightly limited `en-IN`/`hi-IN` code-switch set for Hinglish.
+- Removed the manual transcription-language picker. Settings now reports readiness instead of asking the user to manage models.
+- Replaced the copy/paste diagnostic dump with a compact queue, upload, model, input and error status screen.
+
+### Fixed
+- Android language allowlists are now sent as `ArrayList<String>`, matching `RecognizerIntent` rather than a generic array extra.
+- Language-detection logs now include Android's actual switch result and result code instead of treating every noisy detection candidate as a successful switch.
+
+### Verification
+- TypeScript, ESLint and unit tests pass.
+- A clean Expo prebuild and native Android Kotlin compilation pass locally. No EAS build was submitted.
+
 ## [0.7.0] — Durable background recording release candidate
 
 ### Added

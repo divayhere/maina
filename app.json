@@ -3,7 +3,7 @@
     "name": "Maina",
     "slug": "maina",
     "owner": "divayheres-team",
-    "version": "0.7.0",
+    "version": "0.8.0",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
     "scheme": "maina",
@@ -13,7 +13,7 @@
     },
     "android": {
       "package": "com.divay.maina",
-      "versionCode": 7,
+      "versionCode": 8,
       "allowBackup": false,
       "permissions": [
         "RECORD_AUDIO",
@@ -53,7 +53,8 @@
             "com.google.android.as"
           ]
         }
-      ]
+      ],
+      "@sentry/react-native"
     ],
     "experiments": {
       "typedRoutes": true,

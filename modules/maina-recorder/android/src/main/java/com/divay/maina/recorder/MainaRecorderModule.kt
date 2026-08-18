@@ -50,6 +50,94 @@ class MainaRecorderModule : Module() {
                 )
             }
         }
+
+        AsyncFunction("configureDiagnostics") { config: Map<String, Any?> ->
+            val context = requireContext()
+            val store = DiagnosticsStore(context)
+            try {
+                store.configure(config)
+                DiagnosticsScheduler.ensurePeriodicWork(context)
+                DiagnosticsScheduler.enqueue(context)
+                store.status()
+            } finally {
+                store.close()
+            }
+        }
+
+        AsyncFunction("enqueueDiagnosticEvents") { events: List<Map<String, Any?>> ->
+            val context = requireContext()
+            val store = DiagnosticsStore(context)
+            try {
+                val inserted = store.enqueueEvents(events)
+                if (inserted > 0) DiagnosticsScheduler.enqueue(context)
+                inserted
+            } finally {
+                store.close()
+            }
+        }
+
+        AsyncFunction("queueAudioArtifact") { request: Map<String, Any?> ->
+            val context = requireContext()
+            val id = request["artifactId"]?.toString()?.takeIf { it.isNotBlank() }
+                ?: "${request["meetingId"]}-audio-${request["segmentIndex"]}"
+            val store = DiagnosticsStore(context)
+            try {
+                store.queueAudioArtifact(id, request)
+            } finally {
+                store.close()
+            }
+            DiagnosticsScheduler.enqueue(context)
+            id
+        }
+
+        AsyncFunction("queueTextArtifact") { request: Map<String, Any?> ->
+            val context = requireContext()
+            val id = request["artifactId"]?.toString()?.takeIf { it.isNotBlank() }
+                ?: "${request["meetingId"]}-${request["kind"]}-final"
+            val store = DiagnosticsStore(context)
+            try {
+                store.queueTextArtifact(id, request)
+            } finally {
+                store.close()
+            }
+            DiagnosticsScheduler.enqueue(context)
+            id
+        }
+
+        AsyncFunction("finalizeDiagnosticRun") { summary: Map<String, Any?> ->
+            val context = requireContext()
+            val store = DiagnosticsStore(context)
+            try {
+                store.finalizeRun(summary)
+            } finally {
+                store.close()
+            }
+            DiagnosticsScheduler.enqueue(context)
+            Unit
+        }
+
+        AsyncFunction("flushDiagnostics") {
+            DiagnosticsScheduler.enqueue(requireContext(), replace = true)
+            Unit
+        }
+
+        AsyncFunction("getDiagnosticsStatus") {
+            val store = DiagnosticsStore(requireContext())
+            try {
+                store.status()
+            } finally {
+                store.close()
+            }
+        }
+
+        AsyncFunction("getMeetingsWithDeletedAudio") {
+            val store = DiagnosticsStore(requireContext())
+            try {
+                store.meetingsWithDeletedAudio()
+            } finally {
+                store.close()
+            }
+        }
     }
 
     private fun requireContext(): Context =

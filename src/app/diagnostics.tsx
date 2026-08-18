@@ -3,52 +3,54 @@ import Constants from 'expo-constants';
 import * as Device from 'expo-device';
 import { router } from 'expo-router';
 import { useCallback, useEffect, useState } from 'react';
-import { Pressable, ScrollView, Share, StyleSheet, View } from 'react-native';
+import { Pressable, ScrollView, StyleSheet, View } from 'react-native';
 
-import { AppText, PrimaryButton } from '@/design/components';
-import { supportsOnDevice } from '@/core/transcription/nativeSpeech';
+import { getOfflineLocales, supportsOnDevice } from '@/core/transcription/nativeSpeech';
+import { AppText, Card, PrimaryButton } from '@/design/components';
 import { useAppTheme } from '@/design/theme';
 import { space } from '@/design/tokens';
-import {
-  isRecordingForegroundServiceRunning,
-  listAudioInputs,
-} from '@/hardware/recording/foreground';
-import { log } from '@/services/logger';
-import { REMOTE_LOG } from '@/services/remoteConfig';
-import { readPersistedLog } from '@/services/watchdog';
+import { isRecordingForegroundServiceRunning, listAudioInputs } from '@/hardware/recording/foreground';
+import { flushDiagnostics, getDiagnosticsStatus } from '@/services/remoteLog';
+import type { DiagnosticsStatus } from '../../modules/maina-recorder/src';
+
+function Row({ label, value, warning = false }: { label: string; value: string; warning?: boolean }) {
+  const { theme } = useAppTheme();
+  return (
+    <View style={styles.row}>
+      <AppText variant="body" muted>{label}</AppText>
+      <AppText variant="body" color={warning ? theme.warn : undefined} style={styles.value}>{value}</AppText>
+    </View>
+  );
+}
 
 export default function Diagnostics() {
   const { theme } = useAppTheme();
-  const [text, setText] = useState('');
+  const [status, setStatus] = useState<DiagnosticsStatus | null>(null);
+  const [inputs, setInputs] = useState<string[]>([]);
+  const [locales, setLocales] = useState<string[]>([]);
+  const [syncing, setSyncing] = useState(false);
 
   const refresh = useCallback(async () => {
-    const live = log.dump();
-    const persisted = await readPersistedLog();
-    const inputs = await listAudioInputs().catch(() => []);
-    const snapshot = [
-      '=== MAINA HEALTH SNAPSHOT ===',
-      `capturedAt=${new Date().toISOString()}`,
-      `version=${Constants.expoConfig?.version ?? 'unknown'}`,
-      `device=${Device.manufacturer ?? ''} ${Device.modelName ?? ''}`.trim(),
-      `os=${Device.osName ?? ''} ${Device.osVersion ?? ''}`.trim(),
-      `onDeviceSpeech=${supportsOnDevice()}`,
-      `foregroundRecording=${isRecordingForegroundServiceRunning()}`,
-      `remoteLogging=${REMOTE_LOG.enabled ? 'enabled' : 'disabled-for-privacy'}`,
-      `audioInputs=${inputs.map((input) => `${input.type}:${input.name}`).join(', ') || 'none reported'}`,
-      '=== STRUCTURED LOG ===',
-    ].join('\n');
-    // Prefer the richer of the two.
-    setText(`${snapshot}\n${live.length >= persisted.length ? live : persisted}`);
+    const [nextStatus, audioInputs, languageState] = await Promise.all([
+      getDiagnosticsStatus().catch(() => null),
+      listAudioInputs().catch(() => []),
+      getOfflineLocales().catch(() => ({ installed: [], supported: [] })),
+    ]);
+    setStatus(nextStatus);
+    setInputs(audioInputs.map((input) => `${input.type}: ${input.name}`));
+    setLocales(languageState.installed);
   }, []);
 
-  useEffect(() => {
-    refresh();
-  }, [refresh]);
+  useEffect(() => { void refresh(); }, [refresh]);
 
-  const share = async () => {
+  const forceSync = async () => {
+    setSyncing(true);
     try {
-      await Share.share({ message: text || '(no logs yet)' });
-    } catch {}
+      await flushDiagnostics();
+      setTimeout(() => void refresh(), 1500);
+    } finally {
+      setSyncing(false);
+    }
   };
 
   return (
@@ -57,20 +59,50 @@ export default function Diagnostics() {
         <Pressable onPress={() => router.back()} hitSlop={12}>
           <Ionicons name="chevron-back" size={26} color={theme.text} />
         </Pressable>
-        <AppText variant="heading">Diagnostics</AppText>
-        <Pressable onPress={refresh} hitSlop={12}>
+        <AppText variant="heading">System status</AppText>
+        <Pressable onPress={() => void refresh()} hitSlop={12}>
           <Ionicons name="refresh" size={22} color={theme.accent} />
         </Pressable>
       </View>
 
-      <ScrollView style={{ flex: 1 }} contentContainerStyle={{ padding: space.lg }}>
-        <AppText variant="mono" muted style={styles.logText}>
-          {text || 'No logs captured yet. Reproduce the issue, then come back and tap refresh.'}
+      <ScrollView contentContainerStyle={styles.content}>
+        <Card style={{ gap: space.xs }}>
+          <AppText variant="label" muted>REMOTE DIAGNOSTICS</AppText>
+          <Row label="Connection" value={status?.enabled ? 'Configured' : 'Unavailable'} warning={!status?.enabled} />
+          <Row label="Queued events" value={String(status?.pendingEvents ?? 0)} warning={(status?.pendingEvents ?? 0) > 100} />
+          <Row label="Queued audio/files" value={String(status?.pendingArtifacts ?? 0)} />
+          <Row label="Failed files" value={String(status?.failedArtifacts ?? 0)} warning={(status?.failedArtifacts ?? 0) > 0} />
+          <Row
+            label="Last upload"
+            value={status?.lastUploadAt ? new Date(status.lastUploadAt).toLocaleString() : 'Not yet'}
+          />
+          <Row label="Diagnostic ID" value={status?.installId?.slice(0, 12) ?? '—'} />
+          {status?.lastError ? <AppText variant="label" color={theme.warn}>{status.lastError}</AppText> : null}
+        </Card>
+
+        <Card style={{ gap: space.xs }}>
+          <AppText variant="label" muted>CAPTURE</AppText>
+          <Row label="Foreground recorder" value={isRecordingForegroundServiceRunning() ? 'Running' : 'Idle'} />
+          <Row label="On-device speech" value={supportsOnDevice() ? 'Available' : 'Unavailable'} warning={!supportsOnDevice()} />
+          <Row label="Offline models" value={locales.length ? locales.join(', ') : 'None reported'} warning={!locales.length} />
+          <Row label="Audio inputs" value={inputs.length ? inputs.join(' · ') : 'None reported'} warning={!inputs.length} />
+        </Card>
+
+        <Card style={{ gap: space.xs }}>
+          <AppText variant="label" muted>BUILD</AppText>
+          <Row label="Version" value={Constants.expoConfig?.version ?? 'unknown'} />
+          <Row label="Native build" value={Constants.nativeBuildVersion ?? 'unknown'} />
+          <Row label="Device" value={`${Device.manufacturer ?? ''} ${Device.modelName ?? ''}`.trim()} />
+          <Row label="Android" value={Device.osVersion ?? 'unknown'} />
+        </Card>
+
+        <AppText variant="label" muted style={{ textAlign: 'center' }}>
+          Maina keeps a private local outbox when offline. You normally do not need to copy or share logs.
         </AppText>
       </ScrollView>
 
       <View style={{ padding: space.lg }}>
-        <PrimaryButton label="Share logs" onPress={share} />
+        <PrimaryButton label={syncing ? 'Sync requested…' : 'Sync diagnostics now'} onPress={forceSync} />
       </View>
     </View>
   );
@@ -85,5 +117,7 @@ const styles = StyleSheet.create({
     paddingTop: space.xxxl,
     paddingBottom: space.sm,
   },
-  logText: { fontSize: 11, lineHeight: 16 },
+  content: { padding: space.lg, gap: space.lg },
+  row: { flexDirection: 'row', justifyContent: 'space-between', gap: space.md, paddingVertical: space.xs },
+  value: { flex: 1, textAlign: 'right' },
 });

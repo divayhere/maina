@@ -1,11 +1,10 @@
 /**
  * Watchdog — net #2 of 3 (structured local log).
- * Net #1 is Sentry (wired in a later phase); net #3 is the error-boundary UI.
+ * Net #1 is optional Sentry crash capture; net #3 is the error-boundary UI.
  *
  * Everything meaningful the app does flows through here: record started,
  * mic = X, transcribe took Ns, audio deleted, provider call failed. A rolling
- * in-memory ring buffer backs the Settings → "Send debug log" export, so the
- * maintainer can diagnose without the user describing anything.
+ * in-memory ring buffer is also streamed into the native durable Supabase outbox.
  */
 
 export type LogLevel = 'debug' | 'info' | 'warn' | 'error';
@@ -73,7 +72,7 @@ class Logger {
 
 export const log = new Logger();
 
-// Console sink by default; replaced/augmented by Sentry in a later phase.
+// Console remains useful during local development; Sentry and the native outbox augment it.
 log.addSink((e) => {
   const line = `[${e.scope}] ${e.message}`;
   if (e.level === 'error') console.error(line, e.context ?? '');

@@ -1,7 +1,7 @@
 # Maina — Full Context & Handoff Pack
 
 **For:** whoever picks up development next (Codex/other agent/human).
-**State:** v0.7.0 release candidate is implemented on `codex/reliability-v0.7`. See ADR 0005 and the changelog; the detailed v0.6 audit below remains historical evidence. Device endurance testing is still required before trusting a real meeting.
+**State:** v0.8.0 source candidate is implemented on `codex/v0.8-observability`. See ADRs 0005–0006 and the changelog; the detailed v0.6 audit below remains historical evidence. Device endurance testing is still required before trusting a real meeting. No v0.8 EAS build has been submitted.
 **Date:** 18 Aug 2026
 
 ---
@@ -89,10 +89,10 @@ src/
     _layout.tsx            root: db init, crash recovery, watchdog, error boundary
     (tabs)/index.tsx       Meetings list + record button
     (tabs)/todos.tsx       STUB
-    (tabs)/settings.tsx    language picker, offline pack download, diagnostics link
+    (tabs)/settings.tsx    automatic bilingual readiness, provider status, system-status link
     record.tsx             live transcription screen (restart loop, persistence)
     meeting/[id].tsx       transcript, re-transcribe from saved audio, delete
-    diagnostics.tsx        on-device logs + share
+    diagnostics.tsx        durable outbox/upload/model/input status
   core/
     transcription/nativeSpeech.ts   ← engine wrapper (intended swap-seam)
     summarization/providers.ts      ← Gemini/OpenAI/Anthropic/Grok/DeepSeek registry (unused yet)
@@ -156,7 +156,7 @@ A fully dead app waking from a generic shutter button and starting the mic is **
 - "NPU-backed" is **unprovable** — Android doesn't expose which processor runs it. Remove the claim.
 - With `requiresOnDeviceRecognition: true` the library calls `createOnDeviceSpeechRecognizer()` and the supplied `com.google.android.as` package is **not** explicitly selected in that branch.
 - `EXTRA_ENABLE_LANGUAGE_SWITCH` is **best-effort**, may be ignored, and needs both language models installed.
-- The app logs no language-detection/switch events, so Hinglish switching **cannot currently be demonstrated**.
+- v0.8 logs the actual Android switch result/code and constrains candidates to `en-IN` + `hi-IN`; device evidence is still required to demonstrate reliable Hinglish switching.
 - Android docs state `SpeechRecognizer` is **not intended for continuous recognition**.
 
 ### C7 — The swap-seam is not real

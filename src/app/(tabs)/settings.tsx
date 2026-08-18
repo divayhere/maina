@@ -2,21 +2,20 @@ import { Ionicons } from '@expo/vector-icons';
 import Constants from 'expo-constants';
 import { router } from 'expo-router';
 import { useCallback, useEffect, useState } from 'react';
-import { ActivityIndicator, Alert, Pressable, ScrollView, View } from 'react-native';
+import { Pressable, ScrollView, View } from 'react-native';
 
 import { getProvider } from '@/core/summarization/providers';
 import {
-  downloadOfflineLanguage,
-  getOfflineLocales,
+  ACTIVE_LANGUAGES,
+  provisionCoreLanguages,
   LANGUAGES,
   supportsOnDevice,
+  type LanguageProvisioningState,
 } from '@/core/transcription/nativeSpeech';
-import { getLanguage, setLanguage } from '@/data/settings';
 import { AppText, Card } from '@/design/components';
 import { useAppTheme } from '@/design/theme';
-import { radius, space } from '@/design/tokens';
+import { space } from '@/design/tokens';
 import { DEFAULT_CONFIG } from '@/services/config';
-import { log } from '@/services/logger';
 
 function Row({ label, value }: { label: string; value: string }) {
   return (
@@ -32,97 +31,32 @@ export default function SettingsScreen() {
   const version = Constants.expoConfig?.version ?? '1.0.0';
   const provider = getProvider(DEFAULT_CONFIG.providerId);
 
-  const [lang, setLang] = useState('');
-  const [installed, setInstalled] = useState<string[]>([]);
   const [onDevice, setOnDevice] = useState<boolean | null>(null);
-  const [downloading, setDownloading] = useState<string | null>(null);
+  const [languages, setLanguages] = useState<LanguageProvisioningState | null>(null);
 
   const load = useCallback(async () => {
-    setLang(await getLanguage());
     setOnDevice(supportsOnDevice());
-    const { installed: inst } = await getOfflineLocales();
-    setInstalled(inst);
+    setLanguages(await provisionCoreLanguages());
   }, []);
 
   useEffect(() => {
     load();
   }, [load]);
 
-  const pick = async (code: string) => {
-    setLang(code);
-    await setLanguage(code);
-  };
-
-  const download = async (code: string) => {
-    setDownloading(code);
-    try {
-      const status = await downloadOfflineLanguage(code);
-      Alert.alert(
-        'Offline language',
-        status === 'download_success'
-          ? 'Downloaded — offline recognition ready.'
-          : status === 'opened_dialog'
-            ? 'Android opened its download dialog. Accept it to finish.'
-            : 'Download scheduled (may wait for Wi-Fi).',
-      );
-    } catch (e) {
-      log.error('settings', 'offline download failed', { err: String(e) });
-      Alert.alert('Offline language', 'Could not start the download on this device.');
-    } finally {
-      setDownloading(null);
-      load();
-    }
-  };
-
   return (
     <ScrollView style={{ flex: 1, backgroundColor: theme.bg }} contentContainerStyle={{ padding: space.lg, paddingTop: space.xxl, gap: space.lg }}>
       <AppText variant="display">Settings</AppText>
 
       <Card style={{ gap: space.sm }}>
-        <AppText variant="label" muted>SPEECH LANGUAGE</AppText>
+        <AppText variant="label" muted>OFFLINE SPEECH</AppText>
         <AppText variant="label" muted style={{ marginBottom: space.xs }}>
-          Live text is best-effort; the saved audio is the safety copy. Hindi is the preferred Hinglish mode.
+          Maina automatically provisions Indian English and Hindi, then switches between them for Hinglish.
         </AppText>
-        {LANGUAGES.map((l) => {
-          const sel = lang === l.code;
-          const have = installed.includes(l.code);
-          return (
-            <View key={l.code} style={{ gap: space.xs }}>
-              <Pressable
-                onPress={() => pick(l.code)}
-                style={{
-                  flexDirection: 'row',
-                  alignItems: 'center',
-                  gap: space.md,
-                  paddingVertical: space.sm,
-                  paddingHorizontal: space.md,
-                  borderRadius: radius.md,
-                  borderWidth: 1,
-                  borderColor: sel ? theme.accent : theme.border,
-                  backgroundColor: sel ? theme.accentWash : 'transparent',
-                }}>
-                <Ionicons
-                  name={sel ? 'radio-button-on' : 'radio-button-off'}
-                  size={20}
-                  color={sel ? theme.accent : theme.muted}
-                />
-                <View style={{ flex: 1 }}>
-                  <AppText variant="body">{l.label}</AppText>
-                  {l.hint ? <AppText variant="label" muted>{l.hint}</AppText> : null}
-                </View>
-                {have ? (
-                  <Ionicons name="cloud-done-outline" size={18} color={theme.done} />
-                ) : downloading === l.code ? (
-                  <ActivityIndicator color={theme.accent} />
-                ) : (
-                  <Pressable onPress={() => download(l.code)} hitSlop={8}>
-                    <AppText variant="label" color={theme.accent}>get offline</AppText>
-                  </Pressable>
-                )}
-              </Pressable>
-            </View>
-          );
+        {LANGUAGES.map((language) => {
+          const installed = languages?.installed.some((item) => item.toLowerCase() === language.code.toLowerCase());
+          return <Row key={language.code} label={language.label} value={installed ? 'Ready' : 'Installing…'} />;
         })}
+        <Row label="Active switch set" value={ACTIVE_LANGUAGES.join(' + ')} />
         <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.sm, marginTop: space.xs }}>
           <Ionicons
             name={onDevice ? 'phone-portrait-outline' : 'cloud-outline'}
@@ -133,7 +67,9 @@ export default function SettingsScreen() {
             {onDevice === null
               ? 'Checking on-device support…'
               : onDevice
-                ? 'On-device recognition supported'
+                ? languages?.ready
+                  ? 'On-device bilingual recognition ready'
+                  : 'On-device supported · language setup continues automatically'
                 : 'On-device unavailable — recording is blocked to protect privacy'}
           </AppText>
         </View>
@@ -149,10 +85,10 @@ export default function SettingsScreen() {
       </Card>
 
       <Card style={{ gap: space.xs }}>
-        <AppText variant="label" muted>PRIVACY</AppText>
-        <Row label="Keep audio after transcript" value={DEFAULT_CONFIG.keepAudioAfterTranscript ? 'On' : 'Off'} />
+        <AppText variant="label" muted>DEVELOPMENT BACKUP</AppText>
+        <Row label="Source WAV cleanup" value={DEFAULT_CONFIG.keepAudioAfterTranscript ? 'Manual' : 'After verified upload'} />
         <AppText variant="label" muted>
-          Audio stays on the phone so you can re-transcribe. Delete it any time from a meeting.
+          Maina keeps every WAV until its compressed backup and transcript are safely uploaded. Remote artifacts expire after seven days.
         </AppText>
       </Card>
 
@@ -167,7 +103,7 @@ export default function SettingsScreen() {
         <Card style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
           <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.md }}>
             <Ionicons name="pulse-outline" size={20} color={theme.accent} />
-            <AppText variant="body">Diagnostics &amp; logs</AppText>
+            <AppText variant="body">System status</AppText>
           </View>
           <Ionicons name="chevron-forward" size={18} color={theme.muted} />
         </Card>

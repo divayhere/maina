@@ -6,6 +6,7 @@
 import * as FileSystem from 'expo-file-system/legacy';
 
 import { log, type LogEntry } from './logger';
+import { captureException } from './sentry';
 
 export const LOG_FILE = `${FileSystem.documentDirectory}maina-last-log.txt`;
 
@@ -42,6 +43,7 @@ export function installWatchdog(): void {
   g.ErrorUtils?.setGlobalHandler?.((err: unknown, isFatal?: boolean) => {
     const e = err as { message?: string; stack?: string };
     log.error('crash', e?.message ?? String(err), { isFatal, stack: e?.stack });
+    captureException(err, { isFatal: !!isFatal });
     FileSystem.writeAsStringAsync(LOG_FILE, log.dump()).catch(() => {});
     prev?.(err, isFatal);
   });

@@ -1,87 +1,152 @@
-/**
- * Remote log sink → Supabase. Streams every structured log entry to a
- * `device_logs` table so the maintainer can watch what the app did in near
- * real time (query the table directly). Best-effort and non-blocking: it
- * batches, never throws, and re-queues on network failure.
- */
+/** Durable native diagnostics bridge. Supabase is the remote timeline; the
+ * Android outbox is the source of truth while offline or after process death. */
 import Constants from 'expo-constants';
 import * as Device from 'expo-device';
 import { Platform } from 'react-native';
 
+import {
+  MainaRecorder,
+  type AudioArtifactRequest,
+  type DiagnosticRunSummary,
+  type DiagnosticsStatus,
+  type NativeDiagnosticEvent,
+  type TextArtifactRequest,
+} from '../../modules/maina-recorder/src';
 import { log, type LogEntry } from './logger';
 import { REMOTE_LOG } from './remoteConfig';
 
-interface Payload {
-  ts: string;
-  level: string;
-  scope: string;
-  message: string;
-  context: Record<string, unknown> | null;
-  session_id: string;
-  app_version: string;
-  device: string;
-  platform: string;
+interface DiagnosticContext {
+  meetingId?: string | null;
+  recordingSessionId?: string | null;
+  segmentIndex?: number | null;
 }
 
-let sessionId = '';
-let base: Pick<Payload, 'session_id' | 'app_version' | 'device' | 'platform'> | null = null;
-const queue: Payload[] = [];
-let flushing = false;
 let installed = false;
-let retryAfter = 0;
-const MAX_QUEUE = 500;
+let configured = false;
+let sequence = 0;
+let context: DiagnosticContext = {};
+let timer: ReturnType<typeof setTimeout> | null = null;
+const pending: NativeDiagnosticEvent[] = [];
+const startedAt = typeof performance !== 'undefined' ? performance.now() : Date.now();
+const appSessionId = `${Date.now().toString(36)}-${Math.floor(Math.random() * 1e9).toString(36)}`;
 
-async function flush(): Promise<void> {
-  if (flushing || queue.length === 0 || !REMOTE_LOG.enabled || Date.now() < retryAfter) return;
-  flushing = true;
-  const batch = queue.splice(0, 50);
+function id(): string {
+  return `${Date.now().toString(36)}-${sequence.toString(36)}-${Math.floor(Math.random() * 1e9).toString(36)}`;
+}
+
+function eventName(message: string): string {
+  return message.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 80) || 'event';
+}
+
+function toNativeEvent(entry: LogEntry): NativeDiagnosticEvent {
+  sequence += 1;
+  const payload = entry.context ?? null;
+  return {
+    eventId: id(),
+    occurredAt: new Date(entry.ts).toISOString(),
+    elapsedMs: Math.max(0, Math.round((typeof performance !== 'undefined' ? performance.now() : Date.now()) - startedAt)),
+    sequence,
+    level: entry.level,
+    category: entry.scope,
+    eventName: eventName(entry.message),
+    message: entry.message,
+    meetingId: context.meetingId ?? null,
+    recordingSessionId: context.recordingSessionId ?? null,
+    segmentIndex: context.segmentIndex ?? null,
+    durationMs: typeof payload?.durationMs === 'number' ? payload.durationMs : null,
+    payload,
+  };
+}
+
+async function drain(): Promise<void> {
+  if (timer) {
+    clearTimeout(timer);
+    timer = null;
+  }
+  if (!configured || !MainaRecorder || pending.length === 0) return;
+  const batch = pending.splice(0, 50);
   try {
-    const response = await fetch(`${REMOTE_LOG.url}/rest/v1/device_logs`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        apikey: REMOTE_LOG.anonKey,
-        Authorization: `Bearer ${REMOTE_LOG.anonKey}`,
-        Prefer: 'return=minimal',
-      },
-      body: JSON.stringify(batch),
-    });
-    if (!response.ok) throw new Error(`remote log HTTP ${response.status}`);
-    retryAfter = 0;
+    await MainaRecorder.enqueueDiagnosticEvents(batch);
   } catch {
-    // Network hiccup — put them back and try next tick.
-    queue.unshift(...batch);
-    retryAfter = Date.now() + 30000;
-  } finally {
-    flushing = false;
+    pending.unshift(...batch);
+    if (pending.length > 2000) pending.splice(0, pending.length - 2000);
+  }
+  if (pending.length > 0) scheduleDrain();
+}
+
+function scheduleDrain(immediate = false): void {
+  if (timer) return;
+  timer = setTimeout(() => void drain(), immediate ? 0 : 250);
+}
+
+export async function installRemoteLog(): Promise<void> {
+  if (installed) return;
+  installed = true;
+  if (Platform.OS !== 'android' || !MainaRecorder || !REMOTE_LOG.enabled) return;
+
+  log.addSink((entry) => {
+    pending.push(toNativeEvent(entry));
+    scheduleDrain(entry.level === 'error');
+  });
+
+  try {
+    await MainaRecorder.configureDiagnostics({
+      enabled: true,
+      supabaseUrl: REMOTE_LOG.url,
+      publishableKey: REMOTE_LOG.publishableKey,
+      bucket: REMOTE_LOG.bucket,
+      appVersion: Constants.expoConfig?.version ?? Constants.nativeAppVersion ?? '?',
+      buildNumber: Constants.nativeBuildVersion ?? '?',
+      gitSha: process.env.EXPO_PUBLIC_GIT_SHA ?? 'local-unset',
+      device: `${Device.manufacturer ?? ''} ${Device.modelName ?? ''}`.trim() || 'unknown',
+      platform: `${Platform.OS} ${Device.osVersion ?? ''}`.trim(),
+      appSessionId,
+      retentionDays: REMOTE_LOG.retentionDays,
+    });
+    configured = true;
+    await drain();
+    log.info('remote', 'durable diagnostics online', { appSessionId });
+  } catch (cause) {
+    configured = false;
+    log.warn('remote', 'diagnostics configuration failed', { err: String(cause) });
   }
 }
 
-export function installRemoteLog(): void {
-  if (installed || !REMOTE_LOG.enabled) return;
-  installed = true;
+export function setDiagnosticContext(next: DiagnosticContext): void {
+  context = { ...context, ...next };
+}
 
-  sessionId = `${Date.now().toString(36)}-${Math.floor(Math.random() * 1e6).toString(36)}`;
-  base = {
-    session_id: sessionId,
-    app_version: Constants.expoConfig?.version ?? '?',
-    device: `${Device.manufacturer ?? ''} ${Device.modelName ?? ''}`.trim() || 'unknown',
-    platform: `${Platform.OS} ${Device.osVersion ?? ''}`.trim(),
-  };
+export function clearDiagnosticContext(): void {
+  context = {};
+}
 
-  log.addSink((e: LogEntry) => {
-    queue.push({
-      ts: new Date(e.ts).toISOString(),
-      level: e.level,
-      scope: e.scope,
-      message: e.message,
-      context: e.context ?? null,
-      ...base!,
-    });
-    if (queue.length > MAX_QUEUE) queue.splice(0, queue.length - MAX_QUEUE);
-    if (queue.length >= 15) flush();
-  });
+export async function queueAudioArtifact(request: AudioArtifactRequest): Promise<string | null> {
+  if (!configured || !MainaRecorder) return null;
+  return MainaRecorder.queueAudioArtifact(request);
+}
 
-  setInterval(flush, 4000);
-  log.info('remote', 'remote logging on', { session: sessionId });
+export async function queueTextArtifact(request: TextArtifactRequest): Promise<string | null> {
+  if (!configured || !MainaRecorder) return null;
+  return MainaRecorder.queueTextArtifact(request);
+}
+
+export async function finalizeDiagnosticRun(summary: DiagnosticRunSummary): Promise<void> {
+  if (!configured || !MainaRecorder) return;
+  await drain();
+  await MainaRecorder.finalizeDiagnosticRun(summary);
+}
+
+export async function flushDiagnostics(): Promise<void> {
+  await drain();
+  if (configured && MainaRecorder) await MainaRecorder.flushDiagnostics();
+}
+
+export async function getDiagnosticsStatus(): Promise<DiagnosticsStatus | null> {
+  if (!MainaRecorder || Platform.OS !== 'android') return null;
+  return MainaRecorder.getDiagnosticsStatus();
+}
+
+export async function getMeetingsWithDeletedAudio(): Promise<string[]> {
+  if (!MainaRecorder || Platform.OS !== 'android') return [];
+  return MainaRecorder.getMeetingsWithDeletedAudio();
 }

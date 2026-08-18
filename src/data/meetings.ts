@@ -168,6 +168,22 @@ export async function recoverInterruptedMeetings(): Promise<number> {
   return rows.length;
 }
 
+export async function markMeetingsAudioDeleted(ids: string[]): Promise<void> {
+  if (ids.length === 0) return;
+  const db = await getDb();
+  let changed = 0;
+  await db.withTransactionAsync(async () => {
+    for (const id of ids) {
+      const result = await db.runAsync(
+        'UPDATE meetings SET audio_uri = NULL, updated_at = ? WHERE id = ? AND audio_uri IS NOT NULL',
+        [Date.now(), id],
+      );
+      changed += result.changes;
+    }
+  });
+  if (changed > 0) log.info('meetings', 'synced diagnostic audio cleanup', { count: changed });
+}
+
 export async function startRecordingSegment(
   meetingId: string,
   index: number,
@@ -229,14 +245,34 @@ export async function listRecordingSegments(meetingId: string): Promise<Recordin
 }
 
 export async function listInterruptedSegmentUris(): Promise<string[]> {
+  return (await listInterruptedRecordingSegments()).map((segment) => segment.audioUri);
+}
+
+export async function listInterruptedRecordingSegments(): Promise<RecordingSegment[]> {
   const db = await getDb();
-  const rows = await db.getAllAsync<{ audio_uri: string }>(
-    `SELECT rs.audio_uri
+  const rows = await db.getAllAsync<{
+    meeting_id: string;
+    segment_index: number;
+    audio_uri: string;
+    started_at: number;
+    ended_at: number | null;
+    status: RecordingSegment['status'];
+    error_code: string | null;
+  }>(
+    `SELECT rs.*
      FROM recording_segments rs
      JOIN meetings m ON m.id = rs.meeting_id
      WHERE m.status = 'recording'`,
   );
-  return rows.map((row) => row.audio_uri);
+  return rows.map((row) => ({
+    meetingId: row.meeting_id,
+    index: row.segment_index,
+    audioUri: row.audio_uri,
+    startedAt: row.started_at,
+    endedAt: row.ended_at,
+    status: row.status,
+    errorCode: row.error_code,
+  }));
 }
 
 export async function deleteMeeting(id: string): Promise<void> {

@@ -1,7 +1,7 @@
 /**
  * App config / feature flags — behaviours that change without touching code.
  * Persisted to storage in a later phase; these are the defaults.
- * (Speech language lives in data/settings.ts because the user can change it.)
+ * Core speech languages are provisioned automatically by nativeSpeech.ts.
  */
 
 import { DEFAULT_PROVIDER_ID } from '../core/summarization/providers';
@@ -9,7 +9,7 @@ import { DEFAULT_PROVIDER_ID } from '../core/summarization/providers';
 export interface AppConfig {
   /** On = summary + to-dos generated the moment recording stops. */
   autoSummarize: boolean;
-  /** Keep the recorded audio after a transcript exists (safety net for a re-pass). */
+  /** Keep source audio until its compressed diagnostic backup and transcript are safely uploaded. */
   keepAudioAfterTranscript: boolean;
   /** Selected AI provider id (see providers.ts). */
   providerId: string;
@@ -19,7 +19,7 @@ export interface AppConfig {
 
 export const DEFAULT_CONFIG: AppConfig = {
   autoSummarize: false,
-  keepAudioAfterTranscript: true,
+  keepAudioAfterTranscript: false,
   providerId: DEFAULT_PROVIDER_ID,
   exportFormat: 'md',
 };

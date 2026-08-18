@@ -14,19 +14,19 @@ index aaa462a..355bd91 100644
 -import java.util.UUID
 +import java.io.RandomAccessFile
  import kotlin.concurrent.thread
- 
+
  interface AudioRecorder {
 @@ -39,13 +40,18 @@ class ExpoAudioRecorder(
      var outputFile: File? = null
      var outputFileUri = "file://$outputFilePath"
- 
+
 -    /** The file where the mic stream is being output to */
 -    private val tempPcmFile: File
 +    /** A valid, incrementally checkpointed WAV file; no stop-time copy is required. */
 +    private val wavFile: File?
      val recordingParcel: ParcelFileDescriptor
      private var outputStream: AutoCloseOutputStream?
- 
+
      init {
 -        tempPcmFile = createTempPcmFile()
 +        wavFile = outputFilePath?.let { path ->
@@ -41,7 +41,7 @@ index aaa462a..355bd91 100644
 @@ -73,62 +79,44 @@ class ExpoAudioRecorder(
                  .reverseBytes(s)
                  .toInt()
- 
+
 -        fun appendWavHeader(
 -            outputFilePath: String,
 -            pcmFile: File,
@@ -87,7 +87,7 @@ index aaa462a..355bd91 100644
 +                writeHeader(out, 0L, 16000)
              }
 +        }
- 
+
 -            return outputFile
 +        private fun writeHeader(out: DataOutputStream, audioDataLength: Long, sampleRateInHz: Int) {
 +            val numChannels = 1
@@ -111,7 +111,7 @@ index aaa462a..355bd91 100644
 +            out.writeInt(Integer.reverseBytes(audioDataLength.toInt()))
          }
 -    }
- 
+
 -    private fun createTempPcmFile(): File {
 -        val file = File(context.cacheDir, "temp_${UUID.randomUUID()}.pcm")
 -        if (!file.exists()) {
@@ -131,10 +131,10 @@ index aaa462a..355bd91 100644
          }
 -        return file
      }
- 
+
      @SuppressLint("MissingPermission")
 @@ -163,22 +151,29 @@ class ExpoAudioRecorder(
- 
+
      override fun stop() {
          isRecordingAudio = false
 -        audioRecorder?.stop()
@@ -188,7 +188,7 @@ index aaa462a..355bd91 100644
 -            e.printStackTrace()
 -        }
      }
- 
+
      private fun streamAudioToPipe() {
 -        val tempFileOutputStream = FileOutputStream(tempPcmFile)
 +        val wavOutputStream = wavFile?.let {
@@ -198,7 +198,7 @@ index aaa462a..355bd91 100644
 +        var bytesSinceCheckpoint = 0L
 +        // A process kill loses at most five seconds from the WAV header length.
 +        val checkpointBytes = sampleRateInHz * 2L * 5L
- 
+
 -        while (isRecordingAudio) {
 -            val recorder = audioRecorder ?: break
 -
@@ -225,7 +225,7 @@ index aaa462a..355bd91 100644
 +                    } else {
 +                        recorder.read(data, 0, data.size)
 +                    }
- 
+
 -                        // Write to the temp PCM file
 -                        if (outputFilePath != null) {
 -                            tempFileOutputStream.write(data, 0, read)
@@ -250,7 +250,7 @@ index aaa462a..355bd91 100644
 -                        e.printStackTrace()
                      }
 -                }
- 
+
 -                // (this should only happen on API 22 and below)
 -                read == 0 -> {
 -                    try {
@@ -265,7 +265,7 @@ index aaa462a..355bd91 100644
 +                            break
 +                        }
 +                    }
- 
+
 -                read == AudioRecord.ERROR_DEAD_OBJECT -> {
 -                    Log.w(TAG, "AudioRecord returned ERROR_DEAD_OBJECT; breaking out of the loop")
 -                    // todo: we should probably emit an error event here
@@ -275,7 +275,7 @@ index aaa462a..355bd91 100644
 +                        Log.w(TAG, "AudioRecord returned ERROR_DEAD_OBJECT; ending capture")
 +                        break
 +                    }
- 
+
 -                read == AudioRecord.ERROR_INVALID_OPERATION || read == AudioRecord.ERROR_BAD_VALUE -> {
 -                    Log.w(TAG, "AudioRecord read error: $read; backing off briefly")
 -                    try {
@@ -291,7 +291,7 @@ index aaa462a..355bd91 100644
 +                            break
 +                        }
 +                    }
- 
+
 -                else -> {
 -                    // todo: we should probably emit an error event here
 -                    Log.w(TAG, "AudioRecord read returned '$read'; breaking out of the loop")
@@ -314,3 +314,93 @@ index aaa462a..355bd91 100644
 -        tempFileOutputStream.close()
      }
  }
+diff --git a/node_modules/expo-speech-recognition/android/src/main/java/expo/modules/speechrecognition/ExpoSpeechService.kt b/node_modules/expo-speech-recognition/android/src/main/java/expo/modules/speechrecognition/ExpoSpeechService.kt
+index 06ff2e0..9b72da5 100644
+--- a/node_modules/expo-speech-recognition/android/src/main/java/expo/modules/speechrecognition/ExpoSpeechService.kt
++++ b/node_modules/expo-speech-recognition/android/src/main/java/expo/modules/speechrecognition/ExpoSpeechService.kt
+@@ -405,7 +405,10 @@ class ExpoSpeechService(
+                 is String -> intent.putExtra(fieldValue, value)
+                 is List<*> -> {
+                     if (value.all { it is String }) {
+-                        intent.putExtra(fieldValue, value.filterIsInstance<String>().toTypedArray())
++                        // RecognizerIntent's language allow-list extras are documented
++                        // as lists. Use the Android-native ArrayList representation;
++                        // some Pixel recognizers ignore a String[] for these extras.
++                        intent.putStringArrayListExtra(fieldValue, ArrayList(value.filterIsInstance<String>()))
+                     }
+                 }
+                 is Double -> intent.putExtra(fieldValue, value.toInt())
+@@ -631,6 +634,12 @@ class ExpoSpeechService(
+     override fun onLanguageDetection(results: Bundle) {
+         val detectedLanguage = results.getString(SpeechRecognizer.DETECTED_LANGUAGE)
+         val confidence = languageDetectionConfidenceLevelToFloat(results.getInt(SpeechRecognizer.LANGUAGE_DETECTION_CONFIDENCE_LEVEL))
++        val switchResult =
++            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
++                results.getInt(SpeechRecognizer.LANGUAGE_SWITCH_RESULT, -1)
++            } else {
++                -1
++            }
+
+         // Only send event if language or confidence has changed
+         if (detectedLanguage != lastDetectedLanguage || confidence != lastLanguageConfidence) {
+@@ -643,11 +652,26 @@ class ExpoSpeechService(
+                     "detectedLanguage" to detectedLanguage,
+                     "confidence" to confidence,
+                     "topLocaleAlternatives" to results.getStringArrayList(SpeechRecognizer.TOP_LOCALE_ALTERNATIVES),
++                    "languageSwitchResultCode" to switchResult,
++                    "languageSwitchResult" to languageSwitchResultName(switchResult),
+                 ),
+             )
+         }
+     }
+
++    private fun languageSwitchResultName(value: Int): String =
++        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
++            "unavailable"
++        } else {
++            when (value) {
++                SpeechRecognizer.LANGUAGE_SWITCH_RESULT_SUCCEEDED -> "succeeded"
++                SpeechRecognizer.LANGUAGE_SWITCH_RESULT_FAILED -> "failed"
++                SpeechRecognizer.LANGUAGE_SWITCH_RESULT_SKIPPED_NO_MODEL -> "skipped-no-model-or-not-allowed"
++                SpeechRecognizer.LANGUAGE_SWITCH_RESULT_NOT_ATTEMPTED -> "not-attempted"
++                else -> "unknown"
++            }
++        }
++
+     /**
+      * For API 33: Basically same as onResults but doesn't stop
+      */
+diff --git a/node_modules/expo-speech-recognition/build/ExpoSpeechRecognitionModule.types.d.ts b/node_modules/expo-speech-recognition/build/ExpoSpeechRecognitionModule.types.d.ts
+index 319bdcb..7e079ba 100644
+--- a/node_modules/expo-speech-recognition/build/ExpoSpeechRecognitionModule.types.d.ts
++++ b/node_modules/expo-speech-recognition/build/ExpoSpeechRecognitionModule.types.d.ts
+@@ -106,6 +106,9 @@ export type LanguageDetectionEvent = {
+     confidence: number;
+     /** The alternative locales for the same language, in BCP-47 format. e.g. ["en-US", "en-GB"] */
+     topLocaleAlternatives: string[];
++    /** Android 14+: whether the recognizer actually switched models. */
++    languageSwitchResult?: "succeeded" | "failed" | "skipped-no-model-or-not-allowed" | "not-attempted" | "unavailable" | "unknown";
++    languageSwitchResultCode?: number;
+ };
+ /**
+  * Events that are dispatched from the native side
+diff --git a/node_modules/expo-speech-recognition/src/ExpoSpeechRecognitionModule.types.ts b/node_modules/expo-speech-recognition/src/ExpoSpeechRecognitionModule.types.ts
+index 28f323f..3613f64 100644
+--- a/node_modules/expo-speech-recognition/src/ExpoSpeechRecognitionModule.types.ts
++++ b/node_modules/expo-speech-recognition/src/ExpoSpeechRecognitionModule.types.ts
+@@ -125,6 +125,15 @@ export type LanguageDetectionEvent = {
+   confidence: number;
+   /** The alternative locales for the same language, in BCP-47 format. e.g. ["en-US", "en-GB"] */
+   topLocaleAlternatives: string[];
++  /** Android 14+: whether the recognizer actually switched models. */
++  languageSwitchResult?:
++    | "succeeded"
++    | "failed"
++    | "skipped-no-model-or-not-allowed"
++    | "not-attempted"
++    | "unavailable"
++    | "unknown";
++  languageSwitchResultCode?: number;
+ };
+
+ /**
