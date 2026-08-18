@@ -16,7 +16,11 @@ import {
 import { ErrorBoundary } from '@/design/ErrorBoundary';
 import { AppText, PrimaryButton } from '@/design/components';
 import { useAppTheme } from '@/design/theme';
-import { repairWavFiles, stopRecordingForegroundService } from '@/hardware/recording/foreground';
+import {
+  getPcmWavDurationsMs,
+  repairWavFiles,
+  stopRecordingForegroundService,
+} from '@/hardware/recording/foreground';
 import { log } from '@/services/logger';
 import {
   finalizeDiagnosticRun,
@@ -50,6 +54,9 @@ function RootLayout() {
         // deterministic artifact IDs make this safe to repeat after another crash.
         const interruptedSegments = await listInterruptedRecordingSegments();
         const repaired = await repairWavFiles(interruptedSegments.map((segment) => segment.audioUri));
+        const recoveredDurations = await getPcmWavDurationsMs(
+          interruptedSegments.map((segment) => segment.audioUri),
+        );
         const interruptedMeetingIds = [...new Set(interruptedSegments.map((segment) => segment.meetingId))];
         const recovered = await recoverInterruptedMeetings();
 
@@ -59,7 +66,7 @@ function RootLayout() {
             meetingId: segment.meetingId,
             segmentIndex: segment.index,
             sourceUri: segment.audioUri,
-            durationMs: Math.max(0, (segment.endedAt ?? Date.now()) - segment.startedAt),
+            durationMs: recoveredDurations[segment.audioUri] ?? 0,
           });
         }
         for (const meetingId of interruptedMeetingIds) {
@@ -74,26 +81,38 @@ function RootLayout() {
             });
           }
           const segments = interruptedSegments.filter((segment) => segment.meetingId === meetingId);
-          const endedAt = meeting.updatedAt || Date.now();
+          const wallDurationMs = Math.max(0, meeting.durationMs);
+          const endedAt = meeting.startedAt + wallDurationMs;
+          const audioDurationMs = segments.reduce(
+            (sum, segment) => sum + Math.max(0, recoveredDurations[segment.audioUri] ?? 0),
+            0,
+          );
+          const closedSegments = segments.filter(
+            (segment) => (recoveredDurations[segment.audioUri] ?? 0) > 0,
+          ).length;
+          const measuredGapMs = Math.max(0, wallDurationMs - audioDurationMs);
           await finalizeDiagnosticRun({
             runId: `recovery-${meetingId}`,
             meetingId,
             startedAt: new Date(meeting.startedAt).toISOString(),
             endedAt: new Date(Math.max(endedAt, meeting.startedAt)).toISOString(),
             status: 'interrupted',
-            wallDurationMs: Math.max(0, endedAt - meeting.startedAt),
-            audioDurationMs: segments.reduce(
-              (sum, segment) => sum + Math.max(0, (segment.endedAt ?? endedAt) - segment.startedAt),
-              0,
-            ),
+            wallDurationMs,
+            audioDurationMs,
             expectedSegments: segments.length,
-            closedSegments: segments.length,
+            closedSegments,
             uploadedSegments: 0,
             transcriptWords: transcriptWordCount(meeting.transcript ?? ''),
             recognizerRestarts: meeting.restartCount,
             recognizerDowntimeMs: 0,
-            measuredGapMs: 0,
-            payload: { recoveredAfterProcessDeath: true, repairedWavCount: repaired },
+            measuredGapMs,
+            payload: {
+              recoveredAfterProcessDeath: true,
+              repairedWavCount: repaired,
+              metricsProvenance: 'persisted-wall-duration-and-wav-byte-length',
+              recognizerDowntimeMeasurement: 'unavailable-after-process-death',
+              uploadedSegmentsMeasuredAt: 'run-finalization-before-background-worker',
+            },
           });
         }
 

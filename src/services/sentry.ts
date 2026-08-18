@@ -5,6 +5,10 @@ import { log } from './logger';
 
 let installed = false;
 
+export function isSentryConfigured(): boolean {
+  return (process.env.EXPO_PUBLIC_SENTRY_DSN ?? '').length > 0;
+}
+
 export function initSentry(): void {
   if (installed) return;
   installed = true;
@@ -32,7 +36,7 @@ export function initSentry(): void {
 }
 
 export function captureException(error: unknown, context?: Record<string, unknown>): string | null {
-  if (!(process.env.EXPO_PUBLIC_SENTRY_DSN ?? '')) return null;
+  if (!isSentryConfigured()) return null;
   return Sentry.captureException(error, context ? { extra: context } : undefined);
 }
 

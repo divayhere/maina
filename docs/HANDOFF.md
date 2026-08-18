@@ -1,7 +1,7 @@
 # Maina — Full Context & Handoff Pack
 
 **For:** whoever picks up development next (Codex/other agent/human).
-**State:** v0.8.0 source candidate is implemented on `codex/v0.8-observability`. See ADRs 0005–0006 and the changelog; the detailed v0.6 audit below remains historical evidence. Device endurance testing is still required before trusting a real meeting. No v0.8 EAS build has been submitted.
+**State:** v0.8.1 source candidate is implemented on `codex/v0.8-observability`. It hardens v0.8 diagnostics delivery, measures real capture gaps, adds retry recovery and versions the native diagnostics database. See ADRs 0005–0006 and the changelog; the detailed v0.6 audit below remains historical evidence. Device endurance testing is still required before trusting a real meeting. No v0.8.x EAS build has been submitted.
 **Date:** 18 Aug 2026
 
 ---

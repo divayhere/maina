@@ -4,7 +4,7 @@ Maina is a private Android meeting recorder for the Pixel 9 Pro: durable local a
 
 ## Current release candidate
 
-v0.8.0 adds a durable native diagnostic outbox, compressed seven-day Supabase development backups, automatic English/Hindi provisioning, constrained Hinglish switching, recovery uploads, and optional Sentry crash capture. Recording still uses 10-minute recoverable WAV checkpoints and strict on-device speech.
+v0.8.1 adds a durable native diagnostic outbox, compressed seven-day Supabase development backups, automatic English/Hindi provisioning, constrained Hinglish switching, recovery uploads, measured capture gaps, recoverable upload retries, and optional Sentry crash capture. Recording still uses 10-minute recoverable WAV checkpoints and strict on-device speech.
 
 Android's own documentation does not guarantee `SpeechRecognizer` for continuous multi-hour recognition. Audio is therefore the source of truth; live text is a convenience. Do not trust a critical meeting until the physical-device endurance checklist in ADR 0005 has passed.
 

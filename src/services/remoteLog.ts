@@ -141,6 +141,11 @@ export async function flushDiagnostics(): Promise<void> {
   if (configured && MainaRecorder) await MainaRecorder.flushDiagnostics();
 }
 
+export async function retryFailedDiagnosticArtifacts(): Promise<number> {
+  if (!configured || !MainaRecorder) return 0;
+  return MainaRecorder.retryFailedDiagnosticArtifacts();
+}
+
 export async function getDiagnosticsStatus(): Promise<DiagnosticsStatus | null> {
   if (!MainaRecorder || Platform.OS !== 'android') return null;
   return MainaRecorder.getDiagnosticsStatus();

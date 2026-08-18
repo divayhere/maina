@@ -29,6 +29,11 @@ export async function repairWavFiles(uris: string[]): Promise<number> {
   return MainaRecorder.repairWavFiles(uris);
 }
 
+export async function getPcmWavDurationsMs(uris: string[]): Promise<Record<string, number | null>> {
+  if (Platform.OS !== 'android' || !MainaRecorder || uris.length === 0) return {};
+  return MainaRecorder.getPcmWavDurationsMs(uris);
+}
+
 export async function listAudioInputs(): Promise<AudioInput[]> {
   if (Platform.OS !== 'android' || !MainaRecorder) return [];
   return MainaRecorder.getAudioInputs();

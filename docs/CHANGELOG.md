@@ -3,6 +3,25 @@
 All notable changes to Maina are recorded here.
 Format follows [Keep a Changelog](https://keepachangelog.com/); versions follow [Semantic Versioning](https://semver.org/).
 
+## [0.8.1] — Diagnostics reliability correction
+
+### Fixed
+- Drain every queued diagnostic artifact and expired remote object in bounded batches instead of stopping after the first four/twenty records.
+- Close the diagnostics database even when remote delivery is disabled or not configured.
+- Measure audio-active time, recognizer downtime, restart gaps, failed files and the largest observed gap from lifecycle events instead of copying meeting wall time or reporting placeholder zeroes.
+- Add a real v1→v2 native diagnostics database migration and reject unknown future migration paths.
+- Abort a stalled/overlong native audio encode and remove incomplete output instead of allowing a WorkManager job to hang indefinitely.
+- Remove the misleading recording notification claim that audio always stays on the phone while development backups are enabled.
+
+### Added
+- Queue age, last failed attempt, exhausted retry count and a manual “Retry failed uploads” action in System Status.
+- Pure unit tests for recording-health measurements.
+
+### Verification
+- TypeScript, ESLint and 15 unit tests pass.
+- A clean Android Expo prebuild passes. A temporary JDK was used without changing the Mac, but native Kotlin compilation remains pending because no Android SDK is installed locally.
+- No EAS build was submitted.
+
 ## [0.8.0] — Durable observability and automatic bilingual setup
 
 ### Added

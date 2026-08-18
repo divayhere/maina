@@ -10,7 +10,12 @@ import { AppText, Card, PrimaryButton } from '@/design/components';
 import { useAppTheme } from '@/design/theme';
 import { space } from '@/design/tokens';
 import { isRecordingForegroundServiceRunning, listAudioInputs } from '@/hardware/recording/foreground';
-import { flushDiagnostics, getDiagnosticsStatus } from '@/services/remoteLog';
+import {
+  flushDiagnostics,
+  getDiagnosticsStatus,
+  retryFailedDiagnosticArtifacts,
+} from '@/services/remoteLog';
+import { isSentryConfigured } from '@/services/sentry';
 import type { DiagnosticsStatus } from '../../modules/maina-recorder/src';
 
 function Row({ label, value, warning = false }: { label: string; value: string; warning?: boolean }) {
@@ -53,6 +58,16 @@ export default function Diagnostics() {
     }
   };
 
+  const retryFailed = async () => {
+    setSyncing(true);
+    try {
+      await retryFailedDiagnosticArtifacts();
+      setTimeout(() => void refresh(), 1500);
+    } finally {
+      setSyncing(false);
+    }
+  };
+
   return (
     <View style={{ flex: 1, backgroundColor: theme.bg }}>
       <View style={styles.topbar}>
@@ -73,16 +88,36 @@ export default function Diagnostics() {
           <Row label="Queued audio/files" value={String(status?.pendingArtifacts ?? 0)} />
           <Row label="Failed files" value={String(status?.failedArtifacts ?? 0)} warning={(status?.failedArtifacts ?? 0) > 0} />
           <Row
+            label="Retry limit reached"
+            value={String(status?.exhaustedArtifacts ?? 0)}
+            warning={(status?.exhaustedArtifacts ?? 0) > 0}
+          />
+          <Row
+            label="Oldest queued item"
+            value={status?.oldestPendingAt ? new Date(status.oldestPendingAt).toLocaleString() : 'None'}
+          />
+          <Row
+            label="Last failed attempt"
+            value={status?.lastAttemptAt ? new Date(status.lastAttemptAt).toLocaleString() : 'None'}
+          />
+          <Row
             label="Last upload"
             value={status?.lastUploadAt ? new Date(status.lastUploadAt).toLocaleString() : 'Not yet'}
           />
           <Row label="Diagnostic ID" value={status?.installId?.slice(0, 12) ?? '—'} />
+          <Row
+            label="Crash / ANR reporting"
+            value={isSentryConfigured() ? 'Sentry configured' : 'Waiting for Sentry DSN'}
+            warning={!isSentryConfigured()}
+          />
           {status?.lastError ? <AppText variant="label" color={theme.warn}>{status.lastError}</AppText> : null}
         </Card>
 
         <Card style={{ gap: space.xs }}>
           <AppText variant="label" muted>CAPTURE</AppText>
-          <Row label="Foreground recorder" value={isRecordingForegroundServiceRunning() ? 'Running' : 'Idle'} />
+          <Row label="Foreground protection" value={isRecordingForegroundServiceRunning() ? 'Running' : 'Idle'} />
+          <Row label="Audio owner" value="Native speech recorder" />
+          <Row label="Endurance guarantee" value="Pending 2-hour device test" warning />
           <Row label="On-device speech" value={supportsOnDevice() ? 'Available' : 'Unavailable'} warning={!supportsOnDevice()} />
           <Row label="Offline models" value={locales.length ? locales.join(', ') : 'None reported'} warning={!locales.length} />
           <Row label="Audio inputs" value={inputs.length ? inputs.join(' · ') : 'None reported'} warning={!inputs.length} />
@@ -101,7 +136,13 @@ export default function Diagnostics() {
         </AppText>
       </ScrollView>
 
-      <View style={{ padding: space.lg }}>
+      <View style={{ padding: space.lg, gap: space.sm }}>
+        {(status?.failedArtifacts ?? 0) > 0 ? (
+          <PrimaryButton
+            label={syncing ? 'Retry requested…' : 'Retry failed uploads'}
+            onPress={retryFailed}
+          />
+        ) : null}
         <PrimaryButton label={syncing ? 'Sync requested…' : 'Sync diagnostics now'} onPress={forceSync} />
       </View>
     </View>

@@ -5,6 +5,7 @@ import android.media.MediaCodecInfo
 import android.media.MediaFormat
 import android.media.MediaMuxer
 import android.os.Build
+import android.os.SystemClock
 import java.io.File
 import java.io.RandomAccessFile
 import java.nio.ByteBuffer
@@ -120,6 +121,8 @@ internal object DiagnosticAudioTranscoder {
         val codec = MediaCodec.createEncoderByType(mime)
         var muxer: MediaMuxer? = null
         var muxerStarted = false
+        var encodedToEos = false
+        var muxerFinalized = false
         try {
             codec.configure(format, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
             codec.start()
@@ -133,8 +136,20 @@ internal object DiagnosticAudioTranscoder {
                 var outputEnded = false
                 var trackIndex = -1
                 val bytesPerFrame = wav.channels * 2L
+                val sourceDurationMs = wav.dataSize / (wav.sampleRate * wav.channels * 2.0) * 1000.0
+                val totalTimeoutMs = maxOf(MIN_TOTAL_TIMEOUT_MS, minOf(MAX_TOTAL_TIMEOUT_MS, sourceDurationMs.toLong() * 2L))
+                val encodeStartedAt = SystemClock.elapsedRealtime()
+                var lastProgressAt = encodeStartedAt
 
                 while (!outputEnded) {
+                    val now = SystemClock.elapsedRealtime()
+                    check(!Thread.currentThread().isInterrupted) { "Audio encoding was cancelled" }
+                    check(now - encodeStartedAt <= totalTimeoutMs) {
+                        "Audio encoder exceeded ${totalTimeoutMs}ms for ${source.name}"
+                    }
+                    check(now - lastProgressAt <= STALL_TIMEOUT_MS) {
+                        "Audio encoder made no progress for ${STALL_TIMEOUT_MS}ms"
+                    }
                     if (!inputEnded) {
                         val inputIndex = codec.dequeueInputBuffer(TIMEOUT_US)
                         if (inputIndex >= 0) {
@@ -146,12 +161,14 @@ internal object DiagnosticAudioTranscoder {
                                 val pts = submittedBytes / bytesPerFrame * 1_000_000L / wav.sampleRate
                                 codec.queueInputBuffer(inputIndex, 0, 0, pts, MediaCodec.BUFFER_FLAG_END_OF_STREAM)
                                 inputEnded = true
+                                lastProgressAt = SystemClock.elapsedRealtime()
                             } else {
                                 val aligned = read - (read % bytesPerFrame.toInt())
                                 val pts = submittedBytes / bytesPerFrame * 1_000_000L / wav.sampleRate
                                 codec.queueInputBuffer(inputIndex, 0, aligned, pts, 0)
                                 submittedBytes += aligned
                                 remaining -= aligned
+                                lastProgressAt = SystemClock.elapsedRealtime()
                             }
                         }
                     }
@@ -162,6 +179,7 @@ internal object DiagnosticAudioTranscoder {
                             trackIndex = muxer.addTrack(codec.outputFormat)
                             muxer.start()
                             muxerStarted = true
+                            lastProgressAt = SystemClock.elapsedRealtime()
                         }
                         MediaCodec.INFO_TRY_AGAIN_LATER -> Unit
                         else -> if (outputIndex >= 0) {
@@ -175,16 +193,20 @@ internal object DiagnosticAudioTranscoder {
                             }
                             outputEnded = info.flags and MediaCodec.BUFFER_FLAG_END_OF_STREAM != 0
                             codec.releaseOutputBuffer(outputIndex, false)
+                            lastProgressAt = SystemClock.elapsedRealtime()
                         }
                     }
                 }
             }
+            encodedToEos = true
         } finally {
             runCatching { codec.stop() }
-            codec.release()
-            if (muxerStarted) runCatching { muxer?.stop() }
+            runCatching { codec.release() }
+            muxerFinalized = !muxerStarted || runCatching { muxer?.stop() }.isSuccess
             runCatching { muxer?.release() }
+            if (!encodedToEos || !muxerFinalized) destination.delete()
         }
+        check(encodedToEos && muxerFinalized) { "Audio encoder did not finalize its output container" }
         require(destination.isFile && destination.length() > 0L) { "Encoder produced an empty file" }
         val durationMs = wav.dataSize / (wav.sampleRate * wav.channels * 2.0) * 1000.0
         return PreparedArtifact(
@@ -263,4 +285,7 @@ internal object DiagnosticAudioTranscoder {
     }
 
     private const val TIMEOUT_US = 10_000L
+    private const val STALL_TIMEOUT_MS = 60_000L
+    private const val MIN_TOTAL_TIMEOUT_MS = 2L * 60L * 1000L
+    private const val MAX_TOTAL_TIMEOUT_MS = 20L * 60L * 1000L
 }

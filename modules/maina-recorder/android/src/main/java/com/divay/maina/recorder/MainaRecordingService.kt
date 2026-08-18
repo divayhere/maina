@@ -85,7 +85,7 @@ class MainaRecordingService : Service() {
         return builder
             .setSmallIcon(applicationInfo.icon)
             .setContentTitle("Maina is recording")
-            .setContentText("Tap to return. Audio stays on this phone.")
+            .setContentText("Tap to return. Recording recovery remains active.")
             .setContentIntent(pendingIntent)
             .setOngoing(true)
             .setCategory(Notification.CATEGORY_SERVICE)

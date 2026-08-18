@@ -40,6 +40,10 @@ class MainaRecorderModule : Module() {
             uris.count { uri -> runCatching { repairWav(uri) }.getOrDefault(false) }
         }
 
+        AsyncFunction("getPcmWavDurationsMs") { uris: List<String> ->
+            uris.associateWith { uri -> runCatching { pcmWavDurationMs(uri) }.getOrNull() }
+        }
+
         AsyncFunction("getAudioInputs") {
             val manager = requireContext().getSystemService(Context.AUDIO_SERVICE) as AudioManager
             manager.getDevices(AudioManager.GET_DEVICES_INPUTS).map { device ->
@@ -121,6 +125,18 @@ class MainaRecorderModule : Module() {
             Unit
         }
 
+        AsyncFunction("retryFailedDiagnosticArtifacts") {
+            val context = requireContext()
+            val store = DiagnosticsStore(context)
+            val changed = try {
+                store.retryFailedArtifacts()
+            } finally {
+                store.close()
+            }
+            if (changed > 0) DiagnosticsScheduler.enqueue(context, replace = true)
+            changed
+        }
+
         AsyncFunction("getDiagnosticsStatus") {
             val store = DiagnosticsStore(requireContext())
             try {
@@ -144,10 +160,7 @@ class MainaRecorderModule : Module() {
         appContext.reactContext ?: throw IllegalStateException("React context is unavailable")
 
     private fun repairWav(uri: String): Boolean {
-        val file = when {
-            uri.startsWith("file://") -> File(URI(uri))
-            else -> File(uri)
-        }
+        val file = fileFromUri(uri)
         if (!file.exists() || file.length() < 44L) return false
         RandomAccessFile(file, "rw").use { wav ->
             val signature = ByteArray(4)
@@ -162,6 +175,18 @@ class MainaRecorderModule : Module() {
         return true
     }
 
+    private fun pcmWavDurationMs(uri: String): Long? {
+        val file = fileFromUri(uri)
+        if (!file.isFile || file.length() < WAV_HEADER_BYTES) return null
+        val pcmBytes = file.length() - WAV_HEADER_BYTES
+        return pcmBytes * 1000L / PCM_BYTES_PER_SECOND
+    }
+
+    private fun fileFromUri(uri: String): File = when {
+        uri.startsWith("file://") -> File(URI(uri))
+        else -> File(uri)
+    }
+
     private fun writeLittleEndianInt(file: RandomAccessFile, value: Long) {
         require(value in 0..0xffffffffL) { "WAV file is too large" }
         file.writeInt(Integer.reverseBytes(value.toInt()))
@@ -174,5 +199,10 @@ class MainaRecorderModule : Module() {
         AudioDeviceInfo.TYPE_BLUETOOTH_SCO -> "Bluetooth microphone"
         AudioDeviceInfo.TYPE_WIRED_HEADSET -> "wired headset"
         else -> "type-$type"
+    }
+
+    companion object {
+        private const val WAV_HEADER_BYTES = 44L
+        private const val PCM_BYTES_PER_SECOND = 16_000L * 1L * 2L
     }
 }

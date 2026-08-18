@@ -71,7 +71,8 @@ internal class DiagnosticsStore(context: Context) :
                 priority INTEGER NOT NULL DEFAULT 1,
                 created_at INTEGER NOT NULL,
                 attempts INTEGER NOT NULL DEFAULT 0,
-                last_error TEXT
+                last_error TEXT,
+                last_attempt_at INTEGER
             )""",
         )
         db.execSQL(
@@ -95,6 +96,7 @@ internal class DiagnosticsStore(context: Context) :
                 status TEXT NOT NULL DEFAULT 'pending',
                 attempts INTEGER NOT NULL DEFAULT 0,
                 last_error TEXT,
+                last_attempt_at INTEGER,
                 uploaded_at INTEGER,
                 expires_at INTEGER,
                 source_deleted INTEGER NOT NULL DEFAULT 0,
@@ -118,7 +120,17 @@ internal class DiagnosticsStore(context: Context) :
         )
     }
 
-    override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) = Unit
+    override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
+        var version = oldVersion
+        if (version < 2) {
+            db.execSQL("ALTER TABLE outbox_records ADD COLUMN last_attempt_at INTEGER")
+            db.execSQL("ALTER TABLE artifacts ADD COLUMN last_attempt_at INTEGER")
+            version = 2
+        }
+        check(version == newVersion) {
+            "Unsupported diagnostics database migration $oldVersion -> $newVersion"
+        }
+    }
 
     fun configure(raw: Map<String, Any?>) {
         val installId = prefs.getString(KEY_INSTALL_ID, null) ?: UUID.randomUUID().toString()
@@ -294,11 +306,12 @@ internal class DiagnosticsStore(context: Context) :
     }
 
     fun markOutboxFailure(recordIds: List<String>, error: String) {
-        val values = ContentValues().apply { put("last_error", error.take(1000)) }
         recordIds.forEach { id ->
             writableDatabase.execSQL(
-                "UPDATE outbox_records SET attempts = attempts + 1, last_error = ? WHERE record_id = ?",
-                arrayOf(error.take(1000), id),
+                """UPDATE outbox_records
+                   SET attempts = attempts + 1, last_error = ?, last_attempt_at = ?
+                   WHERE record_id = ?""",
+                arrayOf(error.take(1000), System.currentTimeMillis(), id),
             )
         }
         setLastError(error)
@@ -317,6 +330,18 @@ internal class DiagnosticsStore(context: Context) :
         "expires_at ASC",
         limit,
     )
+
+    fun retryFailedArtifacts(): Int {
+        val values = ContentValues().apply {
+            put("status", "pending")
+            put("attempts", 0)
+            putNull("last_error")
+            putNull("last_attempt_at")
+        }
+        val changed = writableDatabase.update("artifacts", values, "status = 'failed'", null)
+        if (changed > 0) prefs.edit().remove(KEY_LAST_ERROR).apply()
+        return changed
+    }
 
     fun markArtifactPrepared(artifactId: String, prepared: PreparedArtifact): String {
         val objectPath = objectPathFor(artifactId, prepared.extension)
@@ -381,8 +406,10 @@ internal class DiagnosticsStore(context: Context) :
 
     fun markArtifactFailure(artifactId: String, error: String) {
         writableDatabase.execSQL(
-            "UPDATE artifacts SET status = 'failed', attempts = attempts + 1, last_error = ? WHERE artifact_id = ?",
-            arrayOf(error.take(1000), artifactId),
+            """UPDATE artifacts
+               SET status = 'failed', attempts = attempts + 1, last_error = ?, last_attempt_at = ?
+               WHERE artifact_id = ?""",
+            arrayOf(error.take(1000), System.currentTimeMillis(), artifactId),
         )
         setLastError(error)
     }
@@ -448,12 +475,30 @@ internal class DiagnosticsStore(context: Context) :
         val pendingEvents = scalarLong("SELECT COUNT(*) FROM outbox_records").toInt()
         val pendingArtifacts = scalarLong("SELECT COUNT(*) FROM artifacts WHERE status IN ('pending','prepared')").toInt()
         val failedArtifacts = scalarLong("SELECT COUNT(*) FROM artifacts WHERE status = 'failed'").toInt()
+        val exhaustedArtifacts = scalarLong("SELECT COUNT(*) FROM artifacts WHERE status = 'failed' AND attempts >= 8").toInt()
+        val oldestPendingAt = scalarNullableLong(
+            """SELECT MIN(created_at) FROM (
+                 SELECT created_at FROM outbox_records
+                 UNION ALL
+                 SELECT created_at FROM artifacts WHERE status IN ('pending','prepared','failed')
+               )""",
+        )
+        val lastAttemptAt = scalarNullableLong(
+            """SELECT MAX(last_attempt_at) FROM (
+                 SELECT last_attempt_at FROM outbox_records
+                 UNION ALL
+                 SELECT last_attempt_at FROM artifacts
+               )""",
+        )
         return mapOf(
             "enabled" to config().enabled,
             "installId" to installId(),
             "pendingEvents" to pendingEvents,
             "pendingArtifacts" to pendingArtifacts,
             "failedArtifacts" to failedArtifacts,
+            "exhaustedArtifacts" to exhaustedArtifacts,
+            "oldestPendingAt" to oldestPendingAt,
+            "lastAttemptAt" to lastAttemptAt,
             "lastUploadAt" to prefs.getLong(KEY_LAST_UPLOAD_AT, 0L).takeIf { it > 0L },
             "lastError" to prefs.getString(KEY_LAST_ERROR, null),
         )
@@ -548,6 +593,10 @@ internal class DiagnosticsStore(context: Context) :
         if (cursor.moveToFirst()) cursor.getLong(0) else 0L
     }
 
+    private fun scalarNullableLong(sql: String): Long? = readableDatabase.rawQuery(sql, null).use { cursor ->
+        if (cursor.moveToFirst() && !cursor.isNull(0)) cursor.getLong(0) else null
+    }
+
     private fun installId(): String {
         val existing = prefs.getString(KEY_INSTALL_ID, null)
         if (existing != null) return existing
@@ -583,7 +632,7 @@ internal class DiagnosticsStore(context: Context) :
 
     companion object {
         private const val DB_NAME = "maina-diagnostics.db"
-        private const val DB_VERSION = 1
+        private const val DB_VERSION = 2
         private const val PREFS_NAME = "maina_diagnostics_config"
         private const val KEY_INSTALL_ID = "install_id"
         private const val KEY_ENABLED = "enabled"

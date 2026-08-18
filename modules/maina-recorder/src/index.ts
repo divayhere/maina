@@ -42,6 +42,9 @@ export interface DiagnosticsStatus {
   pendingEvents: number;
   pendingArtifacts: number;
   failedArtifacts: number;
+  exhaustedArtifacts: number;
+  oldestPendingAt?: number | null;
+  lastAttemptAt?: number | null;
   lastUploadAt?: number | null;
   lastError?: string | null;
 }
@@ -84,6 +87,7 @@ interface MainaRecorderNativeModule {
   stopForegroundSession(): Promise<void>;
   isForegroundSessionRunning(): boolean;
   repairWavFiles(uris: string[]): Promise<number>;
+  getPcmWavDurationsMs(uris: string[]): Promise<Record<string, number | null>>;
   getAudioInputs(): Promise<AudioInput[]>;
   configureDiagnostics(config: DiagnosticsConfig): Promise<DiagnosticsStatus>;
   enqueueDiagnosticEvents(events: NativeDiagnosticEvent[]): Promise<number>;
@@ -91,6 +95,7 @@ interface MainaRecorderNativeModule {
   queueTextArtifact(request: TextArtifactRequest): Promise<string>;
   finalizeDiagnosticRun(summary: DiagnosticRunSummary): Promise<void>;
   flushDiagnostics(): Promise<void>;
+  retryFailedDiagnosticArtifacts(): Promise<number>;
   getDiagnosticsStatus(): Promise<DiagnosticsStatus>;
   getMeetingsWithDeletedAudio(): Promise<string[]>;
 }

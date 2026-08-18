@@ -12,7 +12,10 @@ import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
 import androidx.work.WorkerParameters
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import java.io.File
@@ -66,12 +69,11 @@ internal class DiagnosticsWorker(
 ) : CoroutineWorker(appContext, params) {
     override suspend fun doWork(): Result = withContext(Dispatchers.IO) {
         val store = DiagnosticsStore(applicationContext)
-        val config = store.config()
-        if (!config.enabled || config.supabaseUrl.isBlank() || config.publishableKey.isBlank()) {
-            return@withContext Result.success()
-        }
-
         try {
+            val config = store.config()
+            if (!config.enabled || config.supabaseUrl.isBlank() || config.publishableKey.isBlank()) {
+                return@withContext Result.success()
+            }
             flushOutbox(store, config)
             uploadArtifacts(store, config)
             flushOutbox(store, config)
@@ -79,6 +81,8 @@ internal class DiagnosticsWorker(
             store.cleanupSafeLocalSources()
             store.markUploadSuccess()
             Result.success()
+        } catch (cancelled: CancellationException) {
+            throw cancelled
         } catch (error: Throwable) {
             store.setLastError(error.message ?: error.javaClass.simpleName)
             Result.retry()
@@ -87,9 +91,10 @@ internal class DiagnosticsWorker(
         }
     }
 
-    private fun flushOutbox(store: DiagnosticsStore, config: DiagnosticConfig) {
+    private suspend fun flushOutbox(store: DiagnosticsStore, config: DiagnosticConfig) {
         TABLES.forEach { table ->
             while (true) {
+                currentCoroutineContext().ensureActive()
                 val batch = store.nextOutbox(table, 50)
                 if (batch.isEmpty()) break
                 val payload = JSONArray().apply { batch.forEach { put(org.json.JSONObject(it.payload)) } }
@@ -116,51 +121,75 @@ internal class DiagnosticsWorker(
         }
     }
 
-    private fun uploadArtifacts(store: DiagnosticsStore, config: DiagnosticConfig) {
+    private suspend fun uploadArtifacts(store: DiagnosticsStore, config: DiagnosticConfig) {
         val outputDir = File(applicationContext.cacheDir, "maina-diagnostic-compressed")
-        store.pendingArtifacts().forEach { artifact ->
-            try {
-                val prepared = DiagnosticAudioTranscoder.prepare(artifact, outputDir)
-                val objectPath = store.markArtifactPrepared(artifact.artifactId, prepared)
-                val response = request(
-                    method = "POST",
-                    url = storageObjectUrl(config, objectPath),
-                    config = config,
-                    contentType = prepared.contentType,
-                    bodyWriter = { output ->
-                        File(prepared.path).inputStream().buffered().use { input -> input.copyTo(output, 64 * 1024) }
-                    },
-                    extraHeaders = mapOf(
-                        "x-upsert" to "false",
-                        "cache-control" to "0",
-                    ),
-                )
-                // 409 means a previous attempt completed but its response was lost.
-                if (response.code !in 200..299 && response.code != 409) {
-                    error("artifact upload HTTP ${response.code}: ${response.body.take(500)}")
+        while (true) {
+            currentCoroutineContext().ensureActive()
+            val batch = store.pendingArtifacts(ARTIFACT_BATCH_SIZE)
+            if (batch.isEmpty()) break
+            for (artifact in batch) {
+                currentCoroutineContext().ensureActive()
+                try {
+                    val prepared = DiagnosticAudioTranscoder.prepare(artifact, outputDir)
+                    val objectPath = store.markArtifactPrepared(artifact.artifactId, prepared)
+                    val response = request(
+                        method = "POST",
+                        url = storageObjectUrl(config, objectPath),
+                        config = config,
+                        contentType = prepared.contentType,
+                        bodyWriter = { output ->
+                            File(prepared.path).inputStream().buffered().use { input ->
+                                val buffer = ByteArray(64 * 1024)
+                                while (true) {
+                                    if (isStopped) throw CancellationException("Diagnostics worker stopped during upload")
+                                    val count = input.read(buffer)
+                                    if (count <= 0) break
+                                    output.write(buffer, 0, count)
+                                }
+                            }
+                        },
+                        extraHeaders = mapOf(
+                            "x-upsert" to "false",
+                            "cache-control" to "0",
+                        ),
+                    )
+                    // 409 means a previous attempt completed but its response was lost.
+                    if (response.code !in 200..299 && response.code != 409) {
+                        error("artifact upload HTTP ${response.code}: ${response.body.take(500)}")
+                    }
+                    store.markArtifactUploaded(artifact.copy(objectPath = objectPath), prepared)
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (error: Throwable) {
+                    store.markArtifactFailure(artifact.artifactId, error.message ?: error.javaClass.simpleName)
+                    throw error
                 }
-                store.markArtifactUploaded(artifact.copy(objectPath = objectPath), prepared)
-            } catch (error: Throwable) {
-                store.markArtifactFailure(artifact.artifactId, error.message ?: error.javaClass.simpleName)
-                throw error
             }
         }
     }
 
-    private fun deleteExpiredArtifacts(store: DiagnosticsStore, config: DiagnosticConfig) {
-        store.expiredArtifacts(System.currentTimeMillis()).forEach { artifact ->
-            val path = artifact.objectPath ?: return@forEach
-            val response = request(
-                method = "DELETE",
-                url = storageObjectUrl(config, path),
-                config = config,
-                contentType = null,
-                bodyWriter = null,
-            )
-            if (response.code in 200..299 || response.code == 404) {
-                store.markRemoteDeleted(artifact.artifactId)
-            } else {
-                error("artifact retention delete HTTP ${response.code}: ${response.body.take(500)}")
+    private suspend fun deleteExpiredArtifacts(store: DiagnosticsStore, config: DiagnosticConfig) {
+        while (true) {
+            currentCoroutineContext().ensureActive()
+            val batch = store.expiredArtifacts(System.currentTimeMillis(), RETENTION_BATCH_SIZE)
+            if (batch.isEmpty()) break
+            for (artifact in batch) {
+                currentCoroutineContext().ensureActive()
+                val path = requireNotNull(artifact.objectPath) {
+                    "Uploaded artifact ${artifact.artifactId} has no remote object path"
+                }
+                val response = request(
+                    method = "DELETE",
+                    url = storageObjectUrl(config, path),
+                    config = config,
+                    contentType = null,
+                    bodyWriter = null,
+                )
+                if (response.code in 200..299 || response.code == 404) {
+                    store.markRemoteDeleted(artifact.artifactId)
+                } else {
+                    error("artifact retention delete HTTP ${response.code}: ${response.body.take(500)}")
+                }
             }
         }
     }
@@ -206,6 +235,8 @@ internal class DiagnosticsWorker(
     }
 
     companion object {
+        private const val ARTIFACT_BATCH_SIZE = 4
+        private const val RETENTION_BATCH_SIZE = 20
         private val TABLES = listOf("diagnostic_events", "diagnostic_runs", "diagnostic_artifacts")
     }
 }

@@ -35,3 +35,9 @@ Model download remains an Android/Google service operation and can be deferred b
 - Empty-transcript meetings retain their WAV by design; deletion requires a transcript safety copy.
 - Remote expiry is best-effort while Maina remains installed and periodically reaches the network; server-side lifecycle automation can replace it if this development archive becomes long-lived.
 - This is observability and backup plumbing, not proof that Android `SpeechRecognizer` can run flawlessly for hours. Device endurance testing is still mandatory before trusting production meetings.
+
+## v0.8.1 hardening amendment
+
+The worker drains all available artifacts in bounded batches, exposes and resets terminal failures on explicit user request, and records queue age/attempt state. Capture-health values come from observed `audiostart`, `audioend`, recognizer start and recognizer end events. `uploaded_segments = 0` remains a truthful run-finalization snapshot because background upload happens afterward; `diagnostic_artifacts` is the authoritative upload-completion record.
+
+The microphone foreground service raises process importance and provides Android's required recording disclosure. It does not own `AudioRecord`; the native recorder inside `expo-speech-recognition` does. This design remains a device-test candidate rather than a guarantee of uninterrupted multi-hour capture.

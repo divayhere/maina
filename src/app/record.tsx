@@ -32,6 +32,7 @@ import {
   startRecordingForegroundService,
   stopRecordingForegroundService,
 } from '@/hardware/recording/foreground';
+import { CaptureHealthTracker } from '@/hardware/recording/health';
 import { recordingDir, segmentIndexFromUri, segmentPath } from '@/hardware/recording/paths';
 import { log } from '@/services/logger';
 import {
@@ -67,6 +68,7 @@ export default function RecordScreen() {
   const startedAtRef = useRef(0);
   const sessionStartedAtRef = useRef(0);
   const sessionStartsRef = useRef<Record<number, number>>({});
+  const healthRef = useRef(new CaptureHealthTracker());
   const recordingSessionIdRef = useRef(newId());
   const activeRef = useRef(false);
   const meetingCreatedRef = useRef(false);
@@ -135,8 +137,10 @@ export default function RecordScreen() {
     const expectedUri = segmentPath(dirRef.current, index);
     await startRecordingSegment(idRef.current, index, expectedUri);
     sessionRef.current = index;
+    healthRef.current.requestSegment(index);
     sessionStartedAtRef.current = Date.now();
     sessionStartsRef.current[index] = sessionStartedAtRef.current;
+    lastEventRef.current = sessionStartedAtRef.current;
     setDiagnosticContext({ segmentIndex: index });
     endingSessionRef.current = false;
     sessionErrorRef.current = undefined;
@@ -171,6 +175,7 @@ export default function RecordScreen() {
   const requestSessionEnd = (reason: string, graceful: boolean) => {
     if (!activeRef.current || endingSessionRef.current) return;
     endingSessionRef.current = true;
+    healthRef.current.captureUnavailable(Date.now());
     commitText(interimRef.current);
     lastEventRef.current = Date.now();
     log.info('record', 'ending audio file', { index: sessionRef.current, reason, graceful });
@@ -224,7 +229,10 @@ export default function RecordScreen() {
   });
 
   useSpeechRecognitionEvent('end', () => {
-    lastEventRef.current = Date.now();
+    const now = Date.now();
+    lastEventRef.current = now;
+    healthRef.current.recognizerEnded(now);
+    if (activeRef.current) healthRef.current.captureUnavailable(now);
     setListening(false);
     endingSessionRef.current = false;
     const waiter = endWaiterRef.current;
@@ -239,14 +247,27 @@ export default function RecordScreen() {
   });
 
   useSpeechRecognitionEvent('start', () => {
-    lastEventRef.current = Date.now();
+    const now = Date.now();
+    lastEventRef.current = now;
+    healthRef.current.recognizerStarted(now);
     setListening(true);
     log.info('record', 'recognizer ready', { index: sessionRef.current });
   });
 
-  useSpeechRecognitionEvent('audioend', (event) => {
+  useSpeechRecognitionEvent('audiostart', (event) => {
+    const now = Date.now();
     const index = segmentIndexFromUri(event?.uri) ?? sessionRef.current;
-    const durationMs = Math.max(0, Date.now() - (sessionStartsRef.current[index] ?? sessionStartedAtRef.current));
+    sessionStartsRef.current[index] = now;
+    healthRef.current.audioStarted(index, now);
+    log.info('record', 'audio capture ready', { index, uriReported: !!event?.uri });
+  });
+
+  useSpeechRecognitionEvent('audioend', (event) => {
+    const now = Date.now();
+    const index = segmentIndexFromUri(event?.uri) ?? sessionRef.current;
+    const durationMs = Math.max(0, now - (sessionStartsRef.current[index] ?? sessionStartedAtRef.current));
+    healthRef.current.audioEnded(index, now, !!event?.uri);
+    if (activeRef.current) healthRef.current.captureUnavailable(now);
     artifactQueueRef.current = artifactQueueRef.current.catch(() => {}).then(() => finishRecordingSegment(
       idRef.current,
       index,
@@ -360,12 +381,14 @@ export default function RecordScreen() {
 
       if (now - lastHealthRef.current >= 60000) {
         lastHealthRef.current = now;
+        const health = healthRef.current.snapshot();
         log.info('record-health', 'capture heartbeat', {
           elapsedMs: now - startedAtRef.current,
           words: transcriptWordCount(finalRef.current),
           index: sessionRef.current,
           restarts: restartCountRef.current,
           listening,
+          ...health,
         });
       }
       if (now - sessionStartedAtRef.current >= MAX_FILE_MS) {
@@ -435,6 +458,7 @@ export default function RecordScreen() {
             content: finalRef.current,
           });
         }
+        const health = healthRef.current.snapshot();
         await finalizeDiagnosticRun({
           runId: recordingSessionIdRef.current,
           meetingId: id,
@@ -442,15 +466,23 @@ export default function RecordScreen() {
           endedAt: new Date(endedAt).toISOString(),
           status: finalRef.current ? 'transcribed' : 'recorded',
           wallDurationMs: endedAt - startedAtRef.current,
-          audioDurationMs: endedAt - startedAtRef.current,
-          expectedSegments: sessionRef.current + 1,
-          closedSegments: sessionRef.current + 1,
+          audioDurationMs: health.audioDurationMs,
+          expectedSegments: health.expectedSegments,
+          closedSegments: health.closedSegments,
           uploadedSegments: 0,
           transcriptWords: transcriptWordCount(finalRef.current),
           recognizerRestarts: restartCountRef.current,
-          recognizerDowntimeMs: 0,
-          measuredGapMs: 0,
-          payload: { language: langRef.current, allowedLanguages: ACTIVE_LANGUAGES },
+          recognizerDowntimeMs: health.recognizerDowntimeMs,
+          measuredGapMs: health.measuredGapMs,
+          payload: {
+            language: langRef.current,
+            allowedLanguages: ACTIVE_LANGUAGES,
+            failedSegments: health.failedSegments,
+            largestGapMs: health.largestGapMs,
+            uploadedSegmentsMeasuredAt: 'run-finalization-before-background-worker',
+            captureOwner: 'expo-speech-recognition-native-audio-recorder',
+            foregroundServiceRole: 'process-priority-and-microphone-disclosure',
+          },
         });
       } catch (cause) {
         log.warn('remote', 'meeting artifacts remained local for later diagnostics retry', { err: String(cause) });
