@@ -12,6 +12,7 @@ import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
 import androidx.work.WorkerParameters
+import androidx.work.workDataOf
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.currentCoroutineContext
@@ -24,22 +25,55 @@ import java.net.URL
 import java.util.concurrent.TimeUnit
 
 internal object DiagnosticsScheduler {
-    private const val SYNC_WORK = "maina-diagnostics-sync"
+    private const val EVENT_WORK = "maina-diagnostics-events-v2"
+    private const val ARTIFACT_WORK = "maina-diagnostics-artifacts-v2"
     private const val RETENTION_WORK = "maina-diagnostics-retention"
 
-    fun enqueue(context: Context, replace: Boolean = false) {
+    fun enqueueEvents(context: Context, replace: Boolean = false, urgent: Boolean = false) =
+        enqueueLane(
+            context,
+            EVENT_WORK,
+            "events",
+            replace,
+            requireStorage = false,
+            requireBatteryNotLow = false,
+            delaySeconds = if (urgent || replace) 0 else 30,
+        )
+
+    fun enqueueArtifacts(context: Context, replace: Boolean = false) =
+        enqueueLane(
+            context,
+            ARTIFACT_WORK,
+            "artifacts",
+            replace,
+            requireStorage = true,
+            requireBatteryNotLow = true,
+            delaySeconds = if (replace) 0 else 10,
+        )
+
+    private fun enqueueLane(
+        context: Context,
+        workName: String,
+        lane: String,
+        replace: Boolean,
+        requireStorage: Boolean,
+        requireBatteryNotLow: Boolean,
+        delaySeconds: Long,
+    ) {
         val constraints = Constraints.Builder()
             .setRequiredNetworkType(NetworkType.CONNECTED)
-            .setRequiresStorageNotLow(true)
+            .setRequiresStorageNotLow(requireStorage)
+            .setRequiresBatteryNotLow(requireBatteryNotLow)
             .build()
         val request = OneTimeWorkRequestBuilder<DiagnosticsWorker>()
             .setConstraints(constraints)
-            .setInitialDelay(if (replace) 0 else 2, TimeUnit.SECONDS)
+            .setInputData(workDataOf("lane" to lane))
+            .setInitialDelay(delaySeconds, TimeUnit.SECONDS)
             .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 30, TimeUnit.SECONDS)
-            .addTag(SYNC_WORK)
+            .addTag(workName)
             .build()
         WorkManager.getInstance(context.applicationContext).enqueueUniqueWork(
-            SYNC_WORK,
+            workName,
             if (replace) ExistingWorkPolicy.REPLACE else ExistingWorkPolicy.KEEP,
             request,
         )
@@ -52,6 +86,7 @@ internal object DiagnosticsScheduler {
             .build()
         val request = PeriodicWorkRequestBuilder<DiagnosticsWorker>(24, TimeUnit.HOURS)
             .setConstraints(constraints)
+            .setInputData(workDataOf("lane" to "maintenance"))
             .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 30, TimeUnit.SECONDS)
             .addTag(RETENTION_WORK)
             .build()
@@ -68,26 +103,37 @@ internal class DiagnosticsWorker(
     params: WorkerParameters,
 ) : CoroutineWorker(appContext, params) {
     override suspend fun doWork(): Result = withContext(Dispatchers.IO) {
-        val store = DiagnosticsStore(applicationContext)
+        val store = DiagnosticsStore.shared(applicationContext)
         try {
             val config = store.config()
             if (!config.enabled || config.supabaseUrl.isBlank() || config.publishableKey.isBlank()) {
                 return@withContext Result.success()
             }
-            flushOutbox(store, config)
-            val artifactFailures = uploadArtifacts(store, config)
-            flushOutbox(store, config)
-            deleteExpiredArtifacts(store, config)
-            store.cleanupRetainedLocalSources()
-            store.markUploadSuccess()
-            if (artifactFailures) Result.retry() else Result.success()
+            when (inputData.getString("lane") ?: "events") {
+                "events" -> {
+                    flushOutbox(store, config)
+                    store.markUploadSuccess()
+                    Result.success()
+                }
+                "artifacts" -> {
+                    val artifactFailures = uploadArtifacts(store, config)
+                    // Artifact metadata and any failure event are small and may
+                    // be delivered here, but never hold the independent event lane.
+                    flushOutbox(store, config)
+                    if (artifactFailures) Result.retry() else Result.success()
+                }
+                "maintenance" -> {
+                    deleteExpiredArtifacts(store, config)
+                    store.cleanupRetainedLocalSources()
+                    Result.success()
+                }
+                else -> Result.failure()
+            }
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (error: Throwable) {
             store.setLastError(error.message ?: error.javaClass.simpleName)
             Result.retry()
-        } finally {
-            store.close()
         }
     }
 

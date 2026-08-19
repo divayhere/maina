@@ -47,4 +47,22 @@ describe('CaptureHealthTracker', () => {
       audioDurationMs: 0,
     });
   });
+
+  it('does not report an intentional pause as capture downtime', () => {
+    const tracker = new CaptureHealthTracker();
+    tracker.audioStarted(0, 1_000);
+    tracker.pauseStarted(11_000);
+    tracker.audioEnded(0, 11_100, true);
+    tracker.captureUnavailable(11_100);
+    tracker.recognizerEnded(11_100);
+    tracker.pauseEnded(31_000);
+    tracker.audioStarted(1, 31_200);
+    tracker.recognizerStarted(31_300);
+
+    expect(tracker.snapshot(40_000)).toMatchObject({
+      pausedDurationMs: 20_000,
+      measuredGapMs: 0,
+      recognizerDowntimeMs: 0,
+    });
+  });
 });

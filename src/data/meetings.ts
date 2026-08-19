@@ -4,6 +4,7 @@
  */
 import { getDb } from './db';
 import { log } from '../services/logger';
+import { splitTranscriptChunks, transcriptWordCount } from '../core/transcription/transcript';
 
 export type MeetingStatus =
   | 'recording'
@@ -11,7 +12,10 @@ export type MeetingStatus =
   | 'recorded'
   | 'transcribing'
   | 'transcribed'
+  | 'summarizing'
   | 'summarized';
+
+export type SummaryStatus = 'idle' | 'queued' | 'running' | 'ready' | 'failed';
 
 export interface Meeting {
   id: string;
@@ -21,10 +25,18 @@ export interface Meeting {
   audioUri?: string | null; // recording folder (segments) or null after cleanup
   transcript?: string | null;
   summary?: string | null;
+  decisions: string[];
+  openQuestions: string[];
   language?: string | null;
   status: MeetingStatus;
+  summaryStatus: SummaryStatus;
+  summaryProviderId?: string | null;
+  summaryModel?: string | null;
+  summarizedAt?: number | null;
   segmentCount: number;
   transcribedSegments: number;
+  openTodoCount: number;
+  totalTodoCount: number;
   updatedAt: number;
   lastError?: string | null;
   restartCount: number;
@@ -38,13 +50,43 @@ interface Row {
   audio_uri: string | null;
   transcript: string | null;
   summary: string | null;
+  decisions_json: string | null;
+  open_questions_json: string | null;
   language: string | null;
   status: MeetingStatus;
+  summary_status: SummaryStatus;
+  summary_provider_id: string | null;
+  summary_model: string | null;
+  summarized_at: number | null;
   segment_count: number;
   transcribed_segments: number;
+  open_todo_count?: number | null;
+  total_todo_count?: number | null;
   updated_at: number;
   last_error: string | null;
   restart_count: number;
+}
+
+function parseJsonList(value: string | null | undefined): string[] {
+  if (!value) return [];
+  try {
+    const parsed = JSON.parse(value);
+    if (!Array.isArray(parsed)) return [];
+    return parsed
+      .map((item) => String(item ?? '').trim())
+      .filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+function stringifyJsonList(value: string[] | undefined | null): string | null {
+  if (!value || value.length === 0) return null;
+  return JSON.stringify(
+    value
+      .map((item) => item.trim())
+      .filter(Boolean),
+  );
 }
 
 const toMeeting = (r: Row): Meeting => ({
@@ -55,13 +97,63 @@ const toMeeting = (r: Row): Meeting => ({
   audioUri: r.audio_uri,
   transcript: r.transcript,
   summary: r.summary,
+  decisions: parseJsonList(r.decisions_json),
+  openQuestions: parseJsonList(r.open_questions_json),
   language: r.language,
   status: r.status,
+  summaryStatus: r.summary_status ?? 'idle',
+  summaryProviderId: r.summary_provider_id,
+  summaryModel: r.summary_model,
+  summarizedAt: r.summarized_at,
   segmentCount: r.segment_count ?? 0,
   transcribedSegments: r.transcribed_segments ?? 0,
+  openTodoCount: r.open_todo_count ?? 0,
+  totalTodoCount: r.total_todo_count ?? 0,
   updatedAt: r.updated_at || r.started_at,
   lastError: r.last_error,
   restartCount: r.restart_count ?? 0,
+});
+
+export interface TodoItem {
+  id: string;
+  meetingId: string;
+  text: string;
+  done: boolean;
+  origin: 'ai' | 'manual';
+  sourceQuote?: string | null;
+  sourceSpeakerId?: string | null;
+  sourceTimestamp?: number | null;
+  sortOrder: number;
+  createdAt: number;
+  updatedAt: number;
+}
+
+interface TodoRow {
+  id: string;
+  meeting_id: string;
+  text: string;
+  done: number;
+  origin: 'ai' | 'manual';
+  source_quote: string | null;
+  source_speaker_id: string | null;
+  source_timestamp: number | null;
+  sort_order: number;
+  created_at: number;
+  updated_at: number;
+}
+
+const toTodoItem = (row: TodoRow): TodoItem => ({
+  id: row.id,
+  meetingId: row.meeting_id,
+  text: row.text,
+  done: row.done === 1,
+  origin: row.origin,
+  sourceQuote: row.source_quote,
+  sourceSpeakerId: row.source_speaker_id,
+  sourceTimestamp: row.source_timestamp,
+  sortOrder: row.sort_order,
+  createdAt: row.created_at,
+  updatedAt: row.updated_at,
 });
 
 export interface RecordingSegment {
@@ -72,6 +164,109 @@ export interface RecordingSegment {
   endedAt?: number | null;
   status: 'recording' | 'recorded' | 'failed';
   errorCode?: string | null;
+}
+
+export type TranscriptBlockStatus = 'draft' | 'final';
+
+export interface TranscriptBlock {
+  blockId: string;
+  meetingId: string;
+  sequence: number;
+  status: TranscriptBlockStatus;
+  segmentIndex?: number | null;
+  startedAt?: number | null;
+  endedAt?: number | null;
+  language?: string | null;
+  speakerId?: string | null;
+  text: string;
+  wordCount: number;
+  charCount: number;
+  createdAt: number;
+  updatedAt: number;
+  isLegacy?: boolean;
+}
+
+interface TranscriptBlockRow {
+  block_id: string;
+  meeting_id: string;
+  sequence: number;
+  status: TranscriptBlockStatus;
+  segment_index: number | null;
+  started_at: number | null;
+  ended_at: number | null;
+  language: string | null;
+  speaker_id: string | null;
+  text: string;
+  word_count: number;
+  char_count: number;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface TranscriptPage {
+  blocks: TranscriptBlock[];
+  hasMore: boolean;
+  source: 'blocks' | 'legacy' | 'empty';
+  totalBlocks: number;
+}
+
+export interface TranscriptSummary {
+  source: 'blocks' | 'legacy' | 'empty';
+  blockCount: number;
+  wordCount: number;
+  charCount: number;
+  latestSequence: number | null;
+  hasDraft: boolean;
+  hasText: boolean;
+}
+
+const toTranscriptBlock = (row: TranscriptBlockRow): TranscriptBlock => ({
+  blockId: row.block_id,
+  meetingId: row.meeting_id,
+  sequence: row.sequence,
+  status: row.status,
+  segmentIndex: row.segment_index,
+  startedAt: row.started_at,
+  endedAt: row.ended_at,
+  language: row.language,
+  speakerId: row.speaker_id,
+  text: row.text,
+  wordCount: row.word_count,
+  charCount: row.char_count,
+  createdAt: row.created_at,
+  updatedAt: row.updated_at,
+});
+
+function legacyTranscriptBlock(meeting: Meeting): TranscriptBlock | null {
+  const text = meeting.transcript?.trim();
+  if (!text) return null;
+  return {
+    blockId: `legacy-${meeting.id}`,
+    meetingId: meeting.id,
+    sequence: 0,
+    status: 'final',
+    segmentIndex: null,
+    startedAt: meeting.startedAt,
+    endedAt: meeting.startedAt + meeting.durationMs,
+    language: meeting.language ?? null,
+    speakerId: null,
+    text,
+    wordCount: transcriptWordCount(text),
+    charCount: text.length,
+    createdAt: meeting.startedAt,
+    updatedAt: meeting.updatedAt,
+    isLegacy: true,
+  };
+}
+
+function formatBlockTimestamp(at?: number | null): string {
+  if (!at || !Number.isFinite(at) || at <= 0) return '';
+  const date = new Date(at);
+  return date.toLocaleTimeString([], {
+    hour: 'numeric',
+    minute: '2-digit',
+    second: '2-digit',
+  });
 }
 
 export function newId(): string {
@@ -107,14 +302,54 @@ export async function createMeeting(m: {
 
 export async function listMeetings(): Promise<Meeting[]> {
   const db = await getDb();
-  const rows = await db.getAllAsync<Row>('SELECT * FROM meetings ORDER BY started_at DESC');
+  const rows = await db.getAllAsync<Row>(`
+    SELECT m.*,
+           (SELECT COUNT(*) FROM todo_items t WHERE t.meeting_id = m.id AND t.done = 0) AS open_todo_count,
+           (SELECT COUNT(*) FROM todo_items t WHERE t.meeting_id = m.id) AS total_todo_count
+    FROM meetings m
+    ORDER BY m.started_at DESC
+  `);
   return rows.map(toMeeting);
 }
 
 export async function getMeeting(id: string): Promise<Meeting | null> {
   const db = await getDb();
-  const row = await db.getFirstAsync<Row>('SELECT * FROM meetings WHERE id = ?', [id]);
+  const row = await db.getFirstAsync<Row>(
+    `SELECT m.*,
+            (SELECT COUNT(*) FROM todo_items t WHERE t.meeting_id = m.id AND t.done = 0) AS open_todo_count,
+            (SELECT COUNT(*) FROM todo_items t WHERE t.meeting_id = m.id) AS total_todo_count
+     FROM meetings m
+     WHERE m.id = ?`,
+    [id],
+  );
   return row ? toMeeting(row) : null;
+}
+
+export async function listMeetingsNeedingSummary(): Promise<Meeting[]> {
+  const db = await getDb();
+  const rows = await db.getAllAsync<Row>(
+    `SELECT m.*,
+            (SELECT COUNT(*) FROM todo_items t WHERE t.meeting_id = m.id AND t.done = 0) AS open_todo_count,
+            (SELECT COUNT(*) FROM todo_items t WHERE t.meeting_id = m.id) AS total_todo_count
+     FROM meetings m
+     WHERE m.summary_status IN ('queued', 'running')
+     ORDER BY m.started_at DESC`,
+  );
+  return rows.map(toMeeting);
+}
+
+export async function listMeetingsEligibleForSummaryQueue(): Promise<Meeting[]> {
+  const db = await getDb();
+  const rows = await db.getAllAsync<Row>(
+    `SELECT m.*,
+            (SELECT COUNT(*) FROM todo_items t WHERE t.meeting_id = m.id AND t.done = 0) AS open_todo_count,
+            (SELECT COUNT(*) FROM todo_items t WHERE t.meeting_id = m.id) AS total_todo_count
+     FROM meetings m
+     WHERE m.status IN ('transcribed', 'summarizing', 'summarized')
+       AND m.summary_status IN ('idle', 'failed', 'queued', 'running')
+     ORDER BY m.started_at DESC`,
+  );
+  return rows.map(toMeeting);
 }
 
 export async function updateMeeting(id: string, patch: Partial<Meeting>): Promise<void> {
@@ -124,8 +359,14 @@ export async function updateMeeting(id: string, patch: Partial<Meeting>): Promis
     audioUri: 'audio_uri',
     transcript: 'transcript',
     summary: 'summary',
+    decisions: 'decisions_json',
+    openQuestions: 'open_questions_json',
     language: 'language',
     status: 'status',
+    summaryStatus: 'summary_status',
+    summaryProviderId: 'summary_provider_id',
+    summaryModel: 'summary_model',
+    summarizedAt: 'summarized_at',
     segmentCount: 'segment_count',
     transcribedSegments: 'transcribed_segments',
     updatedAt: 'updated_at',
@@ -137,7 +378,11 @@ export async function updateMeeting(id: string, patch: Partial<Meeting>): Promis
   for (const [k, col] of Object.entries(map)) {
     if (k in patch) {
       cols.push(`${col} = ?`);
-      vals.push((patch as Record<string, string | number | null | undefined>)[k] ?? null);
+      if (k === 'decisions' || k === 'openQuestions') {
+        vals.push(stringifyJsonList((patch as Record<string, string[] | null | undefined>)[k]));
+      } else {
+        vals.push((patch as Record<string, string | number | null | undefined>)[k] ?? null);
+      }
     }
   }
   if (cols.length === 0) return;
@@ -171,17 +416,13 @@ export async function recoverInterruptedMeetings(): Promise<number> {
 export async function markMeetingsAudioDeleted(ids: string[]): Promise<void> {
   if (ids.length === 0) return;
   const db = await getDb();
-  let changed = 0;
-  await db.withTransactionAsync(async () => {
-    for (const id of ids) {
-      const result = await db.runAsync(
-        'UPDATE meetings SET audio_uri = NULL, updated_at = ? WHERE id = ? AND audio_uri IS NOT NULL',
-        [Date.now(), id],
-      );
-      changed += result.changes;
-    }
-  });
-  if (changed > 0) log.info('meetings', 'synced diagnostic audio cleanup', { count: changed });
+  const placeholders = ids.map(() => '?').join(', ');
+  const result = await db.runAsync(
+    `UPDATE meetings SET audio_uri = NULL, updated_at = ?
+     WHERE audio_uri IS NOT NULL AND id IN (${placeholders})`,
+    [Date.now(), ...ids],
+  );
+  if (result.changes > 0) log.info('meetings', 'synced diagnostic audio cleanup', { count: result.changes });
 }
 
 export async function startRecordingSegment(
@@ -242,6 +483,524 @@ export async function listRecordingSegments(meetingId: string): Promise<Recordin
     status: row.status,
     errorCode: row.error_code,
   }));
+}
+
+async function nextTranscriptSequence(meetingId: string): Promise<number> {
+  const db = await getDb();
+  const row = await db.getFirstAsync<{ next_sequence: number }>(
+    `SELECT COALESCE(MAX(sequence), -1) + 1 AS next_sequence
+     FROM transcript_blocks
+     WHERE meeting_id = ?`,
+    [meetingId],
+  );
+  return row?.next_sequence ?? 0;
+}
+
+async function getDraftTranscriptBlock(meetingId: string): Promise<TranscriptBlock | null> {
+  const db = await getDb();
+  const row = await db.getFirstAsync<TranscriptBlockRow>(
+    `SELECT * FROM transcript_blocks
+     WHERE meeting_id = ? AND status = 'draft'
+     LIMIT 1`,
+    [meetingId],
+  );
+  return row ? toTranscriptBlock(row) : null;
+}
+
+export async function upsertTranscriptDraftBlock(input: {
+  meetingId: string;
+  text: string;
+  segmentIndex?: number | null;
+  startedAt?: number | null;
+  endedAt?: number | null;
+  language?: string | null;
+  speakerId?: string | null;
+}): Promise<TranscriptBlock | null> {
+  const text = input.text.trim();
+  if (!text) {
+    await discardTranscriptDraftBlock(input.meetingId);
+    return null;
+  }
+  const db = await getDb();
+  const now = Date.now();
+  const existing = await getDraftTranscriptBlock(input.meetingId);
+  if (existing) {
+    await db.runAsync(
+      `UPDATE transcript_blocks
+       SET text = ?, word_count = ?, char_count = ?, segment_index = ?, started_at = ?, ended_at = ?,
+           language = ?, speaker_id = ?, updated_at = ?
+       WHERE block_id = ?`,
+      [
+        text,
+        transcriptWordCount(text),
+        text.length,
+        input.segmentIndex ?? existing.segmentIndex ?? null,
+        input.startedAt ?? existing.startedAt ?? now,
+        input.endedAt ?? now,
+        input.language ?? existing.language ?? null,
+        input.speakerId ?? existing.speakerId ?? null,
+        now,
+        existing.blockId,
+      ],
+    );
+    return getDraftTranscriptBlock(input.meetingId);
+  }
+
+  const sequence = await nextTranscriptSequence(input.meetingId);
+  const blockId = newId();
+  await db.runAsync(
+    `INSERT INTO transcript_blocks
+      (block_id, meeting_id, sequence, status, segment_index, started_at, ended_at, language, speaker_id, text, word_count, char_count, created_at, updated_at)
+     VALUES (?, ?, ?, 'draft', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      blockId,
+      input.meetingId,
+      sequence,
+      input.segmentIndex ?? null,
+      input.startedAt ?? now,
+      input.endedAt ?? now,
+      input.language ?? null,
+      input.speakerId ?? null,
+      text,
+      transcriptWordCount(text),
+      text.length,
+      now,
+      now,
+    ],
+  );
+  return getDraftTranscriptBlock(input.meetingId);
+}
+
+export async function discardTranscriptDraftBlock(meetingId: string): Promise<void> {
+  const db = await getDb();
+  await db.runAsync(
+    `DELETE FROM transcript_blocks
+     WHERE meeting_id = ? AND status = 'draft'`,
+    [meetingId],
+  );
+}
+
+export async function commitTranscriptFinalBlocks(input: {
+  meetingId: string;
+  text: string;
+  segmentIndex?: number | null;
+  startedAt?: number | null;
+  endedAt?: number | null;
+  language?: string | null;
+  speakerId?: string | null;
+}): Promise<TranscriptBlock[]> {
+  const normalized = input.text.trim();
+  const db = await getDb();
+  const draft = await getDraftTranscriptBlock(input.meetingId);
+  if (!normalized) {
+    if (draft) await discardTranscriptDraftBlock(input.meetingId);
+    return [];
+  }
+  const chunks = splitTranscriptChunks(normalized);
+  if (chunks.length === 0) {
+    if (draft) await discardTranscriptDraftBlock(input.meetingId);
+    return [];
+  }
+
+  const baseSequence = draft?.sequence ?? await nextTranscriptSequence(input.meetingId);
+  const baseStartedAt = input.startedAt ?? draft?.startedAt ?? Date.now();
+  const baseEndedAt = input.endedAt ?? draft?.endedAt ?? Date.now();
+  const createdAt = Date.now();
+
+  await db.withTransactionAsync(async () => {
+    if (draft) {
+      await db.runAsync(`DELETE FROM transcript_blocks WHERE block_id = ?`, [draft.blockId]);
+    }
+    for (let index = 0; index < chunks.length; index += 1) {
+      const chunk = chunks[index];
+      await db.runAsync(
+        `INSERT INTO transcript_blocks
+          (block_id, meeting_id, sequence, status, segment_index, started_at, ended_at, language, speaker_id, text, word_count, char_count, created_at, updated_at)
+         VALUES (?, ?, ?, 'final', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          newId(),
+          input.meetingId,
+          baseSequence + index,
+          input.segmentIndex ?? draft?.segmentIndex ?? null,
+          baseStartedAt,
+          baseEndedAt,
+          input.language ?? draft?.language ?? null,
+          input.speakerId ?? draft?.speakerId ?? null,
+          chunk.text,
+          chunk.wordCount,
+          chunk.charCount,
+          createdAt,
+          createdAt,
+        ],
+      );
+    }
+  });
+
+  const rows = await db.getAllAsync<TranscriptBlockRow>(
+    `SELECT * FROM transcript_blocks
+     WHERE meeting_id = ? AND sequence >= ? AND sequence < ?
+     ORDER BY sequence ASC`,
+    [input.meetingId, baseSequence, baseSequence + chunks.length],
+  );
+  return rows.map(toTranscriptBlock);
+}
+
+export async function getTranscriptPage(
+  meetingId: string,
+  options?: { offset?: number; limit?: number; includeDraft?: boolean },
+): Promise<TranscriptPage> {
+  const offset = Math.max(0, options?.offset ?? 0);
+  const limit = Math.max(1, options?.limit ?? 50);
+  const includeDraft = options?.includeDraft ?? true;
+  const db = await getDb();
+  const countRow = await db.getFirstAsync<{ total: number; draft_count: number }>(
+    `SELECT COUNT(*) AS total,
+            SUM(CASE WHEN status = 'draft' THEN 1 ELSE 0 END) AS draft_count
+     FROM transcript_blocks
+     WHERE meeting_id = ?`,
+    [meetingId],
+  );
+  const total = countRow?.total ?? 0;
+  if (total > 0) {
+    const rows = await db.getAllAsync<TranscriptBlockRow>(
+      `SELECT * FROM transcript_blocks
+       WHERE meeting_id = ?
+         AND (? = 1 OR status = 'final')
+       ORDER BY sequence ASC
+       LIMIT ? OFFSET ?`,
+      [meetingId, includeDraft ? 1 : 0, limit, offset],
+    );
+    return {
+      blocks: rows.map(toTranscriptBlock),
+      hasMore: offset + rows.length < total,
+      source: 'blocks',
+      totalBlocks: total,
+    };
+  }
+  const meeting = await getMeeting(meetingId);
+  const legacy = meeting ? legacyTranscriptBlock(meeting) : null;
+  if (!legacy) {
+    return { blocks: [], hasMore: false, source: 'empty', totalBlocks: 0 };
+  }
+  const blocks = offset === 0 ? [legacy] : [];
+  return {
+    blocks,
+    hasMore: false,
+    source: 'legacy',
+    totalBlocks: blocks.length,
+  };
+}
+
+export async function listRecentTranscriptBlocks(
+  meetingId: string,
+  limit = 8,
+): Promise<TranscriptBlock[]> {
+  const page = await getTranscriptPage(meetingId, { limit, offset: 0, includeDraft: true });
+  if (page.source !== 'blocks') return page.blocks;
+  return page.blocks.slice(-limit);
+}
+
+export async function getTranscriptSummary(meetingId: string): Promise<TranscriptSummary> {
+  const db = await getDb();
+  const row = await db.getFirstAsync<{
+    total: number;
+    words: number | null;
+    chars: number | null;
+    latest_sequence: number | null;
+    draft_count: number | null;
+  }>(
+    `SELECT COUNT(*) AS total,
+            SUM(word_count) AS words,
+            SUM(char_count) AS chars,
+            MAX(sequence) AS latest_sequence,
+            SUM(CASE WHEN status = 'draft' THEN 1 ELSE 0 END) AS draft_count
+     FROM transcript_blocks
+     WHERE meeting_id = ?`,
+    [meetingId],
+  );
+  if ((row?.total ?? 0) > 0) {
+    return {
+      source: 'blocks',
+      blockCount: row?.total ?? 0,
+      wordCount: row?.words ?? 0,
+      charCount: row?.chars ?? 0,
+      latestSequence: row?.latest_sequence ?? null,
+      hasDraft: (row?.draft_count ?? 0) > 0,
+      hasText: (row?.chars ?? 0) > 0,
+    };
+  }
+  const meeting = await getMeeting(meetingId);
+  const legacy = meeting ? legacyTranscriptBlock(meeting) : null;
+  if (!legacy) {
+    return {
+      source: 'empty',
+      blockCount: 0,
+      wordCount: 0,
+      charCount: 0,
+      latestSequence: null,
+      hasDraft: false,
+      hasText: false,
+    };
+  }
+  return {
+    source: 'legacy',
+    blockCount: 1,
+    wordCount: legacy.wordCount,
+    charCount: legacy.charCount,
+    latestSequence: legacy.sequence,
+    hasDraft: false,
+    hasText: true,
+  };
+}
+
+export async function buildTranscriptText(
+  meetingId: string,
+  options?: { includeTimestamps?: boolean },
+): Promise<{ text: string; blockCount: number; wordCount: number; source: 'blocks' | 'legacy' | 'empty' }> {
+  const includeTimestamps = options?.includeTimestamps ?? true;
+  let offset = 0;
+  const limit = 100;
+  let source: 'blocks' | 'legacy' | 'empty' = 'empty';
+  const lines: string[] = [];
+  let blockCount = 0;
+  let wordCount = 0;
+
+  while (true) {
+    const page = await getTranscriptPage(meetingId, { offset, limit, includeDraft: true });
+    if (source === 'empty') source = page.source;
+    if (page.blocks.length === 0) break;
+    page.blocks.forEach((block) => {
+      if (!block.text.trim()) return;
+      blockCount += 1;
+      wordCount += block.wordCount;
+      const prefix = includeTimestamps ? formatBlockTimestamp(block.startedAt) : '';
+      lines.push(prefix ? `[${prefix}] ${block.text}` : block.text);
+    });
+    if (!page.hasMore || page.source !== 'blocks') break;
+    offset += page.blocks.length;
+  }
+
+  return {
+    text: lines.join('\n\n').trim(),
+    blockCount,
+    wordCount,
+    source,
+  };
+}
+
+export async function saveMeetingPacket(input: {
+  meetingId: string;
+  title?: string | null;
+  summary?: string | null;
+  decisions?: string[];
+  openQuestions?: string[];
+  providerId?: string | null;
+  model?: string | null;
+  summarizedAt?: number | null;
+}): Promise<void> {
+  await updateMeeting(input.meetingId, {
+    title: input.title?.trim() || undefined,
+    summary: input.summary?.trim() || null,
+    decisions: input.decisions ?? [],
+    openQuestions: input.openQuestions ?? [],
+    summaryStatus: 'ready',
+    summaryProviderId: input.providerId ?? null,
+    summaryModel: input.model ?? null,
+    summarizedAt: input.summarizedAt ?? Date.now(),
+    status: 'summarized',
+    lastError: null,
+  });
+}
+
+export async function clearMeetingPacket(meetingId: string): Promise<void> {
+  const db = await getDb();
+  await db.withTransactionAsync(async () => {
+    await db.runAsync(
+      `UPDATE meetings
+       SET summary = NULL,
+           decisions_json = NULL,
+           open_questions_json = NULL,
+           summary_status = 'idle',
+           summary_provider_id = NULL,
+           summary_model = NULL,
+           summarized_at = NULL,
+           status = CASE WHEN status = 'summarized' OR status = 'summarizing' THEN 'transcribed' ELSE status END,
+           updated_at = ?
+       WHERE id = ?`,
+      [Date.now(), meetingId],
+    );
+    await db.runAsync(`DELETE FROM todo_items WHERE meeting_id = ?`, [meetingId]);
+  });
+}
+
+export async function setMeetingSummaryState(
+  meetingId: string,
+  status: SummaryStatus,
+  options?: { providerId?: string | null; model?: string | null; error?: string | null },
+): Promise<void> {
+  const nextMeetingStatus: MeetingStatus =
+    status === 'ready'
+      ? 'summarized'
+      : status === 'running' || status === 'queued'
+        ? 'summarizing'
+        : 'transcribed';
+  await updateMeeting(meetingId, {
+    summaryStatus: status,
+    summaryProviderId: options?.providerId ?? undefined,
+    summaryModel: options?.model ?? undefined,
+    lastError: options?.error ?? (status === 'failed' ? 'Summary generation failed' : null),
+    status: nextMeetingStatus,
+    summarizedAt: status === 'ready' ? Date.now() : undefined,
+  });
+}
+
+export async function replaceMeetingTodos(
+  meetingId: string,
+  todos: {
+    text: string;
+    done?: boolean;
+    sourceQuote?: string | null;
+    sourceSpeakerId?: string | null;
+    sourceTimestamp?: number | null;
+    origin?: 'ai' | 'manual';
+  }[],
+): Promise<void> {
+  const db = await getDb();
+  const now = Date.now();
+  await db.withTransactionAsync(async () => {
+    await db.runAsync(`DELETE FROM todo_items WHERE meeting_id = ? AND origin = 'ai'`, [meetingId]);
+    for (let index = 0; index < todos.length; index += 1) {
+      const todo = todos[index];
+      const text = todo.text.trim();
+      if (!text) continue;
+      await db.runAsync(
+        `INSERT INTO todo_items
+          (id, meeting_id, text, done, source_quote, source_speaker_id, source_timestamp, sort_order, origin, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          newId(),
+          meetingId,
+          text,
+          todo.done ? 1 : 0,
+          todo.sourceQuote ?? null,
+          todo.sourceSpeakerId ?? null,
+          todo.sourceTimestamp ?? null,
+          index,
+          todo.origin ?? 'ai',
+          now,
+          now,
+        ],
+      );
+    }
+  });
+}
+
+export async function listMeetingTodos(meetingId: string): Promise<TodoItem[]> {
+  const db = await getDb();
+  const rows = await db.getAllAsync<TodoRow>(
+    `SELECT * FROM todo_items
+     WHERE meeting_id = ?
+     ORDER BY done ASC, sort_order ASC, created_at ASC`,
+    [meetingId],
+  );
+  return rows.map(toTodoItem);
+}
+
+export async function listTodos(options?: { done?: boolean }): Promise<TodoItem[]> {
+  const db = await getDb();
+  const rows = options?.done === undefined
+    ? await db.getAllAsync<TodoRow>(
+      `SELECT * FROM todo_items
+       ORDER BY done ASC, updated_at DESC, created_at DESC`,
+    )
+    : await db.getAllAsync<TodoRow>(
+      `SELECT * FROM todo_items
+       WHERE done = ?
+       ORDER BY updated_at DESC, created_at DESC`,
+      [options.done ? 1 : 0],
+    );
+  return rows.map(toTodoItem);
+}
+
+export async function createManualTodo(meetingId: string, text: string): Promise<TodoItem | null> {
+  const trimmed = text.trim();
+  if (!trimmed) return null;
+  const db = await getDb();
+  const row = await db.getFirstAsync<{ next_sort: number }>(
+    `SELECT COALESCE(MAX(sort_order), -1) + 1 AS next_sort
+     FROM todo_items
+     WHERE meeting_id = ?`,
+    [meetingId],
+  );
+  const now = Date.now();
+  const id = newId();
+  await db.runAsync(
+    `INSERT INTO todo_items
+      (id, meeting_id, text, done, sort_order, origin, created_at, updated_at)
+     VALUES (?, ?, ?, 0, ?, 'manual', ?, ?)`,
+    [id, meetingId, trimmed, row?.next_sort ?? 0, now, now],
+  );
+  const created = await db.getFirstAsync<TodoRow>('SELECT * FROM todo_items WHERE id = ?', [id]);
+  return created ? toTodoItem(created) : null;
+}
+
+export async function updateTodoDone(id: string, done: boolean): Promise<void> {
+  const db = await getDb();
+  await db.runAsync(
+    `UPDATE todo_items
+     SET done = ?, updated_at = ?
+     WHERE id = ?`,
+    [done ? 1 : 0, Date.now(), id],
+  );
+}
+
+export async function updateTodoText(id: string, text: string): Promise<void> {
+  const trimmed = text.trim();
+  if (!trimmed) return;
+  const db = await getDb();
+  await db.runAsync(
+    `UPDATE todo_items
+     SET text = ?, updated_at = ?
+     WHERE id = ?`,
+    [trimmed, Date.now(), id],
+  );
+}
+
+export async function deleteTodo(id: string): Promise<void> {
+  const db = await getDb();
+  await db.runAsync(`DELETE FROM todo_items WHERE id = ?`, [id]);
+}
+
+export async function resetMeetingTranscript(meetingId: string): Promise<void> {
+  await clearMeetingPacket(meetingId);
+  const db = await getDb();
+  await db.withTransactionAsync(async () => {
+    await db.runAsync(`DELETE FROM transcript_blocks WHERE meeting_id = ?`, [meetingId]);
+    await db.runAsync(
+      `UPDATE meetings
+       SET transcript = NULL, transcribed_segments = 0, updated_at = ?, last_error = NULL, summary_status = 'idle'
+       WHERE id = ?`,
+      [Date.now(), meetingId],
+    );
+  });
+}
+
+export async function purgeStagingMeetings(): Promise<Meeting[]> {
+  const db = await getDb();
+  const rows = await db.getAllAsync<Row>(
+    `SELECT * FROM meetings
+     WHERE status != 'recording'
+     ORDER BY started_at ASC`,
+  );
+  const meetings = rows.map(toMeeting);
+  if (meetings.length === 0) return [];
+  await db.withTransactionAsync(async () => {
+    for (const meeting of meetings) {
+      await db.runAsync('DELETE FROM meetings WHERE id = ?', [meeting.id]);
+    }
+  });
+  log.warn('meetings', 'purged staging meetings', { count: meetings.length });
+  return meetings;
 }
 
 export async function listInterruptedSegmentUris(): Promise<string[]> {

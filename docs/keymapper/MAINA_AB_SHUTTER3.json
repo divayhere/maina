@@ -1,0 +1,102 @@
+{
+  "keymap_db_version": 22,
+  "app_version": 259,
+  "keymap_list": [
+    {
+      "actionList": [
+        {
+          "data": "intent:#Intent;action=com.divay.maina.action.TOGGLE;package=com.divay.maina;end",
+          "extras": [
+            {
+              "id": "extra_intent_description",
+              "data": "Maina start, pause, or resume"
+            },
+            {
+              "id": "extra_intent_target",
+              "data": "BROADCAST_RECEIVER"
+            },
+            {
+              "id": "extra_intent_extras",
+              "data": "[]"
+            }
+          ],
+          "flags": 0,
+          "type": "INTENT",
+          "uid": "82e939e4-c8af-43eb-939a-313a71f3a9e7"
+        }
+      ],
+      "constraintList": [],
+      "constraintMode": 1,
+      "flags": 0,
+      "id": 0,
+      "isEnabled": true,
+      "trigger": {
+        "extras": [],
+        "flags": 1,
+        "keys": [
+          {
+            "clickType": 0,
+            "deviceBus": 5,
+            "deviceName": "AB Shutter3",
+            "deviceProduct": 33382,
+            "deviceVendor": 9354,
+            "flags": 0,
+            "keyCode": 24,
+            "scanCode": 115,
+            "uid": "1558cd25-a7d8-40a2-9628-a78899b590e9"
+          }
+        ],
+        "mode": 2
+      },
+      "uid": "729ece7f-4d04-43a2-9207-0b9376c6875a"
+    },
+    {
+      "actionList": [
+        {
+          "data": "intent:#Intent;action=com.divay.maina.action.STOP;package=com.divay.maina;end",
+          "extras": [
+            {
+              "id": "extra_intent_description",
+              "data": "Maina stop and save"
+            },
+            {
+              "id": "extra_intent_target",
+              "data": "BROADCAST_RECEIVER"
+            },
+            {
+              "id": "extra_intent_extras",
+              "data": "[]"
+            }
+          ],
+          "flags": 0,
+          "type": "INTENT",
+          "uid": "f9f504f5-58f8-4390-8010-74c2903c08ab"
+        }
+      ],
+      "constraintList": [],
+      "constraintMode": 1,
+      "flags": 0,
+      "id": 0,
+      "isEnabled": true,
+      "trigger": {
+        "extras": [],
+        "flags": 1,
+        "keys": [
+          {
+            "clickType": 0,
+            "deviceBus": 5,
+            "deviceName": "AB Shutter3",
+            "deviceProduct": 33382,
+            "deviceVendor": 9354,
+            "flags": 0,
+            "keyCode": 25,
+            "scanCode": 114,
+            "uid": "5c0443f1-b0de-48b4-abfe-430e1463d8e4"
+          }
+        ],
+        "mode": 2
+      },
+      "uid": "abf60a02-86be-4fcb-830d-879db68f491e"
+    }
+  ]
+}

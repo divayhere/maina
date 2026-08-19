@@ -7,6 +7,7 @@ import android.content.IntentFilter
 import android.media.AudioDeviceInfo
 import android.media.AudioManager
 import android.os.Build
+import android.provider.Settings
 import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
 import java.io.File
@@ -19,14 +20,21 @@ class MainaRecorderModule : Module() {
     private val triggerReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             when (intent?.action) {
-                MainaHardwareTrigger.ACTION_TRIGGER -> sendEvent(
-                    "onHardwareTrigger",
-                    mapOf(
-                        "keyCode" to intent.getIntExtra(MainaHardwareTrigger.EXTRA_KEY_CODE, -1),
-                        "deviceId" to intent.getIntExtra(MainaHardwareTrigger.EXTRA_DEVICE_ID, -1),
-                        "occurredAt" to intent.getLongExtra(MainaHardwareTrigger.EXTRA_OCCURRED_AT, System.currentTimeMillis()),
-                    ),
-                )
+                MainaHardwareTrigger.ACTION_TRIGGER -> {
+                    context?.let { MainaHardwareTrigger.noteReceived(it, intent) }
+                    sendEvent(
+                        "onHardwareTrigger",
+                        mapOf(
+                            "command" to (intent.getStringExtra(MainaHardwareTrigger.EXTRA_COMMAND) ?: "toggle"),
+                            "commandId" to (intent.getStringExtra(MainaHardwareTrigger.EXTRA_COMMAND_ID) ?: ""),
+                            "source" to (intent.getStringExtra(MainaHardwareTrigger.EXTRA_SOURCE) ?: "unknown"),
+                            "keyCode" to intent.getIntExtra(MainaHardwareTrigger.EXTRA_KEY_CODE, -1),
+                            "deviceId" to intent.getIntExtra(MainaHardwareTrigger.EXTRA_DEVICE_ID, -1),
+                            "deviceName" to (intent.getStringExtra(MainaHardwareTrigger.EXTRA_DEVICE_NAME) ?: "unknown"),
+                            "occurredAt" to intent.getLongExtra(MainaHardwareTrigger.EXTRA_OCCURRED_AT, System.currentTimeMillis()),
+                        ),
+                    )
+                }
                 MainaAudioRouteBridge.ACTION_ROUTE_CHANGED -> sendEvent(
                     "onAudioRouteChanged",
                     mapOf(
@@ -55,18 +63,57 @@ class MainaRecorderModule : Module() {
 
         AsyncFunction("startForegroundSession") {
             val context = requireContext()
-            val intent = Intent(context, MainaRecordingService::class.java)
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                context.startForegroundService(intent)
-            } else {
-                context.startService(intent)
-            }
+            startControlService(context, MainaRecordingService.ACTION_ARM)
             true
         }
 
         AsyncFunction("stopForegroundSession") {
             val context = requireContext()
-            context.stopService(Intent(context, MainaRecordingService::class.java))
+            startControlService(
+                context,
+                MainaRecordingService.ACTION_SET_STATE,
+                mapOf(MainaRecordingService.EXTRA_CAPTURE_STATE to "idle"),
+            )
+            Unit
+        }
+
+        AsyncFunction("armRemoteControl") {
+            val context = requireContext()
+            startControlService(context, MainaRecordingService.ACTION_ARM)
+            MainaHardwareTrigger.status(context)
+        }
+
+        AsyncFunction("disarmRemoteControl") {
+            requireContext().stopService(Intent(requireContext(), MainaRecordingService::class.java))
+            Unit
+        }
+
+        AsyncFunction("setCaptureState") { state: String ->
+            require(state in setOf("idle", "recording", "paused", "finalizing")) { "Invalid capture state: $state" }
+            val context = requireContext()
+            startControlService(
+                context,
+                MainaRecordingService.ACTION_SET_STATE,
+                mapOf(MainaRecordingService.EXTRA_CAPTURE_STATE to state),
+            )
+            Unit
+        }
+
+        AsyncFunction("getRemoteControlStatus") {
+            MainaHardwareTrigger.status(requireContext())
+        }
+
+        AsyncFunction("openRemoteAccessibilitySettings") {
+            val context = requireContext()
+            context.startActivity(
+                Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK),
+            )
+            Unit
+        }
+
+        AsyncFunction("acknowledgeHardwareTrigger") { commandId: String, action: String, accepted: Boolean ->
+            MainaHardwareTrigger.acknowledge(requireContext(), commandId, action, accepted)
             Unit
         }
 
@@ -79,7 +126,9 @@ class MainaRecorderModule : Module() {
         }
 
         AsyncFunction("getPcmWavDurationsMs") { uris: List<String> ->
-            uris.associateWith { uri -> runCatching { pcmWavDurationMs(uri) }.getOrNull() }
+            uris.mapNotNull { uri ->
+                runCatching { pcmWavDurationMs(uri) }.getOrNull()?.let { duration -> uri to duration }
+            }.toMap()
         }
 
         AsyncFunction("getAudioInputs") {
@@ -95,40 +144,28 @@ class MainaRecorderModule : Module() {
 
         AsyncFunction("configureDiagnostics") { config: Map<String, Any?> ->
             val context = requireContext()
-            val store = DiagnosticsStore(context)
-            try {
-                store.configure(config)
-                DiagnosticsScheduler.ensurePeriodicWork(context)
-                DiagnosticsScheduler.enqueue(context)
-                store.status()
-            } finally {
-                store.close()
-            }
+            val store = DiagnosticsStore.shared(context)
+            store.configure(config)
+            DiagnosticsScheduler.ensurePeriodicWork(context)
+            DiagnosticsScheduler.enqueueEvents(context)
+            DiagnosticsScheduler.enqueueArtifacts(context)
+            store.status()
         }
 
         AsyncFunction("enqueueDiagnosticEvents") { events: List<Map<String, Any?>> ->
             val context = requireContext()
-            val store = DiagnosticsStore(context)
-            try {
-                val inserted = store.enqueueEvents(events)
-                if (inserted > 0) DiagnosticsScheduler.enqueue(context)
-                inserted
-            } finally {
-                store.close()
-            }
+            val store = DiagnosticsStore.shared(context)
+            val inserted = store.enqueueEvents(events)
+            val urgent = events.any { it["level"]?.toString() in setOf("error", "warn") }
+            if (inserted > 0) DiagnosticsScheduler.enqueueEvents(context, urgent = urgent)
+            inserted
         }
 
         AsyncFunction("queueAudioArtifact") { request: Map<String, Any?> ->
             val context = requireContext()
             val id = request["artifactId"]?.toString()?.takeIf { it.isNotBlank() }
                 ?: "${request["meetingId"]}-audio-${request["segmentIndex"]}"
-            val store = DiagnosticsStore(context)
-            try {
-                store.queueAudioArtifact(id, request)
-            } finally {
-                store.close()
-            }
-            DiagnosticsScheduler.enqueue(context)
+            DiagnosticsStore.shared(context).queueAudioArtifact(id, request)
             id
         }
 
@@ -136,66 +173,53 @@ class MainaRecorderModule : Module() {
             val context = requireContext()
             val id = request["artifactId"]?.toString()?.takeIf { it.isNotBlank() }
                 ?: "${request["meetingId"]}-${request["kind"]}-final"
-            val store = DiagnosticsStore(context)
-            try {
-                store.queueTextArtifact(id, request)
-            } finally {
-                store.close()
-            }
-            DiagnosticsScheduler.enqueue(context)
+            DiagnosticsStore.shared(context).queueTextArtifact(id, request)
             id
         }
 
         AsyncFunction("finalizeDiagnosticRun") { summary: Map<String, Any?> ->
             val context = requireContext()
-            val store = DiagnosticsStore(context)
-            try {
-                store.finalizeRun(summary)
-            } finally {
-                store.close()
-            }
-            DiagnosticsScheduler.enqueue(context)
+            DiagnosticsStore.shared(context).finalizeRun(summary)
+            DiagnosticsScheduler.enqueueEvents(context, urgent = true)
+            DiagnosticsScheduler.enqueueArtifacts(context)
             Unit
         }
 
         AsyncFunction("flushDiagnostics") {
-            DiagnosticsScheduler.enqueue(requireContext(), replace = true)
+            DiagnosticsScheduler.enqueueEvents(requireContext(), replace = true)
+            DiagnosticsScheduler.enqueueArtifacts(requireContext(), replace = true)
             Unit
         }
 
         AsyncFunction("retryFailedDiagnosticArtifacts") {
             val context = requireContext()
-            val store = DiagnosticsStore(context)
-            val changed = try {
-                store.retryFailedArtifacts()
-            } finally {
-                store.close()
-            }
-            if (changed > 0) DiagnosticsScheduler.enqueue(context, replace = true)
+            val changed = DiagnosticsStore.shared(context).retryFailedArtifacts()
+            if (changed > 0) DiagnosticsScheduler.enqueueArtifacts(context, replace = true)
             changed
         }
 
         AsyncFunction("getDiagnosticsStatus") {
-            val store = DiagnosticsStore(requireContext())
-            try {
-                store.status()
-            } finally {
-                store.close()
-            }
+            DiagnosticsStore.shared(requireContext()).status()
         }
 
         AsyncFunction("getMeetingsWithDeletedAudio") {
-            val store = DiagnosticsStore(requireContext())
-            try {
-                store.meetingsWithDeletedAudio()
-            } finally {
-                store.close()
-            }
+            DiagnosticsStore.shared(requireContext()).meetingsWithDeletedAudio()
+        }
+
+        AsyncFunction("purgeDiagnosticsData") {
+            DiagnosticsStore.shared(requireContext()).purgeAllDiagnosticsData()
         }
     }
 
     private fun requireContext(): Context =
         appContext.reactContext ?: throw IllegalStateException("React context is unavailable")
+
+    private fun startControlService(context: Context, action: String, extras: Map<String, String> = emptyMap()) {
+        val intent = Intent(context, MainaRecordingService::class.java).setAction(action)
+        extras.forEach { (key, value) -> intent.putExtra(key, value) }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) context.startForegroundService(intent)
+        else context.startService(intent)
+    }
 
     private fun registerTriggerReceiver() {
         if (triggerReceiverRegistered) return

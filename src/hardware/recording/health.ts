@@ -6,6 +6,7 @@ export interface CaptureHealthSnapshot {
   recognizerDowntimeMs: number;
   measuredGapMs: number;
   largestGapMs: number;
+  pausedDurationMs: number;
 }
 
 /**
@@ -24,6 +25,8 @@ export class CaptureHealthTracker {
   private captureGapMs = 0;
   private recognizerDowntimeMs = 0;
   private largestGapMs = 0;
+  private pausedAt: number | null = null;
+  private pausedDurationMs = 0;
 
   requestSegment(index: number): void {
     this.requestedSegments.add(index);
@@ -53,20 +56,38 @@ export class CaptureHealthTracker {
   }
 
   captureUnavailable(at: number): void {
+    if (this.pausedAt !== null) return;
     if (this.captureUnavailableAt === null) this.captureUnavailableAt = at;
   }
 
   recognizerEnded(at: number): void {
+    if (this.pausedAt !== null) return;
     if (this.recognizerUnavailableAt === null) this.recognizerUnavailableAt = at;
   }
 
   recognizerStarted(at: number): void {
+    if (this.pausedAt !== null) return;
     if (this.recognizerUnavailableAt === null) return;
     this.recognizerDowntimeMs += Math.max(0, at - this.recognizerUnavailableAt);
     this.recognizerUnavailableAt = null;
   }
 
-  snapshot(): CaptureHealthSnapshot {
+  pauseStarted(at: number): void {
+    if (this.pausedAt !== null) return;
+    this.pausedAt = at;
+    this.captureUnavailableAt = null;
+    this.recognizerUnavailableAt = null;
+  }
+
+  pauseEnded(at: number): void {
+    if (this.pausedAt === null) return;
+    this.pausedDurationMs += Math.max(0, at - this.pausedAt);
+    this.pausedAt = null;
+    this.captureUnavailableAt = null;
+    this.recognizerUnavailableAt = null;
+  }
+
+  snapshot(at = Date.now()): CaptureHealthSnapshot {
     return {
       expectedSegments: this.requestedSegments.size,
       closedSegments: this.closedSegments.size,
@@ -75,6 +96,7 @@ export class CaptureHealthTracker {
       recognizerDowntimeMs: this.recognizerDowntimeMs,
       measuredGapMs: this.captureGapMs,
       largestGapMs: this.largestGapMs,
+      pausedDurationMs: this.pausedDurationMs + (this.pausedAt === null ? 0 : Math.max(0, at - this.pausedAt)),
     };
   }
 }

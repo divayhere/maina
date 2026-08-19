@@ -7,9 +7,34 @@ export interface AudioInput {
 }
 
 export interface HardwareTriggerEvent {
+  commandId: string;
+  command: 'start' | 'toggle' | 'pause' | 'resume' | 'stop';
+  source: string;
   keyCode: number;
   deviceId: number;
+  deviceName: string;
   occurredAt: number;
+}
+
+export type CaptureState = 'idle' | 'recording' | 'paused' | 'finalizing';
+
+export interface RemoteControlStatus {
+  armed: boolean;
+  captureState: CaptureState;
+  accessibilityEnabled: boolean;
+  accessibilityConnected: boolean;
+  notificationsEnabled: boolean;
+  inputDevices: string[];
+  lastCommand: string;
+  lastCommandId: string;
+  lastSource: string;
+  lastDeviceName: string;
+  lastKeyCode: number;
+  lastCommandAt: number;
+  lastAckAction: string;
+  lastAckAccepted: boolean;
+  lastAckAt: number;
+  trustedRemoteName: string;
 }
 
 export interface AudioRouteChangedEvent {
@@ -61,10 +86,18 @@ export interface DiagnosticsStatus {
   pendingArtifacts: number;
   failedArtifacts: number;
   exhaustedArtifacts: number;
+  retainedAudioBytes?: number | null;
+  freeStorageBytes?: number | null;
   oldestPendingAt?: number | null;
   lastAttemptAt?: number | null;
   lastUploadAt?: number | null;
   lastError?: string | null;
+}
+
+export interface DiagnosticsPurgeResult {
+  deletedArtifacts: number;
+  deletedOutboxRecords: number;
+  deletedFiles: number;
 }
 
 export interface AudioArtifactRequest {
@@ -111,6 +144,12 @@ interface MainaRecorderNativeModule {
   ): NativeEventSubscription;
   startForegroundSession(): Promise<boolean>;
   stopForegroundSession(): Promise<void>;
+  armRemoteControl(): Promise<RemoteControlStatus>;
+  disarmRemoteControl(): Promise<void>;
+  setCaptureState(state: CaptureState): Promise<void>;
+  getRemoteControlStatus(): Promise<RemoteControlStatus>;
+  openRemoteAccessibilitySettings(): Promise<void>;
+  acknowledgeHardwareTrigger(commandId: string, action: string, accepted: boolean): Promise<void>;
   isForegroundSessionRunning(): boolean;
   repairWavFiles(uris: string[]): Promise<number>;
   getPcmWavDurationsMs(uris: string[]): Promise<Record<string, number | null>>;
@@ -124,6 +163,7 @@ interface MainaRecorderNativeModule {
   retryFailedDiagnosticArtifacts(): Promise<number>;
   getDiagnosticsStatus(): Promise<DiagnosticsStatus>;
   getMeetingsWithDeletedAudio(): Promise<string[]>;
+  purgeDiagnosticsData(): Promise<DiagnosticsPurgeResult>;
 }
 
 export const MainaRecorder =

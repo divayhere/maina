@@ -1,12 +1,59 @@
 # Changelog
 
-All notable changes to Maina are recorded here.
-Format follows [Keep a Changelog](https://keepachangelog.com/); versions follow [Semantic Versioning](https://semver.org/).
-
 ## [Unreleased]
 
-### Fixed
-- Accept the installed v0.8.1 app's UTF-8 transcript upload content type in the private diagnostics bucket, while future uploads use the bucket's canonical `text/plain` type.
+### Added
+- Timestamped `transcript_blocks` storage for new and reprocessed meetings, with paging helpers, summary counts, and a future speaker-diarization seam.
+- A lightweight interrupted-meeting recovery route that opens before large transcript content is mounted.
+- Maintainer-facing storage diagnostics, retained-audio visibility, and staging cleanup / diagnostics purge controls.
+- A stricter local release verifier that fails if the meeting detail screen regresses to unsafe full-transcript rendering or if hot paths resume automatic giant transcript artifact uploads.
+- Auto-generated meeting packets with summary, decisions, open questions, and structured to-dos from a user-selected AI provider.
+- Persisted AI provider settings for Gemini, OpenAI, Anthropic, Grok, DeepSeek, and custom OpenAI-compatible endpoints.
+- A global to-do surface and per-meeting packet metadata, plus a temporary audio-retention policy that keeps transcripts but prunes old audio.
+
+### Changed
+- The live record screen now keeps only a small recent transcript tail plus a single mutable draft block instead of one ever-growing transcript string in React state.
+- Meeting detail now uses `FlashList` paging and async export/share helpers rather than rendering the entire transcript in one `ScrollView`/`Text` tree.
+- Routine stop/recovery flows no longer queue the entire transcript as a diagnostics text artifact.
+- Native diagnostics now report service heartbeats, retained audio bytes, and free storage without carrying transcript/audio content.
+- Meetings, settings, and to-dos now use a packet-first product flow: Overview before Transcript, one Markdown share path, and automatic post-meeting packet generation.
+
+### Verification
+- `npm run typecheck`, `npm test`, and `npm run lint` pass locally.
+- The latest packet-first/UI code still needs one fresh full `bash scripts/verify-release.sh` completion after this batch's final polish pass. Earlier transcript-safety foundations had already passed the local release verifier.
+- No APK was built from this batch yet.
+
+## 0.9.3 — permanent locked-screen control and idle efficiency
+
+- Replaces the temporary ADB input bridge with a narrowly scoped Android Accessibility Service that accepts only the dedicated AB Shutter remote.
+- Uses stable remote identity instead of volatile `/dev/input/eventN` paths, consumes the remote key event, and leaves the Pixel's physical volume controls untouched.
+- Isolates the always-on key listener from React Native and diagnostics work so the full app can sleep while the phone is locked.
+- Adds command IDs, native duplicate suppression, acknowledgements, and locked-screen readiness to Settings and remote diagnostics.
+- Removes idle polling for audio cleanup and Settings status; recording watchdog checks back off while backgrounded or paused.
+- Batches routine diagnostic events, sends warnings/errors promptly, defers artifact compression until meeting finalization, and avoids repeated diagnostics SQLite WAL open/close cycles.
+- Fixes audio-retention state reconciliation to use one atomic SQL update instead of a nested transaction that could fail during app backgrounding.
+
+## 0.9.2 — reliable remote ownership
+
+- Avoids an Activity-bound microphone permission request when permission is already granted, so an armed background click can continue into capture instead of waiting for Maina to be opened.
+- Makes only the currently focused recording screen own pause, resume and stop commands.
+- Returns command ownership to the root controller after saving or leaving a meeting, preventing an invisible old recorder from swallowing the next Start command.
+- Logs the resolved remote state, command and action for direct diagnosis.
+- Keeps the POPIO screen-off bridge as a temporary ADB testing adapter; Key Mapper screen-off execution is not treated as production-ready.
+
+## 0.9.1 — armed control and observable recovery
+
+- Keeps a native foreground control service armed after opening Maina once.
+- Adds MediaSession, notification and explicit-intent controls for locked-screen remotes.
+- Maps primary click to start/pause/resume, double-primary to stop, and common secondary shutter keys to stop.
+- Adds pause/resume with event-driven WAV finalisation and a new segment on resume.
+- Adds Settings readiness, notification, connected-input and last-command status.
+- Splits Supabase events, artifacts and retention into independent WorkManager lanes.
+- Removes nullable values at the Expo/Kotlin bridge that blocked v0.9 diagnostics.
+- Adds a versioned implementation ledger, Pixel acceptance protocol and automated release verifier.
+
+All notable changes to Maina are recorded here.
+Format follows [Keep a Changelog](https://keepachangelog.com/); versions follow [Semantic Versioning](https://semver.org/).
 
 ## [0.9.0] — Transcription trust, hardware trigger and recovery
 

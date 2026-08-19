@@ -141,6 +141,14 @@ internal class DiagnosticsStore(context: Context) :
 
     fun configure(raw: Map<String, Any?>) {
         val installId = prefs.getString(KEY_INSTALL_ID, null) ?: UUID.randomUUID().toString()
+        val packageInfo = appContext.packageManager.getPackageInfo(appContext.packageName, 0)
+        val nativeVersion = packageInfo.versionName.orEmpty().ifBlank { "?" }
+        val nativeBuild = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.P) {
+            packageInfo.longVersionCode.toString()
+        } else {
+            @Suppress("DEPRECATION")
+            packageInfo.versionCode.toString()
+        }
         prefs.edit()
             .putString(KEY_INSTALL_ID, installId)
             .putBoolean(KEY_ENABLED, raw.boolean("enabled"))
@@ -148,8 +156,8 @@ internal class DiagnosticsStore(context: Context) :
             .putString(KEY_API_KEY, raw.string("publishableKey"))
             .putString(KEY_BUCKET, raw.string("bucket"))
             .putString(KEY_APP_SESSION_ID, raw.string("appSessionId"))
-            .putString(KEY_APP_VERSION, raw.string("appVersion"))
-            .putString(KEY_BUILD_NUMBER, raw.string("buildNumber"))
+            .putString(KEY_APP_VERSION, raw.string("appVersion").takeUnless { it.isBlank() || it == "?" } ?: nativeVersion)
+            .putString(KEY_BUILD_NUMBER, raw.string("buildNumber").takeUnless { it.isBlank() || it == "?" } ?: nativeBuild)
             .putString(KEY_GIT_SHA, raw.string("gitSha"))
             .putString(KEY_DEVICE, raw.string("device"))
             .putString(KEY_PLATFORM, raw.string("platform"))
@@ -484,11 +492,14 @@ internal class DiagnosticsStore(context: Context) :
         return result
     }
 
-    fun status(): Map<String, Any?> {
+    fun status(): Map<String, Any> {
         val pendingEvents = scalarLong("SELECT COUNT(*) FROM outbox_records").toInt()
         val pendingArtifacts = scalarLong("SELECT COUNT(*) FROM artifacts WHERE status IN ('pending','prepared')").toInt()
         val failedArtifacts = scalarLong("SELECT COUNT(*) FROM artifacts WHERE status = 'failed'").toInt()
         val exhaustedArtifacts = scalarLong("SELECT COUNT(*) FROM artifacts WHERE status = 'failed' AND attempts >= 8").toInt()
+        val retainedAudioBytes = scalarLong(
+            "SELECT COALESCE(SUM(bytes), 0) FROM artifacts WHERE kind = 'audio' AND source_deleted = 0",
+        )
         val oldestPendingAt = scalarNullableLong(
             """SELECT MIN(created_at) FROM (
                  SELECT created_at FROM outbox_records
@@ -503,17 +514,47 @@ internal class DiagnosticsStore(context: Context) :
                  SELECT last_attempt_at FROM artifacts
                )""",
         )
-        return mapOf(
+        return mutableMapOf<String, Any>(
             "enabled" to config().enabled,
             "installId" to installId(),
             "pendingEvents" to pendingEvents,
             "pendingArtifacts" to pendingArtifacts,
             "failedArtifacts" to failedArtifacts,
             "exhaustedArtifacts" to exhaustedArtifacts,
-            "oldestPendingAt" to oldestPendingAt,
-            "lastAttemptAt" to lastAttemptAt,
-            "lastUploadAt" to prefs.getLong(KEY_LAST_UPLOAD_AT, 0L).takeIf { it > 0L },
-            "lastError" to prefs.getString(KEY_LAST_ERROR, null),
+            "retainedAudioBytes" to retainedAudioBytes,
+            "freeStorageBytes" to appContext.filesDir.usableSpace,
+        ).apply {
+            oldestPendingAt?.let { put("oldestPendingAt", it) }
+            lastAttemptAt?.let { put("lastAttemptAt", it) }
+            prefs.getLong(KEY_LAST_UPLOAD_AT, 0L).takeIf { it > 0L }?.let { put("lastUploadAt", it) }
+            prefs.getString(KEY_LAST_ERROR, null)?.let { put("lastError", it) }
+        }
+    }
+
+    fun purgeAllDiagnosticsData(): Map<String, Any> {
+        val artifacts = queryArtifacts("1 = 1", emptyArray(), "created_at ASC", 100_000)
+        val deletedOutboxRecords = scalarLong("SELECT COUNT(*) FROM outbox_records").toInt()
+        var deletedFiles = 0
+        artifacts.forEach { artifact ->
+            if (deleteLocalFiles(artifact)) deletedFiles += 1
+        }
+        writableDatabase.beginTransaction()
+        try {
+            writableDatabase.delete("outbox_records", null, null)
+            writableDatabase.delete("artifacts", null, null)
+            writableDatabase.delete("finalized_runs", null, null)
+            writableDatabase.setTransactionSuccessful()
+        } finally {
+            writableDatabase.endTransaction()
+        }
+        prefs.edit()
+            .remove(KEY_LAST_ERROR)
+            .remove(KEY_LAST_UPLOAD_AT)
+            .apply()
+        return mapOf(
+            "deletedArtifacts" to artifacts.size,
+            "deletedOutboxRecords" to deletedOutboxRecords,
+            "deletedFiles" to deletedFiles,
         )
     }
 
@@ -667,6 +708,14 @@ internal class DiagnosticsStore(context: Context) :
     }
 
     companion object {
+        @Volatile
+        private var instance: DiagnosticsStore? = null
+
+        /** One process-wide helper avoids repeated WAL open/close contention. */
+        fun shared(context: Context): DiagnosticsStore = instance ?: synchronized(this) {
+            instance ?: DiagnosticsStore(context.applicationContext).also { instance = it }
+        }
+
         private const val DB_NAME = "maina-diagnostics.db"
         private const val DB_VERSION = 3
         private const val PREFS_NAME = "maina_diagnostics_config"

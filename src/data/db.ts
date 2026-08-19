@@ -71,6 +71,61 @@ const MIGRATIONS: Migration[] = [
     CREATE INDEX IF NOT EXISTS idx_recording_segments_meeting
       ON recording_segments(meeting_id, segment_index);`);
   },
+  // v5 — block-based transcripts for long-session safety.
+  async (db) => {
+    await db.execAsync(`CREATE TABLE IF NOT EXISTS transcript_blocks (
+      block_id TEXT PRIMARY KEY NOT NULL,
+      meeting_id TEXT NOT NULL,
+      sequence INTEGER NOT NULL,
+      status TEXT NOT NULL DEFAULT 'final',
+      segment_index INTEGER,
+      started_at INTEGER,
+      ended_at INTEGER,
+      language TEXT,
+      speaker_id TEXT,
+      text TEXT NOT NULL,
+      word_count INTEGER NOT NULL DEFAULT 0,
+      char_count INTEGER NOT NULL DEFAULT 0,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      FOREIGN KEY (meeting_id) REFERENCES meetings(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_transcript_blocks_meeting_sequence
+      ON transcript_blocks(meeting_id, sequence ASC);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_transcript_blocks_unique_draft
+      ON transcript_blocks(meeting_id)
+      WHERE status = 'draft';
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_transcript_blocks_unique_final_sequence
+      ON transcript_blocks(meeting_id, sequence)
+      WHERE status = 'final';`);
+  },
+  // v6 — meeting packet metadata + global todo rows.
+  async (db) => {
+    await addColumnIfMissing(db, 'meetings', 'decisions_json', 'TEXT');
+    await addColumnIfMissing(db, 'meetings', 'open_questions_json', 'TEXT');
+    await addColumnIfMissing(db, 'meetings', 'summary_status', `TEXT NOT NULL DEFAULT 'idle'`);
+    await addColumnIfMissing(db, 'meetings', 'summary_provider_id', 'TEXT');
+    await addColumnIfMissing(db, 'meetings', 'summary_model', 'TEXT');
+    await addColumnIfMissing(db, 'meetings', 'summarized_at', 'INTEGER');
+    await db.execAsync(`CREATE TABLE IF NOT EXISTS todo_items (
+      id TEXT PRIMARY KEY NOT NULL,
+      meeting_id TEXT NOT NULL,
+      text TEXT NOT NULL,
+      done INTEGER NOT NULL DEFAULT 0,
+      source_quote TEXT,
+      source_speaker_id TEXT,
+      source_timestamp INTEGER,
+      sort_order INTEGER NOT NULL DEFAULT 0,
+      origin TEXT NOT NULL DEFAULT 'ai',
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      FOREIGN KEY (meeting_id) REFERENCES meetings(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_todo_items_meeting_sort
+      ON todo_items(meeting_id, done ASC, sort_order ASC, created_at ASC);
+    CREATE INDEX IF NOT EXISTS idx_todo_items_done
+      ON todo_items(done ASC, updated_at DESC);`);
+  },
 ];
 
 export async function initDb(): Promise<void> {

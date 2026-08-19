@@ -1,14 +1,14 @@
 import { router, Stack } from 'expo-router';
 import { useEffect, useState } from 'react';
-import { ActivityIndicator, View } from 'react-native';
+import { ActivityIndicator, AppState, PermissionsAndroid, Platform, View } from 'react-native';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 
-import { provisionCoreLanguages } from '@/core/transcription/nativeSpeech';
-import { transcriptWordCount } from '@/core/transcription/transcript';
+import { provisionCoreLanguages, requestSpeechPermissions } from '@/core/transcription/nativeSpeech';
 import { initDb } from '@/data/db';
 import {
   getMeeting,
+  getTranscriptSummary,
   listInterruptedRecordingSegments,
   markMeetingsAudioDeleted,
   recoverInterruptedMeetings,
@@ -18,18 +18,20 @@ import { AppText, PrimaryButton } from '@/design/components';
 import { useAppTheme } from '@/design/theme';
 import {
   getPcmWavDurationsMs,
+  armRemoteControl,
   repairWavFiles,
-  stopRecordingForegroundService,
 } from '@/hardware/recording/foreground';
 import { installHardwareTriggerListener } from '@/hardware/trigger/hardwareTrigger';
+import { resolveRemoteAction } from '@/hardware/trigger/remoteControl';
 import { log } from '@/services/logger';
+import { enforceAudioRetentionPolicy } from '@/services/audioRetention';
 import {
   finalizeDiagnosticRun,
   getMeetingsWithDeletedAudio,
   installRemoteLog,
   queueAudioArtifact,
-  queueTextArtifact,
 } from '@/services/remoteLog';
+import { reconcilePendingMeetingPackets } from '@/services/meetingPacket';
 import { initSentry, Sentry } from '@/services/sentry';
 import { installWatchdog } from '@/services/watchdog';
 
@@ -73,14 +75,7 @@ function RootLayout() {
         for (const meetingId of interruptedMeetingIds) {
           const meeting = await getMeeting(meetingId);
           if (!meeting) continue;
-          if (meeting.transcript?.trim()) {
-            await queueTextArtifact({
-              artifactId: `${meetingId}-transcript-final`,
-              meetingId,
-              kind: 'transcript',
-              content: meeting.transcript,
-            });
-          }
+          const transcriptSummary = await getTranscriptSummary(meetingId);
           const segments = interruptedSegments.filter((segment) => segment.meetingId === meetingId);
           const wallDurationMs = Math.max(0, meeting.durationMs);
           const endedAt = meeting.startedAt + wallDurationMs;
@@ -103,7 +98,7 @@ function RootLayout() {
             expectedSegments: segments.length,
             closedSegments,
             uploadedSegments: 0,
-            transcriptWords: transcriptWordCount(meeting.transcript ?? ''),
+            transcriptWords: transcriptSummary.wordCount,
             recognizerRestarts: meeting.restartCount,
             recognizerDowntimeMs: 0,
             measuredGapMs,
@@ -119,10 +114,26 @@ function RootLayout() {
 
         const deletedAudioMeetingIds = await getMeetingsWithDeletedAudio();
         await markMeetingsAudioDeleted(deletedAudioMeetingIds);
-        await stopRecordingForegroundService().catch(() => {});
+        await enforceAudioRetentionPolicy();
+        if (Platform.OS === 'android' && Platform.Version >= 33) {
+          await PermissionsAndroid.request(PermissionsAndroid.PERMISSIONS.POST_NOTIFICATIONS).catch(() => null);
+        }
+        const microphoneReady = await requestSpeechPermissions();
+        if (microphoneReady) {
+          const control = await armRemoteControl();
+          log.info('trigger', 'remote control armed', {
+            notificationsEnabled: control.notificationsEnabled,
+            inputDevices: control.inputDevices,
+          });
+        } else {
+          log.warn('trigger', 'remote control not armed because microphone permission is missing');
+        }
         if (recovered > 0) log.warn('recovery', 'interrupted recording recovered', { recovered, repaired });
         void provisionCoreLanguages().catch((cause) => {
           log.warn('native-speech', 'background language provisioning failed', { err: String(cause) });
+        });
+        void reconcilePendingMeetingPackets().catch((cause) => {
+          log.warn('summary', 'pending packet reconciliation failed', { err: String(cause) });
         });
         setReady(true);
       } catch (e) {
@@ -138,22 +149,28 @@ function RootLayout() {
     const syncAudioCleanup = async () => {
       const meetingIds = await getMeetingsWithDeletedAudio();
       await markMeetingsAudioDeleted(meetingIds);
+      await enforceAudioRetentionPolicy();
+      await reconcilePendingMeetingPackets();
     };
     void syncAudioCleanup().catch((cause) => {
       log.warn('meetings', 'audio cleanup state sync failed', { err: String(cause) });
     });
-    const timer = setInterval(() => {
+    const subscription = AppState.addEventListener('change', (state) => {
+      if (state !== 'active') return;
       void syncAudioCleanup().catch((cause) => {
         log.warn('meetings', 'audio cleanup state sync failed', { err: String(cause) });
       });
-    }, 15000);
-    return () => clearInterval(timer);
+    });
+    return () => subscription.remove();
   }, [ready]);
 
   useEffect(() => {
     if (!ready) return;
-    return installHardwareTriggerListener(() => {
-      router.push('/record');
+    return installHardwareTriggerListener((event) => {
+      const action = resolveRemoteAction('idle', event.command);
+      log.info('trigger', 'idle remote action resolved', { command: event.command, action });
+      if (action === 'start') router.push('/record');
+      else log.info('trigger', 'idle remote command ignored', { command: event.command });
     });
   }, [ready]);
 
@@ -173,8 +190,6 @@ function RootLayout() {
             <Stack screenOptions={{ headerShown: false, contentStyle: { backgroundColor: theme.bg } }}>
               <Stack.Screen name="(tabs)" />
               <Stack.Screen name="record" options={{ presentation: 'modal' }} />
-              <Stack.Screen name="meeting/[id]" />
-              <Stack.Screen name="diagnostics" />
             </Stack>
           ) : (
             <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center', backgroundColor: theme.bg }}>

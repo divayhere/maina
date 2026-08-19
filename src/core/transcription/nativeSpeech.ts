@@ -28,6 +28,11 @@ export const ACTIVE_LANGUAGES = LANGUAGES.map((language) => language.code);
 export const ON_DEVICE_SERVICE = 'com.google.android.as';
 
 export async function requestSpeechPermissions(): Promise<boolean> {
+  // A permission request is Activity-bound on Android and stalls while Maina
+  // is backgrounded. The armed workflow has already obtained permission, so
+  // use the non-interactive status path before considering a prompt.
+  const current = await ExpoSpeechRecognitionModule.getPermissionsAsync();
+  if (current.granted) return true;
   const res = await ExpoSpeechRecognitionModule.requestPermissionsAsync();
   return res.granted;
 }

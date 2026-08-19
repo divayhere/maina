@@ -9,10 +9,12 @@ import {
   type AudioArtifactRequest,
   type DiagnosticRunSummary,
   type DiagnosticsStatus,
+  type DiagnosticsPurgeResult,
   type NativeDiagnosticEvent,
   type TextArtifactRequest,
 } from '../../modules/maina-recorder/src';
 import { log, type LogEntry } from './logger';
+import { compactNativeValue } from './nativePayload';
 import { REMOTE_LOG } from './remoteConfig';
 
 interface DiagnosticContext {
@@ -26,6 +28,7 @@ let configured = false;
 let sequence = 0;
 let context: DiagnosticContext = {};
 let timer: ReturnType<typeof setTimeout> | null = null;
+let draining = false;
 const pending: NativeDiagnosticEvent[] = [];
 const startedAt = typeof performance !== 'undefined' ? performance.now() : Date.now();
 const appSessionId = `${Date.now().toString(36)}-${Math.floor(Math.random() * 1e9).toString(36)}`;
@@ -40,8 +43,8 @@ function eventName(message: string): string {
 
 function toNativeEvent(entry: LogEntry): NativeDiagnosticEvent {
   sequence += 1;
-  const payload = entry.context ?? null;
-  return {
+  const payload = compactNativeValue(entry.context) as Record<string, unknown> | undefined;
+  const event: NativeDiagnosticEvent = {
     eventId: id(),
     occurredAt: new Date(entry.ts).toISOString(),
     elapsedMs: Math.max(0, Math.round((typeof performance !== 'undefined' ? performance.now() : Date.now()) - startedAt)),
@@ -50,12 +53,13 @@ function toNativeEvent(entry: LogEntry): NativeDiagnosticEvent {
     category: entry.scope,
     eventName: eventName(entry.message),
     message: entry.message,
-    meetingId: context.meetingId ?? null,
-    recordingSessionId: context.recordingSessionId ?? null,
-    segmentIndex: context.segmentIndex ?? null,
-    durationMs: typeof payload?.durationMs === 'number' ? payload.durationMs : null,
-    payload,
+    ...(context.meetingId ? { meetingId: context.meetingId } : {}),
+    ...(context.recordingSessionId ? { recordingSessionId: context.recordingSessionId } : {}),
+    ...(typeof context.segmentIndex === 'number' ? { segmentIndex: context.segmentIndex } : {}),
+    ...(typeof payload?.durationMs === 'number' ? { durationMs: payload.durationMs } : {}),
+    ...(payload ? { payload } : {}),
   };
+  return event;
 }
 
 async function drain(): Promise<void> {
@@ -63,20 +67,23 @@ async function drain(): Promise<void> {
     clearTimeout(timer);
     timer = null;
   }
-  if (!configured || !MainaRecorder || pending.length === 0) return;
+  if (draining || !configured || !MainaRecorder || pending.length === 0) return;
+  draining = true;
   const batch = pending.splice(0, 50);
   try {
     await MainaRecorder.enqueueDiagnosticEvents(batch);
   } catch {
     pending.unshift(...batch);
     if (pending.length > 2000) pending.splice(0, pending.length - 2000);
+  } finally {
+    draining = false;
   }
   if (pending.length > 0) scheduleDrain();
 }
 
 function scheduleDrain(immediate = false): void {
   if (timer) return;
-  timer = setTimeout(() => void drain(), immediate ? 0 : 250);
+  timer = setTimeout(() => void drain(), immediate ? 0 : 30_000);
 }
 
 export async function installRemoteLog(): Promise<void> {
@@ -86,7 +93,7 @@ export async function installRemoteLog(): Promise<void> {
 
   log.addSink((entry) => {
     pending.push(toNativeEvent(entry));
-    scheduleDrain(entry.level === 'error');
+    scheduleDrain(entry.level === 'error' || entry.level === 'warn' || pending.length >= 50);
   });
 
   try {
@@ -133,7 +140,7 @@ export async function queueTextArtifact(request: TextArtifactRequest): Promise<s
 export async function finalizeDiagnosticRun(summary: DiagnosticRunSummary): Promise<void> {
   if (!configured || !MainaRecorder) return;
   await drain();
-  await MainaRecorder.finalizeDiagnosticRun(summary);
+  await MainaRecorder.finalizeDiagnosticRun(compactNativeValue(summary) as DiagnosticRunSummary);
 }
 
 export async function flushDiagnostics(): Promise<void> {
@@ -154,4 +161,9 @@ export async function getDiagnosticsStatus(): Promise<DiagnosticsStatus | null> 
 export async function getMeetingsWithDeletedAudio(): Promise<string[]> {
   if (!MainaRecorder || Platform.OS !== 'android') return [];
   return MainaRecorder.getMeetingsWithDeletedAudio();
+}
+
+export async function purgeDiagnosticsData(): Promise<DiagnosticsPurgeResult | null> {
+  if (!MainaRecorder || Platform.OS !== 'android') return null;
+  return MainaRecorder.purgeDiagnosticsData();
 }

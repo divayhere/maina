@@ -2,6 +2,7 @@
   <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
   <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
   <uses-permission android:name="android.permission.RECORD_AUDIO" />
+  <uses-permission android:name="android.permission.VIBRATE" />
 
   <application>
     <service
@@ -9,5 +10,31 @@
       android:exported="false"
       android:foregroundServiceType="microphone"
       android:stopWithTask="false" />
+    <service
+      android:name="com.divay.maina.recorder.MainaKeyAccessibilityService"
+      android:enabled="true"
+      android:exported="true"
+      android:label="Maina remote control"
+      android:process=":remote_control"
+      android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+      <intent-filter>
+        <action android:name="android.accessibilityservice.AccessibilityService" />
+      </intent-filter>
+      <meta-data
+        android:name="android.accessibilityservice"
+        android:resource="@xml/maina_accessibility_service" />
+    </service>
+    <receiver
+      android:name="com.divay.maina.recorder.MainaCommandReceiver"
+      android:enabled="true"
+      android:exported="true">
+      <intent-filter>
+        <action android:name="com.divay.maina.action.START" />
+        <action android:name="com.divay.maina.action.TOGGLE" />
+        <action android:name="com.divay.maina.action.PAUSE" />
+        <action android:name="com.divay.maina.action.RESUME" />
+        <action android:name="com.divay.maina.action.STOP" />
+      </intent-filter>
+    </receiver>
   </application>
 </manifest>

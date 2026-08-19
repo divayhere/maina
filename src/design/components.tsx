@@ -50,7 +50,7 @@ export function Card({ children, style, ...rest }: ViewProps) {
       {...rest}
       style={[
         styles.card,
-        { backgroundColor: theme.surface, borderColor: theme.border },
+        { backgroundColor: theme.surface, borderColor: theme.border, shadowColor: theme.accent },
         style,
       ]}>
       {children}
@@ -70,7 +70,12 @@ export function PrimaryButton({
       {...rest}
       style={(state) => [
         styles.primaryBtn,
-        { backgroundColor: theme.accent, opacity: state.pressed ? 0.85 : 1 },
+        {
+          backgroundColor: theme.accent,
+          opacity: state.pressed ? 0.9 : 1,
+          shadowColor: theme.accent,
+          transform: [{ scale: state.pressed ? 0.985 : 1 }],
+        },
         typeof style === 'function' ? style(state) : style,
       ]}>
       {loading ? (
@@ -139,25 +144,37 @@ const styles = StyleSheet.create({
   screenInner: { flex: 1, paddingHorizontal: space.lg },
   card: {
     borderWidth: 1,
-    borderRadius: radius.lg,
+    borderRadius: radius.xl,
     padding: space.lg,
+    shadowOpacity: 0.12,
+    shadowRadius: 18,
+    shadowOffset: { width: 0, height: 10 },
+    elevation: 3,
   },
   primaryBtn: {
-    minHeight: 54,
+    minHeight: 56,
     borderRadius: radius.pill,
     alignItems: 'center',
     justifyContent: 'center',
     paddingHorizontal: space.xl,
     flexDirection: 'row',
+    shadowOpacity: 0.24,
+    shadowRadius: 18,
+    shadowOffset: { width: 0, height: 10 },
+    elevation: 4,
   },
   primaryBtnText: { color: '#fff' },
   recOuter: {
-    width: 84,
-    height: 84,
-    borderRadius: 42,
+    width: 92,
+    height: 92,
+    borderRadius: 46,
     borderWidth: 4,
     alignItems: 'center',
     justifyContent: 'center',
+    shadowOpacity: 0.28,
+    shadowRadius: 22,
+    shadowOffset: { width: 0, height: 12 },
+    elevation: 5,
   },
   recInnerStart: { width: 60, height: 60, borderRadius: 30 },
   recInnerStop: { width: 30, height: 30, borderRadius: 7 },

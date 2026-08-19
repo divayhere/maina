@@ -1,40 +1,28 @@
-/**
- * SWAP-SEAM: Summarizer.
- * Turns a transcript into a summary, to-dos, or a custom output. Each provider
- * kind gets one adapter implementing this interface. The orchestration layer
- * never knows which provider is behind it.
- */
-
-export type SummaryKind = 'summary' | 'todos' | 'custom';
-
-export interface SummaryRequest {
+export interface MeetingPacketRequest {
   transcript: string;
-  kind: SummaryKind;
-  /** For kind === 'custom' or to tune tone/length. */
-  instruction?: string;
-  /** Optional user notes captured during the meeting, to enrich the summary. */
-  notes?: string;
   language?: string;
+  existingSummary?: string | null;
   signal?: AbortSignal;
 }
 
-export interface TodoItem {
+export interface ExtractedTodo {
   text: string;
-  /** The transcript sentence this was drawn from — powers tap-back traceability. */
   sourceQuote?: string;
-  done: boolean;
+  sourceSpeakerId?: string | null;
+  sourceTimestamp?: number | null;
 }
 
-export interface SummaryResult {
-  /** Markdown summary text. */
-  summary?: string;
-  /** Present when kind produces tasks. */
-  todos?: TodoItem[];
+export interface MeetingPacketResult {
+  title: string;
+  summary: string;
+  decisions: string[];
+  openQuestions: string[];
+  todos: ExtractedTodo[];
   providerId: string;
   model: string;
 }
 
-export interface Summarizer {
+export interface PacketSummarizer {
   readonly providerId: string;
-  summarize(req: SummaryRequest, apiKey: string, model: string): Promise<SummaryResult>;
+  summarizeMeeting(req: MeetingPacketRequest, apiKey: string, model: string, baseUrl?: string): Promise<MeetingPacketResult>;
 }

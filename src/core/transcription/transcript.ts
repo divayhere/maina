@@ -1,3 +1,9 @@
+export interface TranscriptChunk {
+  text: string;
+  wordCount: number;
+  charCount: number;
+}
+
 function normaliseWhitespace(value: string): string {
   return value.replace(/\s+/g, ' ').trim();
 }
@@ -25,6 +31,56 @@ export function mergeTranscript(existing: string, incoming: string): string {
   }
 
   return `${left} ${right}`;
+}
+
+export function appendWithoutOverlap(previous: string, incoming: string): string {
+  const left = normaliseWhitespace(previous);
+  const right = normaliseWhitespace(incoming);
+  if (!left) return right;
+  if (!right) return '';
+  if (right === left || left.startsWith(right)) return '';
+  if (right.startsWith(left)) return right.slice(left.length).trim();
+  const merged = mergeTranscript(left, incoming);
+  if (merged === left) return '';
+  const appended = merged.slice(left.length).trim();
+  return appended;
+}
+
+export function splitTranscriptChunks(
+  value: string,
+  options?: { maxWords?: number; maxChars?: number },
+): TranscriptChunk[] {
+  const text = normaliseWhitespace(value);
+  if (!text) return [];
+
+  const maxWords = Math.max(1, options?.maxWords ?? 120);
+  const maxChars = Math.max(40, options?.maxChars ?? 800);
+  const words = text.split(' ');
+  const chunks: TranscriptChunk[] = [];
+  let currentWords: string[] = [];
+
+  const flush = () => {
+    if (currentWords.length === 0) return;
+    const chunkText = currentWords.join(' ');
+    chunks.push({
+      text: chunkText,
+      wordCount: currentWords.length,
+      charCount: chunkText.length,
+    });
+    currentWords = [];
+  };
+
+  for (const word of words) {
+    const nextWords = [...currentWords, word];
+    const nextText = nextWords.join(' ');
+    const boundary =
+      currentWords.length > 0 &&
+      (nextWords.length > maxWords || nextText.length > maxChars);
+    if (boundary) flush();
+    currentWords.push(word);
+  }
+  flush();
+  return chunks;
 }
 
 export function transcriptWordCount(value: string): number {

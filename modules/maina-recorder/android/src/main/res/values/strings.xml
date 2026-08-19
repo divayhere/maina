@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="maina_accessibility_description">Lets only your paired AB Shutter remote start, pause, resume, and stop Maina while the screen is locked. Maina does not read screen content.</string>
+</resources>

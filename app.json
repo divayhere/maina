@@ -3,7 +3,7 @@
     "name": "Maina",
     "slug": "maina",
     "owner": "divayheres-team",
-    "version": "0.9.0",
+    "version": "0.9.5",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
     "scheme": "maina",
@@ -13,13 +13,14 @@
     },
     "android": {
       "package": "com.divay.maina",
-      "versionCode": 10,
+      "versionCode": 21,
       "allowBackup": false,
       "permissions": [
         "RECORD_AUDIO",
         "FOREGROUND_SERVICE",
         "FOREGROUND_SERVICE_MICROPHONE",
-        "POST_NOTIFICATIONS"
+        "POST_NOTIFICATIONS",
+        "VIBRATE"
       ],
       "adaptiveIcon": {
         "backgroundColor": "#EAE4FB",
@@ -62,7 +63,8 @@
           "project": "maina-android",
           "url": "https://sentry.io/"
         }
-      ]
+      ],
+      "expo-sharing"
     ],
     "experiments": {
       "typedRoutes": true,

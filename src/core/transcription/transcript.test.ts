@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest';
 
-import { mergeTranscript, transcriptWordCount } from './transcript';
+import {
+  appendWithoutOverlap,
+  mergeTranscript,
+  splitTranscriptChunks,
+  transcriptWordCount,
+} from './transcript';
 
 describe('mergeTranscript', () => {
   it('appends distinct text', () => {
@@ -29,5 +34,38 @@ describe('mergeTranscript', () => {
 describe('transcriptWordCount', () => {
   it('counts normalized words', () => {
     expect(transcriptWordCount('  one   two\nthree ')).toBe(3);
+  });
+});
+
+describe('appendWithoutOverlap', () => {
+  it('returns only the appended tail after a recognizer overlap', () => {
+    expect(appendWithoutOverlap('we discussed the launch date', 'the launch date is Friday')).toBe(
+      'is Friday',
+    );
+  });
+
+  it('returns an empty string when the incoming text is fully duplicated', () => {
+    expect(appendWithoutOverlap('send the proposal tomorrow', 'send the proposal tomorrow')).toBe('');
+  });
+
+  it('returns only the corrected tail when a flushed partial becomes a longer final', () => {
+    expect(appendWithoutOverlap('hello wor', 'hello world')).toBe('ld');
+  });
+});
+
+describe('splitTranscriptChunks', () => {
+  it('keeps short text in one chunk', () => {
+    expect(splitTranscriptChunks('hello from Maina')).toEqual([
+      { text: 'hello from Maina', wordCount: 3, charCount: 16 },
+    ]);
+  });
+
+  it('splits long text on conservative word caps', () => {
+    const input = Array.from({ length: 9 }, (_, index) => `word${index + 1}`).join(' ');
+    expect(splitTranscriptChunks(input, { maxWords: 4, maxChars: 1000 })).toEqual([
+      { text: 'word1 word2 word3 word4', wordCount: 4, charCount: 23 },
+      { text: 'word5 word6 word7 word8', wordCount: 4, charCount: 23 },
+      { text: 'word9', wordCount: 1, charCount: 5 },
+    ]);
   });
 });

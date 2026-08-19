@@ -4,6 +4,8 @@ import {
   MainaRecorder,
   type AudioInput,
   type AudioRouteChangedEvent,
+  type CaptureState,
+  type RemoteControlStatus,
 } from '../../../modules/maina-recorder/src';
 
 function requireAndroidModule() {
@@ -22,6 +24,27 @@ export async function stopRecordingForegroundService(): Promise<void> {
   if (Platform.OS === 'android' && MainaRecorder) {
     await MainaRecorder.stopForegroundSession();
   }
+}
+
+export async function armRemoteControl(): Promise<RemoteControlStatus> {
+  return requireAndroidModule().armRemoteControl();
+}
+
+export async function disarmRemoteControl(): Promise<void> {
+  if (Platform.OS === 'android' && MainaRecorder) await MainaRecorder.disarmRemoteControl();
+}
+
+export async function setNativeCaptureState(state: CaptureState): Promise<void> {
+  if (Platform.OS === 'android' && MainaRecorder) await MainaRecorder.setCaptureState(state);
+}
+
+export async function getRemoteControlStatus(): Promise<RemoteControlStatus | null> {
+  if (Platform.OS !== 'android' || !MainaRecorder) return null;
+  return MainaRecorder.getRemoteControlStatus();
+}
+
+export async function openRemoteAccessibilitySettings(): Promise<void> {
+  if (Platform.OS === 'android' && MainaRecorder) await MainaRecorder.openRemoteAccessibilitySettings();
 }
 
 export function isRecordingForegroundServiceRunning(): boolean {
