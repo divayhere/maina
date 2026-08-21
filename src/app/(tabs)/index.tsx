@@ -1,74 +1,77 @@
+import { Ionicons } from '@expo/vector-icons';
 import { router, useFocusEffect } from 'expo-router';
-import { useCallback, useState } from 'react';
-import { FlatList, Pressable, View } from 'react-native';
+import { useCallback, useMemo, useState } from 'react';
+import { FlatList, Pressable, TextInput, View } from 'react-native';
 
-import { AppText, Card, EmptyState, PrimaryButton } from '@/design/components';
+import { AppText, Banner, Card, Chip, EmptyState, SectionLabel } from '@/design/components';
+import { DrawerMenu } from '@/design/shell';
 import { type Meeting } from '@/data/meetings';
 import { useMainaLayout } from '@/design/layout';
 import { useAppTheme } from '@/design/theme';
 import { radius, space } from '@/design/tokens';
-import { getRemoteControlStatus, openRemoteAccessibilitySettings } from '@/hardware/recording/foreground';
-import { describeRemoteHealth, formatRemoteLastPress } from '@/hardware/trigger/remoteHealth';
 import { useMeetings } from '@/state/meetingsStore';
-import { formatDateTime, formatDuration } from '@/utils/format';
-import type { RemoteControlStatus } from '../../../modules/maina-recorder/src';
+import { formatDate, formatDuration, formatTime } from '@/utils/format';
 
-const STATUS_LABEL: Record<string, string> = {
-  recording: 'Recording',
-  interrupted: 'Recovered',
-  recorded: 'Recorded',
-  transcribing: 'Transcribing',
-  transcribed: 'Transcript ready',
-  summarizing: 'Building packet',
-  summarized: 'Ready',
-};
+function describeState(item: Meeting): { label: string; tone: 'primary' | 'warn' | 'live' | 'muted'; detail?: string; working?: boolean } {
+  if (item.status === 'recording') return { label: 'Recording now', tone: 'live', working: true };
+  if (item.status === 'interrupted') return { label: 'Recording was cut short', tone: 'warn', detail: 'We saved what we could. Tap to fix.' };
+  if (item.summaryStatus === 'failed') return { label: "Notes didn't come through", tone: 'warn', detail: 'Your transcript is safe.' };
+  if (item.summaryStatus === 'ready') return { label: 'Notes ready', tone: 'primary' };
+  if (item.summaryStatus === 'queued' || item.summaryStatus === 'running' || item.status === 'summarizing') {
+    return { label: 'Writing your notes', tone: 'primary', working: true };
+  }
+  if (item.status === 'transcribing') {
+    return {
+      label: 'Getting the text ready',
+      tone: 'primary',
+      detail: item.transcribedSegments > 0 && item.segmentCount > 0 ? `${item.transcribedSegments} parts complete` : undefined,
+      working: true,
+    };
+  }
+  if (item.status === 'recorded') return { label: 'Saved', tone: 'muted', detail: 'Not written up yet.' };
+  return { label: 'Transcript saved', tone: 'muted' };
+}
 
 function MeetingRow({ item }: { item: Meeting }) {
   const { theme } = useAppTheme();
+  const state = describeState(item);
+  const meta = `${formatDate(item.startedAt)} · ${formatTime(item.startedAt)} · ${formatDuration(item.durationMs)}${item.language ? ` · ${item.language}` : ''}`;
+
   return (
     <Pressable onPress={() => router.push(item.status === 'interrupted' ? `/meeting/${item.id}/recover` : `/meeting/${item.id}`)}>
-      <Card style={{ gap: space.md }}>
-        <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start', gap: space.md }}>
-          <View style={{ flex: 1, gap: 4 }}>
-            <AppText variant="heading" numberOfLines={1}>{item.title}</AppText>
-            <AppText variant="label" muted>
-              {formatDateTime(item.startedAt)} · {formatDuration(item.durationMs)}
-            </AppText>
+      {({ pressed }) => (
+        <Card style={{ gap: space.lg, opacity: pressed ? 0.96 : 1 }}>
+          <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start', gap: space.md }}>
+            <View style={{ flex: 1, gap: 8 }}>
+              <AppText variant="title" numberOfLines={2}>
+                {item.title}
+              </AppText>
+              <AppText variant="meta" muted>
+                {meta}
+              </AppText>
+            </View>
+            <Ionicons name="chevron-forward" size={26} color={theme.textSoft} />
           </View>
-          <View
-            style={{
-              paddingHorizontal: space.md,
-              paddingVertical: 6,
-              borderRadius: radius.pill,
-              backgroundColor: item.status === 'summarized' ? theme.done : theme.accentWash,
-            }}
-          >
-            <AppText variant="label" color={item.status === 'summarized' ? '#fff' : theme.accent}>
-              {STATUS_LABEL[item.status] ?? item.status}
-            </AppText>
-          </View>
-        </View>
 
-        <AppText variant="body" muted numberOfLines={2}>
-          {item.summary?.trim()
-            ? item.summary.trim()
-            : item.status === 'summarizing'
-              ? 'Maina is turning the transcript into a meeting packet…'
-              : 'Transcript stays available as raw memory. Summary, decisions, and to-dos will appear here.'}
-        </AppText>
+          <Chip label={state.label} tone={state.tone} />
 
-        <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: space.sm }}>
-          <View style={{ paddingHorizontal: space.md, paddingVertical: 6, borderRadius: radius.pill, backgroundColor: theme.accentWash }}>
-            <AppText variant="label" color={theme.accent}>{item.decisions.length} decisions</AppText>
-          </View>
-          <View style={{ paddingHorizontal: space.md, paddingVertical: 6, borderRadius: radius.pill, backgroundColor: theme.accentWash }}>
-            <AppText variant="label" color={theme.accent}>{item.openTodoCount} open to-dos</AppText>
-          </View>
-          <View style={{ paddingHorizontal: space.md, paddingVertical: 6, borderRadius: radius.pill, backgroundColor: theme.accentWash }}>
-            <AppText variant="label" color={theme.accent}>{item.openQuestions.length} questions</AppText>
-          </View>
-        </View>
-      </Card>
+          {item.summaryStatus === 'ready' && item.summary?.trim() ? (
+            <AppText variant="body" muted numberOfLines={2}>
+              {item.summary.trim()}
+            </AppText>
+          ) : (
+            <AppText variant="body" muted numberOfLines={2}>
+              {state.detail ?? 'Transcript stays available as raw memory. Notes appear here once ready.'}
+            </AppText>
+          )}
+
+          {state.working ? (
+            <View style={{ height: 6, borderRadius: radius.pill, backgroundColor: theme.mutedSoft, overflow: 'hidden' }}>
+              <View style={{ width: '26%', height: '100%', borderRadius: radius.pill, backgroundColor: theme.primary }} />
+            </View>
+          ) : null}
+        </Card>
+      )}
     </Pressable>
   );
 }
@@ -76,82 +79,137 @@ function MeetingRow({ item }: { item: Meeting }) {
 export default function MeetingsScreen() {
   const { theme } = useAppTheme();
   const { topPadding, contentBottomPadding } = useMainaLayout();
-  const { meetings, refresh } = useMeetings();
-  const [remote, setRemote] = useState<RemoteControlStatus | null>(null);
+  const { meetings, refresh, loaded } = useMeetings();
+  const [query, setQuery] = useState('');
 
   useFocusEffect(
     useCallback(() => {
-      refresh();
-      void getRemoteControlStatus().then(setRemote).catch(() => setRemote(null));
+      void refresh();
     }, [refresh]),
   );
 
-  const remoteHealth = describeRemoteHealth(remote);
+  const filtered = useMemo(() => {
+    const needle = query.trim().toLowerCase();
+    if (!needle) return meetings;
+    return meetings.filter((meeting) => meeting.title.toLowerCase().includes(needle));
+  }, [meetings, query]);
+
+  const interrupted = meetings.find((meeting) => meeting.status === 'interrupted');
 
   return (
     <View style={{ flex: 1, backgroundColor: theme.bg }}>
+      <DrawerMenu />
       <FlatList
-        data={meetings}
-        keyExtractor={(m) => m.id}
+        data={filtered}
+        keyExtractor={(item) => item.id}
         renderItem={({ item }) => <MeetingRow item={item} />}
-        ItemSeparatorComponent={() => <View style={{ height: space.md }} />}
+        ItemSeparatorComponent={() => <View style={{ height: space.lg }} />}
         ListHeaderComponent={
-          <View style={{ gap: space.lg, marginBottom: space.xl }}>
-            <Card style={{ gap: space.lg, backgroundColor: theme.accent, borderColor: theme.accent }}>
-              <View style={{ gap: space.sm }}>
-                <AppText variant="display" color="#fff">Maina</AppText>
-                <AppText variant="body" color="rgba(255,255,255,0.88)">
-                  Capture meetings fast, keep transcripts local, and turn them into clean packets when you need them.
-                </AppText>
-              </View>
-              <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: space.sm }}>
-                <View style={{ paddingHorizontal: space.md, paddingVertical: 6, borderRadius: radius.pill, backgroundColor: 'rgba(255,255,255,0.18)' }}>
-                  <AppText variant="label" color="#fff">{meetings.length} meetings</AppText>
-                </View>
-                <View style={{ paddingHorizontal: space.md, paddingVertical: 6, borderRadius: radius.pill, backgroundColor: 'rgba(255,255,255,0.18)' }}>
-                  <AppText variant="label" color="#fff">{meetings.filter((meeting) => meeting.status === 'summarized').length} ready packets</AppText>
-                </View>
-              </View>
-              <PrimaryButton
-                label="Start recording"
-                onPress={() => router.push('/record')}
-                style={{ alignSelf: 'flex-start', backgroundColor: 'rgba(255,255,255,0.18)', shadowOpacity: 0 }}
-              />
-            </Card>
-            {remoteHealth.tone === 'warn' ? (
-              <Card style={{ gap: space.md, borderColor: theme.warn, backgroundColor: theme.surface }}>
-                <View style={{ gap: 6 }}>
-                  <AppText variant="heading">{remoteHealth.title}</AppText>
-                  <AppText variant="body" muted>{remoteHealth.detail}</AppText>
-                  <AppText variant="label" muted>{formatRemoteLastPress(remote)}</AppText>
-                </View>
-                {remoteHealth.ctaAction === 'accessibility' ? (
-                  <PrimaryButton
-                    label={remoteHealth.ctaLabel ?? 'Open clicker settings'}
-                    onPress={() => void openRemoteAccessibilitySettings()}
-                    style={{ alignSelf: 'flex-start' }}
-                  />
-                ) : null}
-              </Card>
+          <View style={{ gap: space.lg, paddingTop: topPadding, marginBottom: space.lg }}>
+            {interrupted ? (
+              <Pressable onPress={() => router.push(`/meeting/${interrupted.id}/recover`)}>
+                <Banner tone="warn" style={{ gap: 8 }}>
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.md }}>
+                    <Ionicons name="alert-circle-outline" size={24} color={theme.warn} />
+                    <AppText variant="title" style={{ flex: 1 }}>
+                      A recording was cut short
+                    </AppText>
+                  </View>
+                  <AppText variant="body" muted>
+                    We saved what we could. Tap to fix it now.
+                  </AppText>
+                </Banner>
+              </Pressable>
             ) : null}
-            <View style={{ gap: space.xs }}>
-              <AppText variant="title">Recent meetings</AppText>
-              <AppText variant="body" muted>
-                Tap any meeting to see the summary packet. Transcript stays there as your raw memory when you need to audit or export it.
-              </AppText>
+
+            <View
+              style={{
+                flexDirection: 'row',
+                alignItems: 'center',
+                gap: space.md,
+                borderRadius: radius.pill,
+                backgroundColor: theme.mutedSoft,
+                paddingHorizontal: 18,
+                minHeight: 56,
+              }}
+            >
+              <Ionicons name="search-outline" size={24} color={theme.textSoft} />
+              <TextInput
+                value={query}
+                onChangeText={setQuery}
+                placeholder="Search recording names"
+                placeholderTextColor={theme.textSoft}
+                style={{ flex: 1, color: theme.text, fontSize: 16 }}
+              />
             </View>
+
+            <Pressable onPress={() => router.push('/record')}>
+              {({ pressed }) => (
+                <View
+                  style={{
+                    borderRadius: 28,
+                    backgroundColor: theme.primary,
+                    paddingHorizontal: 20,
+                    paddingVertical: 18,
+                    shadowColor: theme.primary,
+                    shadowOpacity: 0.24,
+                    shadowRadius: 20,
+                    shadowOffset: { width: 0, height: 12 },
+                    elevation: 6,
+                    opacity: pressed ? 0.96 : 1,
+                  }}
+                >
+                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 16 }}>
+                    <View
+                      style={{
+                        width: 72,
+                        height: 72,
+                        borderRadius: 36,
+                        backgroundColor: 'rgba(255,255,255,0.12)',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                      }}
+                    >
+                      <Ionicons name="mic-outline" size={34} color="#FFFFFF" />
+                    </View>
+                    <View style={{ flex: 1, gap: 8 }}>
+                      <AppText variant="title" color="#FFFFFF">
+                        Record a meeting
+                      </AppText>
+                      <AppText variant="meta" color="rgba(255,255,255,0.84)">
+                        Works with your configured clicker when Maina is armed
+                      </AppText>
+                    </View>
+                  </View>
+                </View>
+              )}
+            </Pressable>
+
+            <SectionLabel>Recent</SectionLabel>
           </View>
         }
         ListEmptyComponent={
-          <EmptyState
-            emoji="🎙️"
-            title="No meetings yet"
-            subtitle="Tap record to capture your first meeting. Maina will build the packet automatically afterward."
-          />
+          loaded ? (
+            query.trim() ? (
+              <View style={{ paddingTop: 8 }}>
+                <AppText variant="body" muted style={{ textAlign: 'center' }}>
+                  No recording names match &quot;{query}&quot;.
+                </AppText>
+              </View>
+            ) : (
+              <Banner tone="info" style={{ alignItems: 'center', gap: 8, paddingVertical: 28 }}>
+                <AppText variant="title">No recordings yet</AppText>
+                <AppText variant="body" muted style={{ textAlign: 'center' }}>
+                  Tap Record a meeting to make your first one.
+                </AppText>
+              </Banner>
+            )
+          ) : (
+            <EmptyState title="Loading your recordings" subtitle="Maina is opening your local library." />
+          )
         }
         contentContainerStyle={{
-          paddingHorizontal: space.lg,
-          paddingTop: topPadding,
+          paddingHorizontal: 16,
           paddingBottom: contentBottomPadding,
           flexGrow: 1,
         }}

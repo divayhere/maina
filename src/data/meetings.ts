@@ -613,13 +613,13 @@ export async function commitTranscriptFinalBlocks(input: {
   const baseEndedAt = input.endedAt ?? draft?.endedAt ?? Date.now();
   const createdAt = Date.now();
 
-  await db.withTransactionAsync(async () => {
+  await db.withExclusiveTransactionAsync(async (transaction) => {
     if (draft) {
-      await db.runAsync(`DELETE FROM transcript_blocks WHERE block_id = ?`, [draft.blockId]);
+      await transaction.runAsync(`DELETE FROM transcript_blocks WHERE block_id = ?`, [draft.blockId]);
     }
     for (let index = 0; index < chunks.length; index += 1) {
       const chunk = chunks[index];
-      await db.runAsync(
+      await transaction.runAsync(
         `INSERT INTO transcript_blocks
           (block_id, meeting_id, sequence, status, segment_index, started_at, ended_at, language, speaker_id, text, word_count, char_count, created_at, updated_at)
          VALUES (?, ?, ?, 'final', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,

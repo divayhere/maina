@@ -1,15 +1,15 @@
 import { Ionicons } from '@expo/vector-icons';
 import Constants from 'expo-constants';
 import * as Device from 'expo-device';
-import { router } from 'expo-router';
 import * as FileSystem from 'expo-file-system/legacy';
 import { useCallback, useEffect, useState } from 'react';
 import { Alert, Pressable, ScrollView, StyleSheet, View } from 'react-native';
 
 import { getOfflineLocales, supportsOnDevice } from '@/core/transcription/nativeSpeech';
 import { purgeStagingMeetings } from '@/data/meetings';
-import { AppText, Card, PrimaryButton } from '@/design/components';
+import { AppText, Banner, Card, PrimaryButton, SectionLabel } from '@/design/components';
 import { useMainaLayout } from '@/design/layout';
+import { TopBar } from '@/design/shell';
 import { useAppTheme } from '@/design/theme';
 import { space } from '@/design/tokens';
 import { isRecordingForegroundServiceRunning, listAudioInputs } from '@/hardware/recording/foreground';
@@ -27,15 +27,15 @@ function Row({ label, value, warning = false }: { label: string; value: string; 
   const { theme } = useAppTheme();
   return (
     <View style={styles.row}>
-      <AppText variant="body" muted>{label}</AppText>
-      <AppText variant="body" color={warning ? theme.warn : undefined} style={styles.value}>{value}</AppText>
+      <AppText variant="bodyStrong">{label}</AppText>
+      <AppText variant="meta" color={warning ? theme.warn : theme.textSoft} style={styles.value}>{value}</AppText>
     </View>
   );
 }
 
 export default function Diagnostics() {
   const { theme } = useAppTheme();
-  const { topPadding, contentBottomPadding, insets } = useMainaLayout();
+  const { contentBottomPadding, topPadding } = useMainaLayout();
   const [status, setStatus] = useState<DiagnosticsStatus | null>(null);
   const [inputs, setInputs] = useState<string[]>([]);
   const [locales, setLocales] = useState<string[]>([]);
@@ -130,20 +130,27 @@ export default function Diagnostics() {
   };
 
   return (
-      <View style={{ flex: 1, backgroundColor: theme.bg }}>
-      <View style={[styles.topbar, { paddingTop: topPadding }]}>
-        <Pressable onPress={() => router.back()} hitSlop={12}>
-          <Ionicons name="chevron-back" size={26} color={theme.text} />
-        </Pressable>
-        <AppText variant="heading">System status</AppText>
-        <Pressable onPress={() => void refresh()} hitSlop={12}>
-          <Ionicons name="refresh" size={22} color={theme.accent} />
-        </Pressable>
-      </View>
+    <View style={{ flex: 1, backgroundColor: theme.bg }}>
+      <TopBar
+        title="System status"
+        back
+        right={(
+          <Pressable onPress={() => void refresh()} hitSlop={12}>
+            <Ionicons name="refresh" size={22} color={theme.primary} />
+          </Pressable>
+        )}
+      />
 
-      <ScrollView contentContainerStyle={[styles.content, { paddingBottom: contentBottomPadding }]}>
-        <Card style={{ gap: space.xs }}>
-          <AppText variant="label" muted>REMOTE DIAGNOSTICS</AppText>
+      <ScrollView contentContainerStyle={[styles.content, { paddingTop: topPadding, paddingBottom: contentBottomPadding }]}>
+        <Banner tone={(status?.failedArtifacts ?? 0) > 0 || !status?.enabled ? 'warn' : 'info'} style={{ gap: 8 }}>
+          <AppText variant="title">Diagnostics overview</AppText>
+          <AppText variant="body" muted>
+            This screen is for troubleshooting the local app state, uploads, storage, and capture environment. You normally do not need to copy logs manually.
+          </AppText>
+        </Banner>
+
+        <Card style={{ gap: space.sm }}>
+          <SectionLabel>Remote diagnostics</SectionLabel>
           <Row label="Connection" value={status?.enabled ? 'Configured' : 'Unavailable'} warning={!status?.enabled} />
           <Row label="Queued events" value={String(status?.pendingEvents ?? 0)} warning={(status?.pendingEvents ?? 0) > 100} />
           <Row label="Queued audio/files" value={String(status?.pendingArtifacts ?? 0)} />
@@ -180,11 +187,11 @@ export default function Diagnostics() {
             value={isSentryConfigured() ? 'Sentry configured' : 'Waiting for Sentry DSN'}
             warning={!isSentryConfigured()}
           />
-          {status?.lastError ? <AppText variant="label" color={theme.warn}>{status.lastError}</AppText> : null}
+          {status?.lastError ? <AppText variant="body" color={theme.warn}>{status.lastError}</AppText> : null}
         </Card>
 
-        <Card style={{ gap: space.xs }}>
-          <AppText variant="label" muted>CAPTURE</AppText>
+        <Card style={{ gap: space.sm }}>
+          <SectionLabel>Capture</SectionLabel>
           <Row label="Foreground protection" value={isRecordingForegroundServiceRunning() ? 'Running' : 'Idle'} />
           <Row label="Audio owner" value="Native speech recorder" />
           <Row label="Endurance guarantee" value="Pending 2-hour device test" warning />
@@ -193,8 +200,8 @@ export default function Diagnostics() {
           <Row label="Audio inputs" value={inputs.length ? inputs.join(' · ') : 'None reported'} warning={!inputs.length} />
         </Card>
 
-        <Card style={{ gap: space.xs }}>
-          <AppText variant="label" muted>BUILD</AppText>
+        <Card style={{ gap: space.sm }}>
+          <SectionLabel>Build</SectionLabel>
           <Row label="Version" value={Constants.expoConfig?.version ?? 'unknown'} />
           <Row label="Native build" value={Constants.nativeBuildVersion ?? 'unknown'} />
           <Row label="Device" value={`${Device.manufacturer ?? ''} ${Device.modelName ?? ''}`.trim()} />
@@ -210,41 +217,31 @@ export default function Diagnostics() {
           />
         </Card>
 
-        <AppText variant="label" muted style={{ textAlign: 'center' }}>
-          Maina keeps a private local outbox when offline. You normally do not need to copy or share logs.
-        </AppText>
-      </ScrollView>
-
-      <View style={{ paddingHorizontal: space.lg, paddingTop: space.sm, paddingBottom: insets.bottom + space.lg, gap: space.sm }}>
-        {(status?.failedArtifacts ?? 0) > 0 ? (
+        <Card style={{ gap: space.md }}>
+          <SectionLabel>Actions</SectionLabel>
+          {(status?.failedArtifacts ?? 0) > 0 ? (
+            <PrimaryButton
+              label={syncing ? 'Retry requested...' : 'Retry failed uploads'}
+              onPress={retryFailed}
+            />
+          ) : null}
           <PrimaryButton
-            label={syncing ? 'Retry requested…' : 'Retry failed uploads'}
-            onPress={retryFailed}
+            label={syncing ? 'Working...' : 'Clear old staging meetings'}
+            onPress={clearStagingMeetings}
           />
-        ) : null}
-        <PrimaryButton
-          label={syncing ? 'Working…' : 'Clear old staging meetings'}
-          onPress={clearStagingMeetings}
-        />
-        <PrimaryButton
-          label={syncing ? 'Working…' : 'Clear diagnostic cache'}
-          onPress={clearDiagnosticCache}
-        />
-        <PrimaryButton label={syncing ? 'Sync requested…' : 'Sync diagnostics now'} onPress={forceSync} />
-      </View>
+          <PrimaryButton
+            label={syncing ? 'Working...' : 'Clear diagnostic cache'}
+            onPress={clearDiagnosticCache}
+          />
+          <PrimaryButton label={syncing ? 'Sync requested...' : 'Sync diagnostics now'} onPress={forceSync} />
+        </Card>
+      </ScrollView>
     </View>
   );
 }
 
 const styles = StyleSheet.create({
-  topbar: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    paddingHorizontal: space.lg,
-    paddingBottom: space.sm,
-  },
-  content: { padding: space.lg, gap: space.lg },
+  content: { paddingHorizontal: 16, paddingTop: space.xl, gap: space.xl },
   row: { flexDirection: 'row', justifyContent: 'space-between', gap: space.md, paddingVertical: space.xs },
   value: { flex: 1, textAlign: 'right' },
 });

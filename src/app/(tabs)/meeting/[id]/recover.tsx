@@ -1,20 +1,20 @@
-import { Ionicons } from '@expo/vector-icons';
 import { router, useFocusEffect, useLocalSearchParams } from 'expo-router';
 import { useCallback, useState } from 'react';
-import { ActivityIndicator, Pressable, StyleSheet, View } from 'react-native';
+import { ActivityIndicator, StyleSheet, View } from 'react-native';
 
 import { getMeeting, getTranscriptSummary, listRecordingSegments, type Meeting } from '@/data/meetings';
-import { AppText, Card, PrimaryButton } from '@/design/components';
+import { AppText, Banner, Card, Chip, PrimaryButton, SectionLabel } from '@/design/components';
+import { TopBar } from '@/design/shell';
 import { useMainaLayout } from '@/design/layout';
 import { useAppTheme } from '@/design/theme';
-import { radius, space } from '@/design/tokens';
+import { space } from '@/design/tokens';
 import { ensureStorageBudget } from '@/services/storageBudget';
 import { shareMeetingExport } from '@/services/transcriptExport';
-import { formatDateTime, formatDuration } from '@/utils/format';
+import { formatDate, formatDuration, formatTime } from '@/utils/format';
 
 export default function MeetingRecoveryScreen() {
   const { theme } = useAppTheme();
-  const { topPadding, contentBottomPadding } = useMainaLayout();
+  const { contentBottomPadding, topPadding } = useMainaLayout();
   const { id } = useLocalSearchParams<{ id: string }>();
   const [meeting, setMeeting] = useState<Meeting | null>(null);
   const [blockCount, setBlockCount] = useState(0);
@@ -55,34 +55,36 @@ export default function MeetingRecoveryScreen() {
 
   return (
     <View style={{ flex: 1, backgroundColor: theme.bg }}>
-      <View style={[styles.topbar, { paddingTop: topPadding }]}>
-        <Pressable onPress={() => router.back()} hitSlop={12}>
-          <Ionicons name="chevron-back" size={26} color={theme.text} />
-        </Pressable>
-      </View>
+      <TopBar title={meeting?.title ?? 'Recovered recording'} back />
 
-      <View style={[styles.content, { paddingBottom: contentBottomPadding }]}>
-        <View style={{ gap: space.xs }}>
-          <AppText variant="title">{meeting?.title ?? 'Recovered meeting'}</AppText>
+      <View style={[styles.content, { paddingTop: topPadding, paddingBottom: contentBottomPadding }]}>
+        <View style={{ gap: space.sm }}>
           {meeting ? (
-            <AppText variant="body" muted>
-              {formatDateTime(meeting.startedAt)} · {formatDuration(meeting.durationMs)}
+            <AppText variant="meta" muted>
+              {formatDate(meeting.startedAt)} · {formatTime(meeting.startedAt)} · {formatDuration(meeting.durationMs)}
             </AppText>
           ) : null}
+          <Chip label="Recording stopped early" tone="warn" />
         </View>
 
-        <Card style={{ gap: space.md }}>
-          <AppText variant="label" muted>RECOVERY</AppText>
-          <AppText variant="body">
-            Maina recovered this meeting after an interrupted recording session. Open the transcript only when you want to inspect it; the recovery screen stays light on purpose.
+        <Banner tone="warn" style={{ gap: space.md }}>
+          <AppText variant="title">Maina saved what it had</AppText>
+          <AppText variant="body" muted>
+            This recording was interrupted. You can keep the saved text, and if audio is still available you can ask Maina to retry transcription.
           </AppText>
-          <View style={{ gap: space.xs }}>
-            <AppText variant="body" muted>Status: {meeting?.status ?? 'unknown'}</AppText>
-            <AppText variant="body" muted>Transcript blocks: {blockCount}</AppText>
-            <AppText variant="body" muted>Saved audio segments: {audioSegments}</AppText>
-            <AppText variant="body" muted>Audio available: {audioAvailable ? 'Yes' : 'No'}</AppText>
-            {meeting?.lastError ? <AppText variant="body" color={theme.warn}>Last error: {meeting.lastError}</AppText> : null}
-          </View>
+        </Banner>
+
+        <Card style={{ gap: space.md }}>
+          <SectionLabel>Recovery details</SectionLabel>
+          {meeting ? (
+            <View style={{ gap: space.sm }}>
+              <AppText variant="meta" muted>Transcript blocks: {blockCount}</AppText>
+              <AppText variant="meta" muted>Saved audio segments: {audioSegments}</AppText>
+              <AppText variant="meta" muted>Audio available: {audioAvailable ? 'Yes' : 'No'}</AppText>
+            </View>
+          ) : (
+            <ActivityIndicator color={theme.primary} />
+          )}
         </Card>
 
         <View style={{ gap: space.md }}>
@@ -94,15 +96,18 @@ export default function MeetingRecoveryScreen() {
             />
           ) : null}
           <PrimaryButton
-            label={sharing ? 'Preparing export…' : 'Share current transcript'}
+            label={sharing ? 'Preparing export...' : 'Save a copy'}
             onPress={shareCurrentTranscript}
           />
         </View>
 
-        {!meeting ? (
-          <View style={{ paddingTop: space.lg }}>
-            <ActivityIndicator color={theme.accent} />
-          </View>
+        {meeting ? (
+          <Card style={{ gap: space.sm }}>
+            <SectionLabel>What happens next</SectionLabel>
+            <AppText variant="body" muted>
+              Open the transcript to inspect what was saved. If the audio is still here, retry transcription from saved audio. Once the transcript looks right, you can write notes from the meeting page.
+            </AppText>
+          </Card>
         ) : null}
       </View>
     </View>
@@ -110,16 +115,9 @@ export default function MeetingRecoveryScreen() {
 }
 
 const styles = StyleSheet.create({
-  topbar: {
-    paddingHorizontal: space.lg,
-    paddingBottom: space.sm,
-  },
   content: {
-    paddingHorizontal: space.lg,
-    paddingBottom: space.xl,
-    gap: space.lg,
-  },
-  tag: {
-    borderRadius: radius.pill,
+    paddingHorizontal: 16,
+    paddingTop: space.xl,
+    gap: space.xl,
   },
 });

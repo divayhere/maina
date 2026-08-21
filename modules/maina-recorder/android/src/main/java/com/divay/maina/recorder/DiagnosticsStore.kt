@@ -7,7 +7,6 @@ import android.database.sqlite.SQLiteOpenHelper
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
-import java.net.URI
 import java.util.UUID
 
 internal data class DiagnosticConfig(
@@ -134,6 +133,22 @@ internal class DiagnosticsStore(context: Context) :
             // version records the behavioural migration for field diagnostics.
             version = 3
         }
+        if (version < 4) {
+            // v0.10 wrote native File.toURI() values such as file:/data/... as
+            // literal paths. Repair those queued artifacts in place so they
+            // can be retried; file:/// values were already normalised by v3.
+            db.execSQL(
+                """UPDATE artifacts
+                   SET source_path = substr(source_path, 6),
+                       status = 'pending',
+                       attempts = 0,
+                       last_error = NULL,
+                       last_attempt_at = NULL
+                   WHERE source_path LIKE 'file:/%'
+                     AND source_path NOT LIKE 'file://%'""",
+            )
+            version = 4
+        }
         check(version == newVersion) {
             "Unsupported diagnostics database migration $oldVersion -> $newVersion"
         }
@@ -217,7 +232,7 @@ internal class DiagnosticsStore(context: Context) :
     }
 
     fun queueAudioArtifact(artifactId: String, raw: Map<String, Any?>) {
-        val source = uriToPath(raw.string("sourceUri"))
+        val source = mainaFileFromUriOrPath(raw.string("sourceUri")).absolutePath
         require(source.isNotBlank()) { "Audio artifact source is missing" }
         val values = ContentValues().apply {
             put("artifact_id", artifactId)
@@ -647,13 +662,13 @@ internal class DiagnosticsStore(context: Context) :
 
     private fun localBytes(artifact: ArtifactRecord): Long {
         val paths = listOfNotNull(artifact.sourcePath, artifact.preparedPath).distinct()
-        return paths.sumOf { path -> File(path).takeIf(File::isFile)?.length() ?: 0L }
+        return paths.sumOf { path -> mainaFileFromUriOrPath(path).takeIf(File::isFile)?.length() ?: 0L }
     }
 
     private fun deleteLocalFiles(artifact: ArtifactRecord): Boolean {
         val files = listOfNotNull(artifact.sourcePath, artifact.preparedPath)
             .distinct()
-            .map(::File)
+            .map(::mainaFileFromUriOrPath)
         val removed = files.all { file -> !file.exists() || runCatching { file.delete() }.getOrDefault(false) }
         if (removed) {
             writableDatabase.execSQL(
@@ -717,7 +732,7 @@ internal class DiagnosticsStore(context: Context) :
         }
 
         private const val DB_NAME = "maina-diagnostics.db"
-        private const val DB_VERSION = 3
+        private const val DB_VERSION = 4
         private const val PREFS_NAME = "maina_diagnostics_config"
         private const val KEY_INSTALL_ID = "install_id"
         private const val KEY_ENABLED = "enabled"
@@ -736,11 +751,6 @@ internal class DiagnosticsStore(context: Context) :
         private const val DAY_MS = 24L * 60L * 60L * 1000L
         private const val LOCAL_AUDIO_CAP_BYTES = 3L * 1024L * 1024L * 1024L
         private const val MIN_FREE_STORAGE_BYTES = 5L * 1024L * 1024L * 1024L
-
-        private fun uriToPath(uri: String): String = when {
-            uri.startsWith("file://") -> runCatching { File(URI(uri)).absolutePath }.getOrDefault(uri.removePrefix("file://"))
-            else -> uri
-        }
 
         private fun safePath(value: String): String = value.replace(Regex("[^A-Za-z0-9._-]"), "-")
 

@@ -18,6 +18,6 @@ dependencies {
   implementation 'androidx.work:work-runtime-ktx:2.10.5'
   // Official sherpa-onnx Android runtime. Qwen model data is intentionally
   // delivered as a separately verified local model pack, never baked into APK.
-  implementation files('libs/sherpa-onnx-1.13.6.aar')
+  compileOnly files('libs/sherpa-onnx-1.13.6.aar')
   testImplementation 'junit:junit:4.13.2'
 }

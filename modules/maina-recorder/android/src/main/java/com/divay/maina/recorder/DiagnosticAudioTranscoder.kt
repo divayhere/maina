@@ -32,7 +32,7 @@ internal object DiagnosticAudioTranscoder {
 
     fun prepare(artifact: ArtifactRecord, outputDir: File): PreparedArtifact {
         if (artifact.kind != "audio") {
-            val file = File(artifact.preparedPath ?: artifact.sourcePath)
+            val file = mainaFileFromUriOrPath(artifact.preparedPath ?: artifact.sourcePath)
             require(file.isFile) { "Artifact source does not exist: ${file.absolutePath}" }
             return PreparedArtifact(
                 path = file.absolutePath,
@@ -61,7 +61,7 @@ internal object DiagnosticAudioTranscoder {
         }
 
         require(Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) { "Opus diagnostics require Android 10+" }
-        val source = File(artifact.sourcePath)
+        val source = mainaFileFromUriOrPath(artifact.sourcePath)
         require(source.isFile && source.length() >= 44L) { "WAV source is missing or incomplete" }
         outputDir.mkdirs()
         val wav = readWavInfo(source)

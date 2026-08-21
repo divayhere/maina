@@ -16,37 +16,32 @@ import {
 
 import { getProvider, PROVIDERS, type AIProvider } from '@/core/summarization/providers';
 import {
-  ACTIVE_LANGUAGES,
   provisionCoreLanguages,
-  LANGUAGES,
   supportsOnDevice,
   type LanguageProvisioningState,
 } from '@/core/transcription/nativeSpeech';
-import { AppText, Card, PrimaryButton } from '@/design/components';
+import { AppText, Banner, Card, Chip, PrimaryButton, SectionLabel } from '@/design/components';
+import { DrawerMenu } from '@/design/shell';
 import { useMainaLayout } from '@/design/layout';
 import { useAppTheme } from '@/design/theme';
 import { radius, space } from '@/design/tokens';
 import { getRemoteControlStatus, openRemoteAccessibilitySettings } from '@/hardware/recording/foreground';
-import { describeRemoteHealth, formatRemoteLastPress } from '@/hardware/trigger/remoteHealth';
+import { describeRemoteHealth } from '@/hardware/trigger/remoteHealth';
 import type { RemoteControlStatus } from '../../../modules/maina-recorder/src';
-import { DEFAULT_CONFIG, getAppConfig, getProviderSettings, saveAppConfig, saveProviderSettings, type AppConfig, type ProviderSettings } from '@/services/config';
+import {
+  DEFAULT_CONFIG,
+  getAppConfig,
+  getProviderSettings,
+  saveAppConfig,
+  saveProviderSettings,
+  type AppConfig,
+  type ProviderSettings,
+} from '@/services/config';
 import { log } from '@/services/logger';
 import { queueEligibleMeetingPackets } from '@/services/meetingPacket';
 import { validateProviderSettings } from '@/services/providerValidation';
 
-function Row({ label, value, helper }: { label: string; value: string; helper?: string }) {
-  return (
-    <View style={{ gap: 2 }}>
-      <View style={{ flexDirection: 'row', justifyContent: 'space-between', gap: space.md }}>
-        <AppText variant="body" muted>{label}</AppText>
-        <AppText variant="body" style={{ flexShrink: 1, textAlign: 'right' }}>{value}</AppText>
-      </View>
-      {helper ? <AppText variant="label" muted>{helper}</AppText> : null}
-    </View>
-  );
-}
-
-function ProviderChip({
+function ProviderPill({
   provider,
   selected,
   onPress,
@@ -59,68 +54,96 @@ function ProviderChip({
   return (
     <Pressable
       onPress={onPress}
-      style={{
-        paddingHorizontal: space.md,
-        paddingVertical: space.sm,
-        borderRadius: radius.pill,
-        borderWidth: 1,
-        borderColor: selected ? theme.accent : theme.border,
-        backgroundColor: selected ? theme.accentWash : theme.surface,
-      }}
+      style={({ pressed }) => [
+        {
+          borderRadius: radius.pill,
+          borderWidth: 1,
+          borderColor: selected ? theme.primary : theme.border,
+          backgroundColor: selected ? theme.accent : theme.surface,
+          paddingHorizontal: 14,
+          paddingVertical: 10,
+          opacity: pressed ? 0.96 : 1,
+        },
+      ]}
     >
-      <AppText variant="label" color={selected ? theme.accent : theme.text}>
+      <AppText variant="bodyStrong" color={selected ? theme.accentText : theme.text}>
         {provider.label}
       </AppText>
     </Pressable>
   );
 }
 
-function Input({
+function LabeledInput({
   label,
   value,
   onChangeText,
   placeholder,
   secureTextEntry,
-  multiline,
 }: {
   label: string;
   value: string;
   onChangeText: (value: string) => void;
   placeholder?: string;
   secureTextEntry?: boolean;
-  multiline?: boolean;
 }) {
   const { theme } = useAppTheme();
   return (
     <View style={{ gap: space.sm }}>
-      <AppText variant="label" muted>{label}</AppText>
+      <AppText variant="bodyStrong">{label}</AppText>
       <TextInput
         value={value}
         onChangeText={onChangeText}
         placeholder={placeholder}
-        placeholderTextColor={theme.muted}
+        placeholderTextColor={theme.textSoft}
         secureTextEntry={secureTextEntry}
-        multiline={multiline}
         autoCapitalize="none"
         autoCorrect={false}
         style={{
+          minHeight: 52,
           borderWidth: 1,
           borderColor: theme.border,
-          borderRadius: radius.lg,
           backgroundColor: theme.surface,
+          borderRadius: radius.md,
+          paddingHorizontal: 16,
           color: theme.text,
-          paddingHorizontal: space.lg,
-          paddingVertical: multiline ? space.lg : space.md,
-          minHeight: multiline ? 92 : 52,
+          fontSize: 16,
         }}
       />
     </View>
   );
 }
 
+function SettingsRow({
+  label,
+  value,
+  helper,
+}: {
+  label: string;
+  value: string;
+  helper?: string;
+}) {
+  return (
+    <View style={{ gap: 4 }}>
+      <View style={{ flexDirection: 'row', justifyContent: 'space-between', gap: space.md }}>
+        <AppText variant="bodyStrong" style={{ flex: 1 }}>
+          {label}
+        </AppText>
+        <AppText variant="meta" muted style={{ flexShrink: 1, textAlign: 'right' }}>
+          {value}
+        </AppText>
+      </View>
+      {helper ? (
+        <AppText variant="meta" muted>
+          {helper}
+        </AppText>
+      ) : null}
+    </View>
+  );
+}
+
 export default function SettingsScreen() {
   const { theme } = useAppTheme();
-  const { topPadding, contentBottomPadding } = useMainaLayout();
+  const { contentBottomPadding, topPadding } = useMainaLayout();
   const version = Constants.expoConfig?.version ?? '1.0.0';
 
   const [config, setConfig] = useState<AppConfig>(DEFAULT_CONFIG);
@@ -130,8 +153,8 @@ export default function SettingsScreen() {
     model: getProvider(DEFAULT_CONFIG.providerId)?.defaultModel ?? '',
     customBaseUrl: '',
   });
-  const [onDevice, setOnDevice] = useState<boolean | null>(null);
   const [languages, setLanguages] = useState<LanguageProvisioningState | null>(null);
+  const [onDevice, setOnDevice] = useState<boolean | null>(null);
   const [remote, setRemote] = useState<RemoteControlStatus | null>(null);
   const [saveState, setSaveState] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
   const [saveMessage, setSaveMessage] = useState<string | null>(null);
@@ -151,14 +174,22 @@ export default function SettingsScreen() {
     ]);
     setConfig(nextConfig);
     setProviderState(nextProviderSettings);
-    setOnDevice(supportsOnDevice());
     setLanguages(nextLanguages);
     setRemote(nextRemote);
+    setOnDevice(supportsOnDevice());
   }, []);
 
-  useFocusEffect(useCallback(() => {
-    void load();
-  }, [load]));
+  useFocusEffect(
+    useCallback(() => {
+      void load();
+    }, [load]),
+  );
+
+  const aiAccountState = useMemo(() => {
+    if (saveState === 'error') return 'unreachable';
+    if (providerSettings.apiKey.trim()) return 'connected';
+    return 'not-connected';
+  }, [providerSettings.apiKey, saveState]);
 
   const saveProviderConfig = async () => {
     Keyboard.dismiss();
@@ -169,10 +200,6 @@ export default function SettingsScreen() {
       if (!validation.ok || !validation.resolvedModel) {
         setSaveState('error');
         setSaveMessage(validation.message);
-        log.warn('settings', 'provider validation failed', {
-          providerId: config.providerId,
-          message: validation.message,
-        });
         return;
       }
 
@@ -186,14 +213,12 @@ export default function SettingsScreen() {
       setProviderState(nextProvider);
 
       const queued = await queueEligibleMeetingPackets().catch(() => 0);
-      const queuedMessage = queued > 0 ? ` · queued ${queued} existing meeting${queued === 1 ? '' : 's'}` : '';
       setSaveState('saved');
-      setSaveMessage(`${validation.message}${queuedMessage}`);
-      log.info('settings', 'provider setup saved', {
-        providerId: config.providerId,
-        model: validation.resolvedModel,
-        queued,
-      });
+      setSaveMessage(
+        queued > 0
+          ? `${validation.message} · queued ${queued} earlier meeting${queued === 1 ? '' : 's'}`
+          : validation.message,
+      );
       setTimeout(() => setSaveState('idle'), 1800);
     } catch (cause) {
       const message = cause instanceof Error ? cause.message : String(cause);
@@ -215,218 +240,213 @@ export default function SettingsScreen() {
     setSaveMessage(null);
   };
 
+  const connectionBanner =
+    aiAccountState === 'connected'
+      ? {
+          title: 'Your AI account is connected',
+          body: 'Maina can write notes using your saved key.',
+          tone: 'info' as const,
+          chip: 'Connected',
+          chipTone: 'primary' as const,
+        }
+      : aiAccountState === 'unreachable'
+        ? {
+            title: "We couldn't reach your AI account",
+            body: 'Check the key or provider and try again.',
+            tone: 'warn' as const,
+            chip: 'Needs attention',
+            chipTone: 'warn' as const,
+        }
+        : {
+            title: 'Connect your AI account',
+            body: 'Transcript stays local. Your AI account is only used to write notes.',
+            tone: 'info' as const,
+            chip: 'Setup required',
+            chipTone: 'warn' as const,
+          };
+
   return (
-    <KeyboardAvoidingView
-      style={{ flex: 1, backgroundColor: theme.bg }}
-      behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-    >
+    <KeyboardAvoidingView style={{ flex: 1, backgroundColor: theme.bg }} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+      <DrawerMenu />
       <ScrollView
-        style={{ flex: 1, backgroundColor: theme.bg }}
         keyboardShouldPersistTaps="handled"
         keyboardDismissMode="on-drag"
         contentContainerStyle={{
-          padding: space.lg,
+          paddingHorizontal: 16,
           paddingTop: topPadding,
           gap: space.lg,
           paddingBottom: contentBottomPadding,
         }}
       >
-      <Card style={{ gap: space.md, backgroundColor: theme.accent, borderColor: theme.accent }}>
-        <AppText variant="display" color="#fff">Settings</AppText>
-        <AppText variant="body" color="rgba(255,255,255,0.86)">
-          Keep capture local, connect one cloud AI provider for packets, and control what Maina retains on the phone.
-        </AppText>
-      </Card>
-
-      <Card style={{ gap: space.md }}>
-        <AppText variant="label" muted>AI PACKET GENERATION</AppText>
-        <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', gap: space.md }}>
-          <View style={{ flex: 1, gap: 4 }}>
-            <AppText variant="heading">Auto-generate after every meeting</AppText>
-            <AppText variant="label" muted>
-              Maina keeps transcription local, then uses your chosen cloud LLM for the packet.
-            </AppText>
+        <Card style={{ gap: space.xl }}>
+          <SectionLabel>Your AI account</SectionLabel>
+          <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start', gap: space.md }}>
+            <View style={{ flex: 1, gap: 6 }}>
+              <AppText variant="title">{connectionBanner.title}</AppText>
+              <AppText variant="body" muted>{connectionBanner.body}</AppText>
+            </View>
+            <Chip label={connectionBanner.chip} tone={connectionBanner.chipTone} />
           </View>
-          <Switch
-            value={config.autoSummarize}
-            onValueChange={async (value) => {
-              const next = await saveAppConfig({ autoSummarize: value });
-              setConfig(next);
-            }}
-            thumbColor="#fff"
-            trackColor={{ false: theme.border, true: theme.accent }}
-          />
-        </View>
-
-        <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: space.sm }}>
-          {PROVIDERS.map((provider) => (
-            <ProviderChip
-              key={provider.id}
-              provider={provider}
-              selected={provider.id === config.providerId}
-              onPress={() => void selectProvider(provider.id)}
-            />
-          ))}
-        </View>
-
-        <Input
-          label="API key / token"
-          value={providerSettings.apiKey}
-          onChangeText={(value) => setProviderState((current) => ({ ...current, apiKey: value }))}
-          secureTextEntry
-          placeholder="Paste your provider key"
-        />
-
-        {selectedProvider.id === 'custom' ? (
           <View style={{ gap: space.md }}>
-            <Input
-              label="Base URL"
-              value={providerSettings.customBaseUrl ?? ''}
-              onChangeText={(value) => setProviderState((current) => ({ ...current, customBaseUrl: value }))}
-              placeholder="https://api.example.com/v1"
+            <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', gap: space.md }}>
+              <View style={{ flex: 1, gap: 4 }}>
+                <AppText variant="bodyStrong">Write notes automatically</AppText>
+                <AppText variant="meta" muted>
+                  Maina keeps transcription local, then uses your chosen AI account for notes.
+                </AppText>
+              </View>
+              <Switch
+                value={config.autoSummarize}
+                onValueChange={async (value) => {
+                  const next = await saveAppConfig({ autoSummarize: value });
+                  setConfig(next);
+                }}
+                thumbColor="#FFFFFF"
+                trackColor={{ false: theme.border, true: theme.primary }}
+              />
+            </View>
+
+            <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: space.sm }}>
+              {PROVIDERS.map((provider) => (
+                <ProviderPill
+                  key={provider.id}
+                  provider={provider}
+                  selected={provider.id === config.providerId}
+                  onPress={() => void selectProvider(provider.id)}
+                />
+              ))}
+            </View>
+
+            <LabeledInput
+              label="Paste the key from your AI account"
+              value={providerSettings.apiKey}
+              onChangeText={(value) => setProviderState((current) => ({ ...current, apiKey: value }))}
+              placeholder="Paste your provider key"
+              secureTextEntry
             />
-            <Input
-              label="Model"
-              value={providerSettings.model}
-              onChangeText={(value) => setProviderState((current) => ({ ...current, model: value }))}
-              placeholder="custom-model"
-            />
+
+            {selectedProvider.id === 'custom' ? (
+              <View style={{ gap: space.md }}>
+                <LabeledInput
+                  label="Base URL"
+                  value={providerSettings.customBaseUrl ?? ''}
+                  onChangeText={(value) => setProviderState((current) => ({ ...current, customBaseUrl: value }))}
+                  placeholder="https://api.example.com/v1"
+                />
+                <LabeledInput
+                  label="Model"
+                  value={providerSettings.model}
+                  onChangeText={(value) => setProviderState((current) => ({ ...current, model: value }))}
+                  placeholder="custom-model"
+                />
+              </View>
+            ) : (
+              <Banner tone="info" style={{ gap: 8 }}>
+                <AppText variant="bodyStrong">Maina checks the key when you save.</AppText>
+                <AppText variant="meta" muted>
+                  Pick the provider and paste the key. On save, Maina validates it with a real request and locks onto a working model automatically.
+                </AppText>
+              </Banner>
+            )}
+
+            <View style={{ gap: space.md }}>
+              <Pressable onPress={() => selectedProvider.keyUrl && void Linking.openURL(selectedProvider.keyUrl)} hitSlop={8}>
+                <AppText variant="bodyStrong" color={theme.primary}>
+                  {selectedProvider.keyUrl ? 'Where do I find my key?' : 'Custom provider'}
+                </AppText>
+              </Pressable>
+
+              <PrimaryButton
+                label={
+                  saveState === 'saving'
+                    ? 'Validating...'
+                    : saveState === 'saved'
+                      ? 'Saved'
+                      : 'Save'
+                }
+                onPress={() => void saveProviderConfig()}
+              />
+
+              {saveMessage ? (
+                <AppText variant="meta" color={saveState === 'error' ? theme.warn : saveState === 'saved' ? theme.primary : theme.textSoft}>
+                  {saveMessage}
+                </AppText>
+              ) : null}
+            </View>
           </View>
-        ) : null}
-
-        {selectedProvider.id !== 'custom' ? (
-          <Card style={{ gap: space.sm, padding: space.md, backgroundColor: theme.accentWash, borderColor: theme.accentWash }}>
-            <AppText variant="label" color={theme.accent}>Maina auto-selects the working model</AppText>
-            <AppText variant="body" muted>
-              Pick the provider and paste the key. On save, Maina validates it with a real request and locks onto a working model automatically.
-            </AppText>
-          </Card>
-        ) : null}
-
-        <View style={{ gap: space.md }}>
-          <Pressable onPress={() => selectedProvider.keyUrl && void Linking.openURL(selectedProvider.keyUrl)} hitSlop={8}>
-            <AppText variant="label" color={theme.accent}>
-              {selectedProvider.keyUrl ? 'Open provider key page' : 'Custom provider'}
-            </AppText>
-          </Pressable>
-          <PrimaryButton
-            label={
-              saveState === 'saving'
-                ? 'Validating…'
-                : saveState === 'saved'
-                  ? 'Saved'
-                  : 'Validate & save AI setup'
-            }
-            onPress={() => void saveProviderConfig()}
-            style={{ minWidth: 156 }}
-          />
-          {saveMessage ? (
-            <AppText
-              variant="label"
-              color={saveState === 'error' ? theme.warn : saveState === 'saved' ? theme.done : theme.muted}
-            >
-              {saveMessage}
-            </AppText>
-          ) : null}
-          {config.autoSummarize ? (
-            <AppText variant="label" muted>
-              Auto-summary is on. Saving a valid provider now also re-queues older transcribed meetings.
-            </AppText>
-          ) : (
-            <AppText variant="label" muted>
-              Auto-summary is off. Meetings will stay transcript-only until you generate a packet manually.
-            </AppText>
-          )}
-        </View>
-      </Card>
-
-      <Card style={{ gap: space.sm }}>
-        <AppText variant="label" muted>MEETING PACKET</AppText>
-        <Row label="Summary" value="Auto-generated after transcript" />
-        <Row label="Decisions" value="Auto-generated with summary" />
-        <Row label="To-dos" value="Auto-generated with summary" />
-        <Row label="Transcript" value="Always kept locally" />
-        <AppText variant="label" muted>
-          Maina keeps the transcript as the source of truth. AI packet items are generated, replaceable, and safe to rebuild later with a different provider.
-        </AppText>
-      </Card>
-
-      <Card style={{ gap: space.sm }}>
-        <AppText variant="label" muted>REMOTE CONTROL</AppText>
-        <Row label="Maina" value={remote?.armed ? 'Ready · armed' : 'Open Maina to arm'} />
-        <Row label="Locked-screen control" value={remoteHealth.statusLabel} helper={remoteHealth.detail} />
-        <Row label="Capture" value={remote?.captureState ?? 'Checking…'} />
-        <Row label="Button" value={remote?.trustedRemoteName ?? 'Disconnected or asleep'} />
-        <Row label="Last press" value={formatRemoteLastPress(remote)} />
-        {remote?.accessibilityLastLifecycle && remote.accessibilityLastLifecycle !== 'never' ? (
-          <Row
-            label="Listener lifecycle"
-            value={`${remote.accessibilityLastLifecycle} · ${new Date(remote.accessibilityLastLifecycleAt).toLocaleTimeString()}`}
-          />
-        ) : null}
-        {remoteHealth.ctaAction === 'accessibility' ? (
-          <Pressable onPress={() => void openRemoteAccessibilitySettings()} style={{ paddingTop: space.sm }}>
-            <AppText variant="label" color={theme.accent}>
-              {remoteHealth.ctaLabel ?? 'Open locked-screen button control'}
-            </AppText>
-          </Pressable>
-        ) : null}
-      </Card>
-
-      <Card style={{ gap: space.sm }}>
-        <AppText variant="label" muted>OFFLINE SPEECH</AppText>
-        <AppText variant="label" muted>
-          Maina provisions Indian English + Hindi automatically and keeps the live preview local on your phone.
-        </AppText>
-        {LANGUAGES.map((language) => {
-          const installed = languages?.installed.some((item) => item.toLowerCase() === language.code.toLowerCase());
-          return <Row key={language.code} label={language.label} value={installed ? 'Ready' : 'Installing…'} />;
-        })}
-        <Row label="Active switch set" value={ACTIVE_LANGUAGES.join(' + ')} />
-        <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.sm }}>
-          <Ionicons
-            name={onDevice ? 'phone-portrait-outline' : 'cloud-outline'}
-            size={16}
-            color={onDevice ? theme.done : theme.warn}
-          />
-          <AppText variant="label" muted>
-            {onDevice === null
-              ? 'Checking on-device support…'
-              : onDevice
-                ? languages?.ready
-                  ? 'On-device bilingual recognition ready'
-                  : 'On-device supported · setup continues automatically'
-                : 'On-device unavailable — Maina blocks capture to protect privacy'}
-          </AppText>
-        </View>
-      </Card>
-
-      <Card style={{ gap: space.sm }}>
-        <AppText variant="label" muted>RETENTION</AppText>
-        <Row label="Transcript" value="Always kept" />
-        <Row label="Audio recovery window" value={`${config.audioRetentionDays} days or 1 GB`} />
-        <Row label="Summary packet" value="Always kept" />
-        <AppText variant="label" muted>
-          Audio is temporary recovery material. Transcript, summary, decisions, and to-dos remain.
-        </AppText>
-      </Card>
-
-      <Card style={{ gap: space.xs }}>
-        <AppText variant="label" muted>ABOUT</AppText>
-        <Row label="Version" value={version} />
-        <Row label="Capture engine" value="Android on-device speech + durable WAV" />
-        <Row label="Share format" value="Markdown packet" />
-      </Card>
-
-      <Pressable onPress={() => router.push('/diagnostics')}>
-        <Card style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
-          <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.md }}>
-            <Ionicons name="pulse-outline" size={20} color={theme.accent} />
-            <AppText variant="body">System status</AppText>
-          </View>
-          <Ionicons name="chevron-forward" size={18} color={theme.muted} />
         </Card>
-      </Pressable>
+
+        <Card style={{ gap: space.lg }}>
+          <SectionLabel>Recording</SectionLabel>
+          <SettingsRow
+            label="Main language spoken"
+            value="Detect automatically"
+            helper="Maina detects English and Hindi automatically."
+          />
+          <SettingsRow
+            label="Speech on this phone"
+            value={languages?.ready ? 'Works offline' : 'Setting up'}
+            helper="Maina works offline in English and Hindi."
+          />
+          <SettingsRow
+            label="My clicker"
+            value={remoteHealth.statusLabel}
+            helper="Works with your configured clicker when Maina is armed. Android can turn this off after a restart."
+          />
+          {remoteHealth.ctaAction === 'accessibility' ? (
+            <Pressable onPress={() => void openRemoteAccessibilitySettings()}>
+              <AppText variant="bodyStrong" color={theme.primary}>
+                {remoteHealth.ctaLabel ?? 'Open phone settings'}
+              </AppText>
+            </Pressable>
+          ) : null}
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.sm }}>
+            <Ionicons
+              name={onDevice ? 'phone-portrait-outline' : 'cloud-outline'}
+              size={16}
+              color={onDevice ? theme.primary : theme.warn}
+            />
+            <AppText variant="meta" muted style={{ flex: 1 }}>
+              {onDevice === null
+                ? 'Checking on-device support...'
+                : onDevice
+                  ? languages?.ready
+                    ? 'On-device bilingual recognition ready'
+                    : 'On-device supported. Setup continues automatically.'
+                  : 'On-device unavailable. Maina blocks capture to protect privacy.'}
+            </AppText>
+          </View>
+        </Card>
+
+        <Card style={{ gap: space.lg }}>
+          <SectionLabel>Privacy & storage</SectionLabel>
+          <SettingsRow label="The text" value="Always kept" />
+          <SettingsRow label="Audio" value={`${config.audioRetentionDays} days or 1 GB`} />
+          <SettingsRow label="Your notes" value="Always kept" />
+          <AppText variant="meta" muted>
+            Whichever comes first. Maina removes the oldest audio the next time it runs. The text is always kept.
+          </AppText>
+        </Card>
+
+        <Card style={{ gap: space.lg }}>
+          <SectionLabel>About</SectionLabel>
+          <SettingsRow label="Version" value={version} />
+          <Pressable onPress={() => router.push('/help')}>
+            <AppText variant="bodyStrong" color={theme.primary}>
+              Help
+            </AppText>
+          </Pressable>
+          <Pressable onPress={() => void Linking.openURL('mailto:hello@maina.app?subject=Maina%20feedback')}>
+            <AppText variant="bodyStrong" color={theme.primary}>
+              Send feedback
+            </AppText>
+          </Pressable>
+          <Pressable onPress={() => router.push('/diagnostics')}>
+            <AppText variant="bodyStrong" color={theme.primary}>
+              System status
+            </AppText>
+          </Pressable>
+        </Card>
       </ScrollView>
     </KeyboardAvoidingView>
   );

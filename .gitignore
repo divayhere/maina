@@ -39,6 +39,8 @@ yarn-error.*
 # portable local development tools
 .tools/
 modules/*/android/build/
+maina-knowledge-cloud/
+tmp-installed-base.apk
 
 # typescript
 *.tsbuildinfo

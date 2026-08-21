@@ -32,14 +32,31 @@ export interface LocalAsrPipelineResult {
   lastError: string | null;
 }
 
-export async function runLocalAsrPipeline(input: {
+type LocalAsrPipelineInput = {
   meetingId: string;
   directory: string;
   meetingStartedAt: number;
   recoverPartials: boolean;
   resetTranscript?: boolean;
   onBlocks?: (blocks: TranscriptBlock[]) => void;
-}): Promise<LocalAsrPipelineResult> {
+};
+
+// Qwen owns one native inference runtime and Expo SQLite exposes one shared
+// connection. A recovery task and a newly-finished meeting therefore must not
+// transcribe concurrently. Serialising complete post-call jobs prevents the
+// native model from being released under another job and avoids overlapping
+// SQLite transactions after an app restart.
+let pipelineTail: Promise<void> = Promise.resolve();
+
+export function runLocalAsrPipeline(input: LocalAsrPipelineInput): Promise<LocalAsrPipelineResult> {
+  const scheduled = pipelineTail
+    .catch(() => {})
+    .then(() => runLocalAsrPipelineNow(input));
+  pipelineTail = scheduled.then(() => undefined, () => undefined);
+  return scheduled;
+}
+
+async function runLocalAsrPipelineNow(input: LocalAsrPipelineInput): Promise<LocalAsrPipelineResult> {
   const inspection = await inspectNativeCaptureDirectory(input.directory, input.recoverPartials);
   const chunks = inspection.finalizedUris;
   log.info('asr', 'native capture directory inspected', {
@@ -203,7 +220,7 @@ export async function runLocalAsrPipeline(input: {
   const coverageComplete = windowCount > 0 && failedWindows === 0 && completedWindows === windowCount;
   const finalError = coverageComplete ? null : (lastError ?? 'Local transcription coverage is incomplete.');
   await updateMeeting(input.meetingId, {
-    status: summary.hasText && coverageComplete ? 'transcribed' : 'recorded',
+    status: summary.hasText ? 'transcribed' : 'recorded',
     language: 'auto',
     transcribedSegments: completedWindows,
     lastError: finalError,

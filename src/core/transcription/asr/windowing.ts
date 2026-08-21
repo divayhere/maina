@@ -4,8 +4,8 @@ export interface AsrWindowPlan {
   overlapBeforeMs: number;
 }
 
-export const DEFAULT_ASR_WINDOW_MS = 25_000;
-export const DEFAULT_ASR_OVERLAP_MS = 1_000;
+export const DEFAULT_ASR_WINDOW_MS = 15_000;
+export const DEFAULT_ASR_OVERLAP_MS = 2_000;
 export const MIN_ASR_TAIL_MS = 5_000;
 
 /**

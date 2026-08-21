@@ -202,8 +202,13 @@ internal class DiagnosticsWorker(
                             "cache-control" to "0",
                         ),
                     )
-                    // 409 means a previous attempt completed but its response was lost.
-                    if (response.code !in 200..299 && response.code != 409) {
+                    // Storage normally returns 409 when a previous attempt
+                    // completed but its response was lost. Some gateway
+                    // versions wrap that same Storage conflict as HTTP 400
+                    // with code=KeyAlreadyExists, so treat both spellings as
+                    // an idempotent success. The metadata upsert below then
+                    // records the already-existing object exactly once.
+                    if (response.code !in 200..299 && !isAlreadyStored(response)) {
                         error("artifact upload HTTP ${response.code}: ${response.body.take(500)}")
                     }
                     store.markArtifactUploaded(artifact.copy(objectPath = objectPath), prepared)
@@ -244,8 +249,10 @@ internal class DiagnosticsWorker(
                         "artifactId" to artifact.artifactId,
                         "kind" to artifact.kind,
                         "sourcePath" to artifact.sourcePath,
-                        "sourceExists" to File(artifact.sourcePath).isFile,
-                        "sourceBytes" to File(artifact.sourcePath).takeIf { it.isFile }?.length(),
+                        "sourceExists" to mainaFileFromUriOrPath(artifact.sourcePath).isFile,
+                        "sourceBytes" to mainaFileFromUriOrPath(artifact.sourcePath)
+                            .takeIf { it.isFile }
+                            ?.length(),
                         "attempt" to artifact.attempts + 1,
                         "errorClass" to error.javaClass.name,
                         "error" to message.take(1000),
@@ -289,6 +296,9 @@ internal class DiagnosticsWorker(
     }
 
     private data class HttpResponse(val code: Int, val body: String)
+
+    private fun isAlreadyStored(response: HttpResponse): Boolean =
+        response.code == 409 || response.body.contains("KeyAlreadyExists", ignoreCase = true)
 
     private fun request(
         method: String,

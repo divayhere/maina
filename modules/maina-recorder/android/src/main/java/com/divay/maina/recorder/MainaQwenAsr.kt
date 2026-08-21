@@ -227,8 +227,8 @@ internal class MainaQwenAsr(private val context: Context) {
     private companion object {
         const val ENGINE_ID = "qwen3-0.6b-int8"
         const val ENGINE_VERSION = "sherpa-onnx-1.13.6"
-        const val MAX_TOTAL_LEN = 1024
-        const val MAX_NEW_TOKENS = 256
+        const val MAX_TOTAL_LEN = 1536
+        const val MAX_NEW_TOKENS = 512
         const val TOKEN_TRUNCATION_MARGIN = 4
         const val SPEECH_EXPECTED_RMS_DBFS = -55.0
         val REQUIRED_FILES = linkedMapOf(

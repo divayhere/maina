@@ -1,8 +1,7 @@
-import { useColorScheme } from 'react-native';
 import { darkTheme, lightTheme, type Theme } from './tokens';
 
-/** Resolves the active theme from the OS colour scheme. */
+/** Maina v2 is intentionally light-only for now. */
 export function useAppTheme(): { theme: Theme; scheme: 'light' | 'dark' } {
-  const scheme = useColorScheme() === 'dark' ? 'dark' : 'light';
-  return { theme: scheme === 'dark' ? darkTheme : lightTheme, scheme };
+  void darkTheme;
+  return { theme: lightTheme, scheme: 'light' };
 }

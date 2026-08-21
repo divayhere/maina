@@ -29,6 +29,17 @@ export async function waitForNativeCaptureState(
     await delay(pollMs);
   }
 
+  // React Native's JS timers are not a clock that the foreground service can
+  // rely on.  When Android parks the JS runtime on the lock screen, a timer
+  // can wake up well after its nominal deadline.  Always take one fresh
+  // native snapshot before declaring a timeout; otherwise a completed native
+  // command gets reported as an error simply because JavaScript woke late.
+  lastStatus = getStatus();
+  if (lastStatus?.state === expected) return lastStatus;
+  if (lastStatus?.state === 'error') {
+    throw new Error(lastStatus.lastError || 'Native audio capture failed');
+  }
+
   throw new Error(
     `Native audio capture did not reach ${expected} within ${timeoutMs}ms (last state: ${lastStatus?.state ?? 'unavailable'})`,
   );

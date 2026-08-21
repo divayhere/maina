@@ -21,4 +21,17 @@ describe('native capture command acknowledgement', () => {
       { timeoutMs: 100, delay: vi.fn(async () => {}) },
     )).rejects.toThrow('microphone unavailable');
   });
+
+  it('re-reads native state after a delayed JS timer wakes', async () => {
+    let reads = 0;
+    const result = await waitForNativeCaptureState(
+      () => ({ state: reads++ === 0 ? 'starting' : 'recording' }),
+      'recording',
+      {
+        timeoutMs: -1,
+        delay: vi.fn(async () => {}),
+      },
+    );
+    expect(result.state).toBe('recording');
+  });
 });

@@ -1,8 +1,9 @@
+import { Ionicons } from '@expo/vector-icons';
 import * as FileSystem from 'expo-file-system/legacy';
 import { router, useFocusEffect } from 'expo-router';
 import { useSpeechRecognitionEvent } from 'expo-speech-recognition';
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { AppState, Pressable, ScrollView, StyleSheet, View } from 'react-native';
+import { Alert, AppState, Pressable, ScrollView, StyleSheet, View } from 'react-native';
 
 import {
   ACTIVE_LANGUAGES,
@@ -29,7 +30,7 @@ import {
   upsertTranscriptDraftBlock,
   updateMeeting,
 } from '@/data/meetings';
-import { AppText, Card, PrimaryButton } from '@/design/components';
+import { AppText, Banner, Card, PrimaryButton, SecondaryButton } from '@/design/components';
 import { useMainaLayout } from '@/design/layout';
 import { useAppTheme } from '@/design/theme';
 import { space } from '@/design/tokens';
@@ -92,9 +93,29 @@ interface AsrQualityMetrics {
   detectedHindi: number;
 }
 
+function describeRecordingProblem(message?: string | null): { title: string; body: string } {
+  const normalized = message?.trim() ?? '';
+  if (!normalized) {
+    return {
+      title: 'Recording stopped early',
+      body: 'Maina saved what it had. You can keep that part or delete it.',
+    };
+  }
+  if (normalized.toLowerCase().includes('restart')) {
+    return {
+      title: 'Recording stopped early',
+      body: 'Maina could not continue this recording, but the earlier audio and transcript checkpoints were kept.',
+    };
+  }
+  return {
+    title: 'Recording stopped early',
+    body: 'Maina saved what it had. You can keep that part or delete it.',
+  };
+}
+
 export default function RecordScreen() {
   const { theme } = useAppTheme();
-  const { topPadding, insets } = useMainaLayout();
+  const { insets } = useMainaLayout();
   const { refresh } = useMeetings();
 
   const idRef = useRef(newId());
@@ -158,7 +179,7 @@ export default function RecordScreen() {
   const [recentBlocks, setRecentBlocks] = useState<TranscriptBlock[]>([]);
   const [interim, setInterim] = useState('');
   const [elapsed, setElapsed] = useState(0);
-  const [listening, setListening] = useState(false);
+  const [, setListening] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [meetingCreated, setMeetingCreated] = useState(false);
   const [paused, setPaused] = useState(false);
@@ -574,16 +595,17 @@ export default function RecordScreen() {
             sourceMode: 'voice_recognition',
             chunkDurationMs: MAX_FILE_MS,
           });
-          const status = await waitForNativeCaptureState(getNativeCaptureStatus, 'recording', {
-            timeoutMs: 15_000,
-          });
+          // The microphone is owned by the foreground service, not the React
+          // runtime.  Do not make starting a recording depend on a JS polling
+          // timer: Android can park that timer while the lock screen is up,
+          // even though native capture has already begun safely.
           sessionStartedAtRef.current = Date.now();
           lastEventRef.current = sessionStartedAtRef.current;
           listeningRef.current = true;
           setListening(true);
           showCaptureNote(qwenStatus?.ready
-            ? 'Recording safely. Maina will transcribe after you stop.'
-            : 'Recording safely. Qwen model is not ready, so transcription will wait.',
+            ? 'Maina is recording safely. Notes come after you stop.'
+            : 'Maina is recording safely. Speech setup is still finishing in the background.',
           10_000);
           log.info('record', 'meeting capture started', {
             language: 'auto',
@@ -591,7 +613,7 @@ export default function RecordScreen() {
             offlineOnly: true,
             captureOwner: CAPTURE_ENGINE,
             qwenReady: !!qwenStatus?.ready,
-            nativeStatus: status,
+            nativeStatus: getNativeCaptureStatus(),
           });
           return;
         }
@@ -723,6 +745,29 @@ export default function RecordScreen() {
       appStateRef.current = state;
       log.info('record', 'app state changed', { state });
       if (state !== 'active') void persist(true);
+      if (state === 'active' && CAPTURE_ENGINE === 'native-qwen' && activeRef.current && !savingRef.current) {
+        // Reconcile presentation state from the native foreground service
+        // after a locked-screen command. The service is the source of truth;
+        // JS may have been paused while a clicker command completed.
+        const status = getNativeCaptureStatus();
+        if (status?.state === 'paused') {
+          pausedRef.current = true;
+          setPaused(true);
+          listeningRef.current = false;
+          setListening(false);
+          log.info('record', 'native state reconciled after foreground', { nativeStatus: status });
+        } else if (status?.state === 'recording') {
+          pausedRef.current = false;
+          setPaused(false);
+          listeningRef.current = true;
+          setListening(true);
+          log.info('record', 'native state reconciled after foreground', { nativeStatus: status });
+        } else if (status?.state === 'error') {
+          const message = status.lastError || 'The phone could not continue recording.';
+          log.error('record', 'native capture reported an error after foreground', { nativeStatus: status });
+          setError(`Recording problem: ${message}. Audio saved before the issue remains available.`);
+        }
+      }
     });
     return () => subscription.remove();
     // Persist is intentionally read from the latest closure while the app-state
@@ -760,11 +805,12 @@ export default function RecordScreen() {
     if (CAPTURE_ENGINE === 'native-qwen') {
       try {
         await pauseNativeCapture();
-        await waitForNativeCaptureState(getNativeCaptureStatus, 'paused', { timeoutMs: 10_000 });
         listeningRef.current = false;
         setListening(false);
-        await persist(true);
-        log.info('record', 'native meeting paused', { nativeStatus: getNativeCaptureStatus() });
+        // Do not await JS timer-based confirmation here. A second clicker
+        // press must remain available on the lock screen while the native
+        // service serialises pause/resume itself.
+        log.info('record', 'native pause requested', { nativeStatus: getNativeCaptureStatus() });
       } catch (cause) {
         pausedRef.current = false;
         setPaused(false);
@@ -808,11 +854,9 @@ export default function RecordScreen() {
       healthRef.current.pauseEnded(Date.now());
       if (CAPTURE_ENGINE === 'native-qwen') {
         await resumeNativeCapture();
-        await waitForNativeCaptureState(getNativeCaptureStatus, 'recording', { timeoutMs: 10_000 });
         listeningRef.current = true;
         setListening(true);
-        await persist(true);
-        log.info('record', 'native meeting resumed', { nativeStatus: getNativeCaptureStatus() });
+        log.info('record', 'native resume requested', { nativeStatus: getNativeCaptureStatus() });
         return;
       }
       await beginSession(sessionRef.current + 1);
@@ -870,7 +914,7 @@ export default function RecordScreen() {
       const transcriptComplete = nativeTranscription?.coverageComplete ?? hasText;
       await updateMeeting(id, {
         transcript: null,
-        status: hasText && transcriptComplete ? 'transcribed' : 'recorded',
+        status: hasText ? 'transcribed' : 'recorded',
         ...(hasText && transcriptComplete ? { lastError: null } : {}),
       });
       const endedAt = Date.now();
@@ -925,7 +969,7 @@ export default function RecordScreen() {
         });
       }
       await refresh();
-      if (hasText && transcriptComplete) {
+      if (hasText) {
         void maybeQueueMeetingPacket(id).catch((cause) => {
           log.warn('summary', 'automatic packet queue failed', { meetingId: id, err: String(cause) });
         });
@@ -995,86 +1039,103 @@ export default function RecordScreen() {
     router.back();
   };
 
+  const confirmCancel = () => {
+    if (!meetingCreatedRef.current || (!activeRef.current && !pausedRef.current && !listeningRef.current)) {
+      void cancel();
+      return;
+    }
+    Alert.alert("You're still recording", 'What would you like to do?', [
+      { text: 'Keep recording', style: 'cancel' },
+      { text: 'Save and stop', onPress: () => void stopAndSave() },
+      { text: 'Discard this recording', style: 'destructive', onPress: () => void cancel() },
+    ]);
+  };
+
   if (error) {
+    const problem = describeRecordingProblem(error);
     return (
       <View style={[styles.container, { backgroundColor: theme.bg }]}>
-        <AppText variant="heading" style={styles.center}>Recording problem</AppText>
-        <AppText variant="body" muted style={styles.center}>{error}</AppText>
+        <AppText variant="heading" style={styles.center}>{problem.title}</AppText>
+        <AppText variant="body" muted style={styles.center}>{problem.body}</AppText>
         {meetingCreated ? (
-          <PrimaryButton label="Save what Maina kept" onPress={stopAndSave} style={{ marginTop: space.lg }} />
+          <PrimaryButton label="Keep this recording" onPress={stopAndSave} style={{ marginTop: space.lg }} />
         ) : (
           <PrimaryButton label="Go back" onPress={() => router.back()} style={{ marginTop: space.lg }} />
         )}
         {meetingCreated ? (
-          <Pressable onPress={cancel} style={{ marginTop: space.lg }}>
-            <AppText variant="body" muted>Discard</AppText>
-          </Pressable>
+          <SecondaryButton label="Discard" onPress={cancel} style={{ marginTop: space.md }} />
         ) : null}
       </View>
     );
   }
 
   return (
-    <View style={[styles.screen, { backgroundColor: theme.bg, paddingTop: topPadding }]}>
-      <Card style={styles.headerCard}>
-        <View style={styles.status}>
-          <View style={[styles.dot, { backgroundColor: listening ? theme.rec : theme.warn }]} />
-          <AppText variant="label" color={listening ? theme.rec : theme.warn}>
-            {paused ? 'PAUSED' : listening ? 'RECORDING · OFFLINE' : 'RECOVERING SPEECH…'}
-          </AppText>
-        </View>
-        <AppText variant="display" style={styles.timer}>{formatDuration(elapsed)}</AppText>
-        <AppText variant="label" muted style={styles.center}>
-          Background service active · audio checkpoints every 10 minutes
-        </AppText>
-        {captureNote ? (
-          <AppText variant="label" color={theme.warn} style={styles.center}>
-            {captureNote}
-          </AppText>
-        ) : null}
-      </Card>
+    <View style={[styles.screen, { backgroundColor: theme.bg, paddingTop: insets.top + space.sm, paddingHorizontal: 16 }]}>
+      <Pressable onPress={confirmCancel} hitSlop={12} style={styles.closeButton}>
+        <Ionicons name="close" size={30} color={theme.text} />
+      </Pressable>
 
-      <Card style={styles.transcriptCard}>
-        <ScrollView style={styles.transcriptBox} contentContainerStyle={{ padding: space.lg, gap: space.md, flexGrow: 1 }}>
-          {recentBlocks.length > 0 || interim ? (
-            <>
-              {recentBlocks.map((block) => (
-                <View key={block.blockId} style={styles.blockRow}>
-                  <AppText variant="label" muted>
-                    {block.startedAt ? formatTime(block.startedAt) : 'Live'}
-                  </AppText>
-                  <AppText variant="body">{block.text}</AppText>
-                </View>
-              ))}
-              {interim ? (
-                <View style={styles.blockRow}>
-                  <AppText variant="label" muted>Live draft</AppText>
-                  <AppText variant="body" muted>{interim}</AppText>
-                </View>
-              ) : null}
-            </>
-          ) : (
-            <View style={styles.emptyTranscript}>
-              <AppText variant="body" muted style={styles.center}>
-                Maina is keeping the audio. Live words appear here as small transcript blocks when the on-device recognizer is confident.
-              </AppText>
+      <View style={styles.heroWrap}>
+        <View style={[styles.haloOuter, { backgroundColor: theme.mutedSoft }]}>
+          <View style={[styles.haloInner, { backgroundColor: theme.mint }]}>
+            <View style={[styles.haloDotWrap, { backgroundColor: theme.accent }]}>
+              <View style={[styles.haloDot, { backgroundColor: theme.primary }]} />
             </View>
-          )}
-        </ScrollView>
-      </Card>
-
-      <View style={{ paddingHorizontal: space.lg, paddingBottom: insets.bottom + space.lg }}>
-        <View style={[styles.controls, { backgroundColor: theme.surface, borderColor: theme.border }]}>
-          <Pressable onPress={cancel} style={styles.cancel}>
-            <AppText variant="body" muted>Discard</AppText>
-          </Pressable>
-          <PrimaryButton
-            label={paused ? 'Resume' : 'Pause'}
-            onPress={paused ? resumeRecording : pauseRecording}
-            style={{ flex: 1 }}
-          />
-          <PrimaryButton label="Stop & Save" onPress={stopAndSave} style={{ backgroundColor: theme.rec, flex: 1 }} />
+          </View>
         </View>
+        <AppText variant="timer" style={styles.center}>{formatDuration(elapsed)}</AppText>
+        <AppText variant="title" muted style={styles.center}>
+          {paused ? 'Paused' : 'Listening'}
+        </AppText>
+        <AppText variant="body" muted style={styles.center}>
+          Keep your phone where it can hear the conversation. Your notes and to-dos come soon after you stop.
+        </AppText>
+      </View>
+
+      {captureNote ? (
+        <Banner tone="info" style={{ marginBottom: space.md }}>
+          <AppText variant="meta" muted>{captureNote}</AppText>
+        </Banner>
+      ) : null}
+
+      {recentBlocks.length > 0 || interim ? (
+        <Card style={styles.transcriptCard}>
+          <ScrollView style={styles.transcriptBox} contentContainerStyle={{ padding: space.lg, gap: space.md, flexGrow: 1 }}>
+            {recentBlocks.map((block) => (
+              <View key={block.blockId} style={styles.blockRow}>
+                <AppText variant="meta" muted>
+                  {block.startedAt ? formatTime(block.startedAt) : 'Live'}
+                </AppText>
+                <AppText variant="body">{block.text}</AppText>
+              </View>
+            ))}
+            {interim ? (
+              <View style={styles.blockRow}>
+                <AppText variant="meta" muted>Live draft</AppText>
+                <AppText variant="body" muted>{interim}</AppText>
+              </View>
+            ) : null}
+          </ScrollView>
+        </Card>
+      ) : (
+        <Banner tone="info" style={{ marginBottom: space.md }}>
+          <AppText variant="body" muted style={styles.center}>
+            Live words appear here once speech is detected.
+          </AppText>
+        </Banner>
+      )}
+
+      <View style={{ paddingBottom: insets.bottom + space.lg, gap: space.md }}>
+        <PrimaryButton label="Stop and save" onPress={stopAndSave} />
+        <SecondaryButton label={paused ? 'Resume' : 'Pause'} onPress={paused ? resumeRecording : pauseRecording} />
+        <Pressable onPress={confirmCancel} hitSlop={12}>
+          <AppText variant="bodyStrong" color={theme.warn} style={styles.center}>
+            Discard this recording
+          </AppText>
+        </Pressable>
+        <AppText variant="body" muted style={styles.center}>
+          Recordings are stored on this phone.
+        </AppText>
       </View>
     </View>
   );
@@ -1083,28 +1144,39 @@ export default function RecordScreen() {
 const styles = StyleSheet.create({
   screen: { flex: 1 },
   container: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: space.xl, gap: space.md },
-  headerCard: { alignItems: 'center', gap: space.sm, marginHorizontal: space.lg, marginBottom: space.lg },
-  status: { flexDirection: 'row', alignItems: 'center', gap: space.sm },
-  dot: { width: 10, height: 10, borderRadius: 5 },
-  timer: { fontSize: 56, lineHeight: 62, fontVariant: ['tabular-nums'] },
-  transcriptCard: { flex: 1, marginHorizontal: space.lg, padding: 0, overflow: 'hidden' },
-  transcriptBox: { flex: 1 },
-  blockRow: { gap: space.xs },
-  emptyTranscript: { flex: 1, justifyContent: 'center' },
-  center: { textAlign: 'center' },
-  controls: {
-    flexDirection: 'row',
+  closeButton: { width: 40, height: 40, alignItems: 'center', justifyContent: 'center', marginBottom: 0 },
+  heroWrap: { alignItems: 'center', gap: space.sm, paddingBottom: space.sm },
+  haloOuter: {
+    width: 220,
+    height: 220,
+    borderRadius: 110,
     alignItems: 'center',
-    gap: space.md,
-    padding: space.md,
-    borderWidth: 1,
-    borderRadius: 20,
+    justifyContent: 'center',
+    opacity: 0.6,
   },
-  cancel: {
-    paddingVertical: space.md,
-    paddingHorizontal: space.lg,
-    minHeight: 56,
+  haloInner: {
+    width: 152,
+    height: 152,
+    borderRadius: 76,
     alignItems: 'center',
     justifyContent: 'center',
   },
+  haloDotWrap: {
+    width: 52,
+    height: 52,
+    borderRadius: 26,
+    alignItems: 'center',
+    justifyContent: 'center',
+    opacity: 0.55,
+  },
+  haloDot: {
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+  },
+  transcriptCard: { flex: 1, minHeight: 128, padding: 0, overflow: 'hidden', marginBottom: space.md },
+  transcriptBox: { flex: 1 },
+  blockRow: { gap: space.sm },
+  emptyTranscript: { flex: 1, justifyContent: 'center' },
+  center: { textAlign: 'center' },
 });

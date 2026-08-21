@@ -1,4 +1,5 @@
 import { router, Stack } from 'expo-router';
+import { useFonts } from 'expo-font';
 import { useEffect, useState } from 'react';
 import { ActivityIndicator, AppState, PermissionsAndroid, Platform, View } from 'react-native';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
@@ -47,6 +48,13 @@ initSentry();
 
 function RootLayout() {
   const { theme } = useAppTheme();
+  const [fontsLoaded] = useFonts({
+    'PlusJakartaSans-Regular': require('@/assets/fonts/PlusJakartaSans-Regular.ttf'),
+    'PlusJakartaSans-Medium': require('@/assets/fonts/PlusJakartaSans-Medium.ttf'),
+    'PlusJakartaSans-SemiBold': require('@/assets/fonts/PlusJakartaSans-SemiBold.ttf'),
+    'PlusJakartaSans-Bold': require('@/assets/fonts/PlusJakartaSans-Bold.ttf'),
+    'PlusJakartaSans-ExtraBold': require('@/assets/fonts/PlusJakartaSans-ExtraBold.ttf'),
+  });
   const [ready, setReady] = useState(false);
   const [initError, setInitError] = useState<string | null>(null);
   const [attempt, setAttempt] = useState(0);
@@ -242,7 +250,11 @@ function RootLayout() {
     <GestureHandlerRootView style={{ flex: 1 }}>
       <SafeAreaProvider>
         <ErrorBoundary>
-          {initError ? (
+          {!fontsLoaded ? (
+            <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center', backgroundColor: theme.bg }}>
+              <ActivityIndicator color={theme.primary} />
+            </View>
+          ) : initError ? (
             <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center', gap: 16, padding: 28, backgroundColor: theme.bg }}>
               <AppText variant="heading" style={{ textAlign: 'center' }}>Maina needs attention</AppText>
               <AppText variant="body" muted style={{ textAlign: 'center' }}>
