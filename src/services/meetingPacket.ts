@@ -2,6 +2,7 @@ import { generateMeetingPacket } from '@/core/summarization/packet';
 import {
   buildTranscriptText,
   getMeeting,
+  listMeetingTodos,
   listMeetingsEligibleForSummaryQueue,
   listMeetingsNeedingSummary,
   replaceMeetingTodos,
@@ -12,6 +13,7 @@ import { getProvider } from '@/core/summarization/providers';
 import { getAppConfig, getProviderSettings, saveProviderSettings, type ProviderSettings } from '@/services/config';
 import { log } from '@/services/logger';
 import { maybeQueueMainaKnowledgeCloudSync } from '@/services/mainaKnowledgeCloud';
+import { maybeQueueMainaKnowledgeCloudPacketCorrections } from '@/services/mainaKnowledgeCloudCorrections';
 import { validateProviderSettings } from '@/services/providerValidation';
 
 const inflight = new Map<string, Promise<void>>();
@@ -126,6 +128,27 @@ async function generateForMeeting(meetingId: string): Promise<void> {
       origin: 'ai',
     })),
   );
+  const currentTodos = await listMeetingTodos(meetingId);
+  await maybeQueueMainaKnowledgeCloudPacketCorrections({
+    meetingId,
+    packet: {
+      title: packet.title,
+      summary: packet.summary,
+      decisions: packet.decisions,
+      todos: currentTodos.map((todo) => todo.text),
+      openQuestions: packet.openQuestions,
+    },
+    providerId: packet.providerId,
+    model: packet.model,
+  }).catch((cause) => {
+    // Cloud versioning is always secondary to the local meeting packet. A
+    // queue/network defect must never turn successfully saved notes into a
+    // local summary failure.
+    log.warn('maina-cloud-correction', 'could not queue regenerated meeting knowledge', {
+      meetingId,
+      err: String(cause),
+    });
+  });
   log.info('summary', 'meeting packet generated', {
     meetingId,
     providerId: packet.providerId,

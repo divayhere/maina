@@ -2,7 +2,10 @@ package com.divay.maina.recorder
 
 import android.content.Context
 import android.media.AudioFormat
+import android.media.AudioDeviceInfo
+import android.media.AudioManager
 import android.media.AudioRecord
+import android.media.AudioRouting
 import android.media.MediaRecorder
 import android.os.Build
 import android.os.SystemClock
@@ -45,6 +48,13 @@ internal class MainaNativeAudioCapture(
         val bytesWritten: Long,
         val startedElapsedMs: Long?,
         val lastError: String?,
+        val routeRestartCount: Int,
+        val routeRecoveryActive: Boolean,
+        val routedDeviceId: Int?,
+        val routedDeviceType: Int?,
+        val routedDeviceName: String?,
+        val lastRouteChangeElapsedMs: Long?,
+        val captureGapMs: Long,
     ) {
         fun asMap(): Map<String, Any?> = mapOf(
             "state" to state,
@@ -55,6 +65,13 @@ internal class MainaNativeAudioCapture(
             "bytesWritten" to bytesWritten,
             "startedElapsedMs" to startedElapsedMs,
             "lastError" to lastError,
+            "routeRestartCount" to routeRestartCount,
+            "routeRecoveryActive" to routeRecoveryActive,
+            "routedDeviceId" to routedDeviceId,
+            "routedDeviceType" to routedDeviceType,
+            "routedDeviceName" to routedDeviceName,
+            "lastRouteChangeElapsedMs" to lastRouteChangeElapsedMs,
+            "captureGapMs" to captureGapMs,
         )
     }
 
@@ -76,8 +93,11 @@ internal class MainaNativeAudioCapture(
 
     private val running = AtomicBoolean(false)
     private val paused = AtomicBoolean(false)
+    private val routeRefreshRequested = AtomicBoolean(false)
     private val lock = Any()
+    private val recorderLock = Any()
     private val journalLock = Any()
+    private val audioManager = context.getSystemService(AudioManager::class.java)
     @Volatile private var recorder: AudioRecord? = null
     @Volatile private var worker: Thread? = null
     @Volatile private var currentOptions: Options? = null
@@ -86,6 +106,20 @@ internal class MainaNativeAudioCapture(
     @Volatile private var currentBytesWritten = 0L
     @Volatile private var startedElapsedMs: Long? = null
     @Volatile private var lastError: String? = null
+    @Volatile private var bufferBytes = 0
+    @Volatile private var routeRefreshReason = "initial"
+    @Volatile private var routeRestartCount = 0
+    @Volatile private var routeRecoveryActive = false
+    @Volatile private var routedDeviceId: Int? = null
+    @Volatile private var routedDeviceType: Int? = null
+    @Volatile private var routedDeviceName: String? = null
+    @Volatile private var lastRouteChangeElapsedMs: Long? = null
+    @Volatile private var captureGapMs = 0L
+
+    private val routingListener = AudioRouting.OnRoutingChangedListener { routing ->
+        val activeRecorder = routing as? AudioRecord ?: return@OnRoutingChangedListener
+        updateRoutedDevice(activeRecorder)
+    }
 
     fun snapshot(): Snapshot = Snapshot(
         state = when {
@@ -100,6 +134,13 @@ internal class MainaNativeAudioCapture(
         bytesWritten = currentBytesWritten,
         startedElapsedMs = startedElapsedMs,
         lastError = lastError,
+        routeRestartCount = routeRestartCount,
+        routeRecoveryActive = routeRecoveryActive,
+        routedDeviceId = routedDeviceId,
+        routedDeviceType = routedDeviceType,
+        routedDeviceName = routedDeviceName,
+        lastRouteChangeElapsedMs = lastRouteChangeElapsedMs,
+        captureGapMs = captureGapMs,
     )
 
     fun start(options: Options): Snapshot = synchronized(lock) {
@@ -115,26 +156,23 @@ internal class MainaNativeAudioCapture(
         currentBytesWritten = 0L
         startedElapsedMs = SystemClock.elapsedRealtime()
         currentSource = resolveAudioSource(options.sourceMode)
+        routeRestartCount = 0
+        routeRecoveryActive = false
+        routedDeviceId = null
+        routedDeviceType = null
+        routedDeviceName = null
+        lastRouteChangeElapsedMs = null
+        captureGapMs = 0L
+        routeRefreshRequested.set(false)
+        routeRefreshReason = "initial"
 
         val minBuffer = AudioRecord.getMinBufferSize(SAMPLE_RATE_HZ, CHANNEL_CONFIG, AUDIO_FORMAT)
         check(minBuffer > 0) { "AudioRecord does not support Maina's PCM format" }
-        val bufferBytes = max(minBuffer * 4, SAMPLE_RATE_HZ / 2 * BYTES_PER_FRAME)
-        val created = AudioRecord.Builder()
-            .setAudioSource(currentSource ?: MediaRecorder.AudioSource.VOICE_RECOGNITION)
-            .setAudioFormat(
-                AudioFormat.Builder()
-                    .setEncoding(AUDIO_FORMAT)
-                    .setSampleRate(SAMPLE_RATE_HZ)
-                    .setChannelMask(CHANNEL_CONFIG)
-                    .build(),
-            )
-            .setBufferSizeInBytes(bufferBytes)
-            .build()
-        check(created.state == AudioRecord.STATE_INITIALIZED) { "Native AudioRecord could not initialize" }
-        recorder = created
+        bufferBytes = max(minBuffer * 4, SAMPLE_RATE_HZ / 2 * BYTES_PER_FRAME)
+        val created = createAndStartRecorder()
         running.set(true)
         paused.set(false)
-        created.startRecording()
+        updateRoutedDevice(created)
         appendJournal(directory, "started", mapOf(
             "meetingId" to options.meetingId,
             "sourceMode" to options.sourceMode,
@@ -144,6 +182,22 @@ internal class MainaNativeAudioCapture(
         onEvent("info", "native-capture-started", snapshot().asMap())
         worker = thread(name = "MainaNativeCapture", isDaemon = true) { recordLoop(directory, bufferBytes) }
         snapshot()
+    }
+
+    fun requestRouteRefresh(change: String, device: AudioDeviceInfo) {
+        if (!running.get()) return
+        routeRefreshReason = "$change:${device.type}:${device.id}"
+        lastRouteChangeElapsedMs = SystemClock.elapsedRealtime()
+        routeRefreshRequested.set(true)
+        onEvent("info", "native-capture-route-refresh-requested", snapshot().asMap() + mapOf(
+            "change" to change,
+            "deviceId" to device.id,
+            "deviceType" to device.type,
+            "deviceName" to device.productName.toString(),
+        ))
+        // A blocking read must be released before the worker can recreate the
+        // recorder against Android's newly selected input route.
+        synchronized(recorderLock) { runCatching { recorder?.stop() } }
     }
 
     fun pause(): Snapshot {
@@ -157,8 +211,9 @@ internal class MainaNativeAudioCapture(
 
     fun resume(): Snapshot {
         if (!running.get() || !paused.get()) return snapshot()
-        runCatching { recorder?.startRecording() }.onFailure { fail("resume-failed", it) }
         paused.set(false)
+        routeRefreshReason = "resume"
+        routeRefreshRequested.set(true)
         currentOptions?.let { appendJournal(directoryFrom(it.directory), "resumed", emptyMap()) }
         onEvent("info", "native-capture-resumed", snapshot().asMap())
         return snapshot()
@@ -175,8 +230,7 @@ internal class MainaNativeAudioCapture(
             "Native capture did not finalize within ${STOP_JOIN_TIMEOUT_MS}ms"
         }
         worker = null
-        runCatching { recorder?.release() }
-        recorder = null
+        releaseRecorder()
         currentOptions?.let { appendJournal(directoryFrom(it.directory), "stopped", snapshot().asMap()) }
         onEvent("info", "native-capture-stopped", snapshot().asMap())
         snapshot()
@@ -191,6 +245,15 @@ internal class MainaNativeAudioCapture(
                     closeChunk(activeChunk, directory, "pause")
                     activeChunk = null
                     Thread.sleep(50)
+                    continue
+                }
+                if (routeRefreshRequested.getAndSet(false)) {
+                    val hadActiveChunk = activeChunk != null
+                    closeChunk(activeChunk, directory, "route-change")
+                    activeChunk = null
+                    if (hadActiveChunk) currentChunkIndex += 1
+                    currentBytesWritten = 0L
+                    recoverRecorder(directory, routeRefreshReason)
                     continue
                 }
                 if (activeChunk == null) activeChunk = openChunk(directory)
@@ -214,6 +277,14 @@ internal class MainaNativeAudioCapture(
                     }
                     read == 0 -> Unit
                     read < 0 && (!running.get() || paused.get()) -> Unit
+                    read < 0 && MainaAudioCaptureRecoveryPolicy.shouldRecover(read, routeRefreshRequested.get()) -> {
+                        closeChunk(activeChunk, directory, "read-recovery")
+                        activeChunk = null
+                        currentChunkIndex += 1
+                        currentBytesWritten = 0L
+                        routeRefreshRequested.set(false)
+                        recoverRecorder(directory, "read-error:$read")
+                    }
                     else -> throw IllegalStateException("AudioRecord read failed: $read")
                 }
             }
@@ -221,6 +292,119 @@ internal class MainaNativeAudioCapture(
             fail("capture-loop-failed", cause)
         } finally {
             closeChunk(activeChunk, directory, "stop")
+        }
+    }
+
+    private fun recoverRecorder(directory: File, reason: String) {
+        val recoveryStarted = SystemClock.elapsedRealtime()
+        routeRecoveryActive = true
+        releaseRecorder()
+        appendJournal(directory, "route-recovery-started", mapOf("reason" to reason))
+        onEvent("warn", "native-capture-route-recovery-started", snapshot().asMap() + mapOf("reason" to reason))
+        var attempt = 0
+        while (running.get() && !paused.get()) {
+            if (attempt > 0) Thread.sleep(MainaAudioCaptureRecoveryPolicy.delayMs(attempt - 1))
+            val recovered = runCatching { createAndStartRecorder() }
+            if (recovered.isSuccess) {
+                routeRestartCount += 1
+                routeRecoveryActive = false
+                val gap = SystemClock.elapsedRealtime() - recoveryStarted
+                captureGapMs += gap
+                lastError = null
+                updateRoutedDevice(recovered.getOrThrow())
+                appendJournal(directory, "route-recovered", mapOf(
+                    "reason" to reason,
+                    "attempts" to (attempt + 1),
+                    "gapMs" to gap,
+                    "routeRestartCount" to routeRestartCount,
+                    "routedDeviceId" to routedDeviceId,
+                    "routedDeviceType" to routedDeviceType,
+                    "routedDeviceName" to routedDeviceName,
+                ))
+                onEvent("info", "native-capture-route-recovered", snapshot().asMap() + mapOf(
+                    "reason" to reason,
+                    "attempts" to (attempt + 1),
+                    "gapMs" to gap,
+                ))
+                return
+            }
+            val cause = recovered.exceptionOrNull()
+            lastError = cause?.message ?: cause?.javaClass?.simpleName ?: "Audio route recovery failed"
+            attempt += 1
+            if (attempt == 1 || attempt % 5 == 0) {
+                onEvent("warn", "native-capture-route-recovery-retrying", snapshot().asMap() + mapOf(
+                    "reason" to reason,
+                    "attempt" to attempt,
+                    "error" to lastError,
+                ))
+            }
+        }
+        routeRecoveryActive = false
+    }
+
+    private fun createAndStartRecorder(): AudioRecord {
+        val created = AudioRecord.Builder()
+            .setAudioSource(currentSource ?: MediaRecorder.AudioSource.VOICE_RECOGNITION)
+            .setAudioFormat(
+                AudioFormat.Builder()
+                    .setEncoding(AUDIO_FORMAT)
+                    .setSampleRate(SAMPLE_RATE_HZ)
+                    .setChannelMask(CHANNEL_CONFIG)
+                    .build(),
+            )
+            .setBufferSizeInBytes(bufferBytes)
+            .build()
+        check(created.state == AudioRecord.STATE_INITIALIZED) { "Native AudioRecord could not initialize" }
+        created.addOnRoutingChangedListener(routingListener, null)
+        preferredExternalInput()?.let { preferred ->
+            if (!created.setPreferredDevice(preferred)) {
+                onEvent("warn", "native-capture-preferred-route-rejected", mapOf(
+                    "deviceId" to preferred.id,
+                    "deviceType" to preferred.type,
+                    "deviceName" to preferred.productName.toString(),
+                ))
+            }
+        }
+        synchronized(recorderLock) { recorder = created }
+        try {
+            created.startRecording()
+            check(created.recordingState == AudioRecord.RECORDSTATE_RECORDING) {
+                "Native AudioRecord did not enter recording state"
+            }
+            return created
+        } catch (cause: Throwable) {
+            runCatching { created.removeOnRoutingChangedListener(routingListener) }
+            runCatching { created.release() }
+            synchronized(recorderLock) {
+                if (recorder === created) recorder = null
+            }
+            throw cause
+        }
+    }
+
+    private fun releaseRecorder() {
+        val active = synchronized(recorderLock) {
+            recorder.also { recorder = null }
+        } ?: return
+        runCatching { active.removeOnRoutingChangedListener(routingListener) }
+        runCatching { active.stop() }
+        runCatching { active.release() }
+    }
+
+    private fun preferredExternalInput(): AudioDeviceInfo? = audioManager
+        .getDevices(AudioManager.GET_DEVICES_INPUTS)
+        .filter { MainaAudioRouteBridge.isExternalMicrophone(it) }
+        .maxByOrNull { device -> MainaAudioCaptureRecoveryPolicy.externalInputPriority(device.type) }
+
+    private fun updateRoutedDevice(activeRecorder: AudioRecord) {
+        val device = runCatching { activeRecorder.routedDevice }.getOrNull() ?: return
+        val changed = routedDeviceId != device.id || routedDeviceType != device.type
+        routedDeviceId = device.id
+        routedDeviceType = device.type
+        routedDeviceName = device.productName.toString()
+        if (changed) {
+            lastRouteChangeElapsedMs = SystemClock.elapsedRealtime()
+            onEvent("info", "native-capture-active-route", snapshot().asMap())
         }
     }
 

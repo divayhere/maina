@@ -27,7 +27,7 @@ import java.util.concurrent.atomic.AtomicLong
 
 /**
  * Keeps Maina's process in Android's microphone foreground state while the
- * speech module owns AudioRecord. The persistent notification is intentional:
+ * service-owned native capture engine owns AudioRecord. The persistent notification is intentional:
  * Android requires it for trustworthy screen-off microphone capture.
  */
 class MainaRecordingService : Service() {
@@ -521,6 +521,15 @@ class MainaRecordingService : Service() {
     }
 
     private fun reportDeviceChange(change: String, device: AudioDeviceInfo) {
+        if (::nativeCapture.isInitialized && captureState == "recording") {
+            captureExecutor.execute {
+                nativeCapture.requestRouteRefresh(change, device)
+                nativeCaptureStatus = nativeCapture.snapshot().asMap() + mapOf(
+                    "state" to nativeCaptureStatus["state"],
+                    "operationId" to nativeCaptureStatus["operationId"],
+                )
+            }
+        }
         MainaAudioRouteBridge.emit(this, change, device)
         recordNativeEvent(
             level = "warn",

@@ -667,10 +667,8 @@ export default function RecordScreen() {
     });
     if (!activeRef.current || pausedRef.current) return;
     if (CAPTURE_ENGINE === 'native-qwen') {
-      showCaptureNote(event.change === 'removed'
-        ? 'External mic changed. Native capture is continuing; verify the input if this was intentional.'
-        : 'External mic connected. Native capture is continuing.',
-      );
+      // Native capture silently rebuilds AudioRecord inside the same meeting
+      // session. Route changes are diagnostic only and never interrupt the UI.
       return;
     }
     if (event.change === 'removed') {

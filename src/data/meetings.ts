@@ -27,6 +27,63 @@ export type KnowledgeCloudSyncStatus =
   | 'sync_failed_validation'
   | 'sync_blocked_budget';
 
+export interface KnowledgeCloudCorrection {
+  correctionKey: string;
+  meetingId: string;
+  sourceKey: string;
+  fieldPath: string;
+  versionNumber: number;
+  versionTag: string;
+  supersedesCorrectionKey?: string | null;
+  payloadJson: string;
+  valueFingerprint: string;
+  syncStatus: KnowledgeCloudSyncStatus;
+  canonicalSha256?: string | null;
+  lastAttemptAt?: number | null;
+  syncedAt?: number | null;
+  error?: string | null;
+  createdAt: number;
+  updatedAt: number;
+}
+
+interface KnowledgeCloudCorrectionRow {
+  correction_key: string;
+  meeting_id: string;
+  source_key: string;
+  field_path: string;
+  version_number: number;
+  version_tag: string;
+  supersedes_correction_key: string | null;
+  payload_json: string;
+  value_fingerprint: string;
+  sync_status: KnowledgeCloudSyncStatus;
+  canonical_sha256: string | null;
+  last_attempt_at: number | null;
+  synced_at: number | null;
+  error: string | null;
+  created_at: number;
+  updated_at: number;
+}
+
+const toKnowledgeCloudCorrection = (row: KnowledgeCloudCorrectionRow): KnowledgeCloudCorrection => ({
+  correctionKey: row.correction_key,
+  meetingId: row.meeting_id,
+  sourceKey: row.source_key,
+  fieldPath: row.field_path,
+  versionNumber: row.version_number,
+  versionTag: row.version_tag,
+  supersedesCorrectionKey: row.supersedes_correction_key,
+  payloadJson: row.payload_json,
+  valueFingerprint: row.value_fingerprint,
+  syncStatus: row.sync_status,
+  canonicalSha256: row.canonical_sha256,
+  lastAttemptAt: row.last_attempt_at,
+  syncedAt: row.synced_at,
+  error: row.error,
+  createdAt: row.created_at,
+  updatedAt: row.updated_at,
+});
+
 export interface Meeting {
   id: string;
   title: string;
@@ -418,6 +475,164 @@ export async function listMeetingsEligibleForKnowledgeCloudQueueWithOptions(opti
      ORDER BY m.started_at DESC`,
   );
   return rows.map(toMeeting);
+}
+
+export async function insertKnowledgeCloudCorrection(input: {
+  correctionKey: string;
+  meetingId: string;
+  sourceKey: string;
+  fieldPath: string;
+  versionNumber: number;
+  versionTag: string;
+  supersedesCorrectionKey?: string | null;
+  payloadJson: string;
+  valueFingerprint: string;
+}): Promise<boolean> {
+  const db = await getDb();
+  const now = Date.now();
+  const result = await db.runAsync(
+    `INSERT OR IGNORE INTO knowledge_cloud_corrections (
+       correction_key, meeting_id, source_key, field_path, version_number,
+       version_tag, supersedes_correction_key, payload_json, value_fingerprint,
+       sync_status, created_at, updated_at
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'sync_queued', ?, ?)`,
+    [
+      input.correctionKey,
+      input.meetingId,
+      input.sourceKey,
+      input.fieldPath,
+      input.versionNumber,
+      input.versionTag,
+      input.supersedesCorrectionKey ?? null,
+      input.payloadJson,
+      input.valueFingerprint,
+      now,
+      now,
+    ],
+  );
+  return result.changes > 0;
+}
+
+export async function getLatestKnowledgeCloudCorrection(
+  meetingId: string,
+  fieldPath: string,
+): Promise<KnowledgeCloudCorrection | null> {
+  const db = await getDb();
+  const row = await db.getFirstAsync<KnowledgeCloudCorrectionRow>(
+    `SELECT * FROM knowledge_cloud_corrections
+     WHERE meeting_id = ? AND field_path = ?
+     ORDER BY version_number DESC
+     LIMIT 1`,
+    [meetingId, fieldPath],
+  );
+  return row ? toKnowledgeCloudCorrection(row) : null;
+}
+
+export async function getKnowledgeCloudCorrection(
+  correctionKey: string,
+): Promise<KnowledgeCloudCorrection | null> {
+  const db = await getDb();
+  const row = await db.getFirstAsync<KnowledgeCloudCorrectionRow>(
+    'SELECT * FROM knowledge_cloud_corrections WHERE correction_key = ?',
+    [correctionKey],
+  );
+  return row ? toKnowledgeCloudCorrection(row) : null;
+}
+
+export async function listKnowledgeCloudCorrections(
+  meetingId: string,
+): Promise<KnowledgeCloudCorrection[]> {
+  const db = await getDb();
+  const rows = await db.getAllAsync<KnowledgeCloudCorrectionRow>(
+    `SELECT * FROM knowledge_cloud_corrections
+     WHERE meeting_id = ?
+     ORDER BY created_at DESC, field_path ASC`,
+    [meetingId],
+  );
+  return rows.map(toKnowledgeCloudCorrection);
+}
+
+export async function listKnowledgeCloudCorrectionsNeedingSync(): Promise<KnowledgeCloudCorrection[]> {
+  const db = await getDb();
+  const rows = await db.getAllAsync<KnowledgeCloudCorrectionRow>(
+    `SELECT c.*
+     FROM knowledge_cloud_corrections c
+     JOIN meetings m ON m.id = c.meeting_id
+     WHERE m.knowledge_cloud_sync_status = 'sync_succeeded'
+       AND c.sync_status IN ('sync_queued', 'syncing', 'sync_failed_retryable', 'sync_blocked_budget')
+     ORDER BY c.meeting_id ASC, c.field_path ASC, c.version_number ASC`,
+  );
+  return rows.map(toKnowledgeCloudCorrection);
+}
+
+export async function listMeetingKnowledgeCloudCorrectionsNeedingSync(
+  meetingId: string,
+): Promise<KnowledgeCloudCorrection[]> {
+  const db = await getDb();
+  const rows = await db.getAllAsync<KnowledgeCloudCorrectionRow>(
+    `SELECT c.*
+     FROM knowledge_cloud_corrections c
+     JOIN meetings m ON m.id = c.meeting_id
+     WHERE c.meeting_id = ?
+       AND m.knowledge_cloud_sync_status = 'sync_succeeded'
+       AND c.sync_status IN ('sync_queued', 'syncing', 'sync_failed_retryable', 'sync_blocked_budget')
+     ORDER BY c.field_path ASC, c.version_number ASC`,
+    [meetingId],
+  );
+  return rows.map(toKnowledgeCloudCorrection);
+}
+
+export async function listKnowledgeCloudCorrectionsEligibleForQueue(options?: {
+  includeAuthFailures?: boolean;
+}): Promise<KnowledgeCloudCorrection[]> {
+  const db = await getDb();
+  const eligibleStatuses = options?.includeAuthFailures
+    ? `'sync_failed_auth', 'sync_failed_retryable', 'sync_blocked_budget'`
+    : `'sync_failed_retryable', 'sync_blocked_budget'`;
+  const rows = await db.getAllAsync<KnowledgeCloudCorrectionRow>(
+    `SELECT c.*
+     FROM knowledge_cloud_corrections c
+     JOIN meetings m ON m.id = c.meeting_id
+     WHERE m.knowledge_cloud_sync_status = 'sync_succeeded'
+       AND c.sync_status IN (${eligibleStatuses})
+     ORDER BY c.meeting_id ASC, c.field_path ASC, c.version_number ASC`,
+  );
+  return rows.map(toKnowledgeCloudCorrection);
+}
+
+export async function updateKnowledgeCloudCorrection(
+  correctionKey: string,
+  patch: Partial<Pick<KnowledgeCloudCorrection,
+    | 'syncStatus'
+    | 'canonicalSha256'
+    | 'lastAttemptAt'
+    | 'syncedAt'
+    | 'error'
+  >>,
+): Promise<void> {
+  const map: Record<string, string> = {
+    syncStatus: 'sync_status',
+    canonicalSha256: 'canonical_sha256',
+    lastAttemptAt: 'last_attempt_at',
+    syncedAt: 'synced_at',
+    error: 'error',
+  };
+  const columns: string[] = [];
+  const values: (string | number | null)[] = [];
+  for (const [key, column] of Object.entries(map)) {
+    if (key in patch) {
+      columns.push(`${column} = ?`);
+      values.push((patch as Record<string, string | number | null | undefined>)[key] ?? null);
+    }
+  }
+  if (columns.length === 0) return;
+  columns.push('updated_at = ?');
+  values.push(Date.now(), correctionKey);
+  const db = await getDb();
+  await db.runAsync(
+    `UPDATE knowledge_cloud_corrections SET ${columns.join(', ')} WHERE correction_key = ?`,
+    values,
+  );
 }
 
 export async function updateMeeting(id: string, patch: Partial<Meeting>): Promise<void> {

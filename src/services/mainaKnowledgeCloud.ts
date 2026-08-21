@@ -19,6 +19,7 @@ import {
   normalizeMainaKnowledgeCloudBaseUrl,
   type MainaKnowledgeCloudSourcePackage,
 } from '@/services/mainaKnowledgeCloudCore';
+import { reconcileMainaKnowledgeCloudCorrectionsForMeeting } from '@/services/mainaKnowledgeCloudCorrections';
 
 const inflight = new Map<string, Promise<void>>();
 const TRANSCRIPT_PAGE_SIZE = 100;
@@ -149,6 +150,12 @@ async function syncMeetingToMainaKnowledgeCloud(meetingId: string): Promise<void
         meetingId,
         sourceKey: frozen.payload.source_key,
         status: response.status,
+      });
+      void reconcileMainaKnowledgeCloudCorrectionsForMeeting(meetingId).catch((cause) => {
+        log.warn('maina-cloud-correction', 'correction reconciliation after source sync failed', {
+          meetingId,
+          err: String(cause),
+        });
       });
       return;
     }

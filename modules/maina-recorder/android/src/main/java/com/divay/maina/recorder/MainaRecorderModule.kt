@@ -334,7 +334,9 @@ class MainaRecorderModule : Module() {
         AudioDeviceInfo.TYPE_BUILTIN_MIC -> "built-in microphone"
         AudioDeviceInfo.TYPE_USB_DEVICE -> "USB device"
         AudioDeviceInfo.TYPE_USB_HEADSET -> "USB headset"
+        AudioDeviceInfo.TYPE_USB_ACCESSORY -> "USB audio accessory"
         AudioDeviceInfo.TYPE_BLUETOOTH_SCO -> "Bluetooth microphone"
+        AudioDeviceInfo.TYPE_BLE_HEADSET -> "Bluetooth LE microphone"
         AudioDeviceInfo.TYPE_WIRED_HEADSET -> "wired headset"
         else -> "type-$type"
     }

@@ -136,6 +136,34 @@ const MIGRATIONS: Migration[] = [
     await addColumnIfMissing(db, 'meetings', 'knowledge_cloud_error', 'TEXT');
     await addColumnIfMissing(db, 'meetings', 'knowledge_cloud_canonical_sha256', 'TEXT');
   },
+  // v8 — immutable Maina Knowledge Cloud correction queue. Each row owns one
+  // frozen request body so retries cannot mutate an already-issued key.
+  async (db) => {
+    await db.execAsync(`CREATE TABLE IF NOT EXISTS knowledge_cloud_corrections (
+      correction_key TEXT PRIMARY KEY NOT NULL,
+      meeting_id TEXT NOT NULL,
+      source_key TEXT NOT NULL,
+      field_path TEXT NOT NULL,
+      version_number INTEGER NOT NULL,
+      version_tag TEXT NOT NULL,
+      supersedes_correction_key TEXT,
+      payload_json TEXT NOT NULL,
+      value_fingerprint TEXT NOT NULL,
+      sync_status TEXT NOT NULL DEFAULT 'sync_queued',
+      canonical_sha256 TEXT,
+      last_attempt_at INTEGER,
+      synced_at INTEGER,
+      error TEXT,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      FOREIGN KEY (meeting_id) REFERENCES meetings(id) ON DELETE CASCADE,
+      UNIQUE (meeting_id, field_path, version_number)
+    );
+    CREATE INDEX IF NOT EXISTS idx_knowledge_cloud_corrections_pending
+      ON knowledge_cloud_corrections(sync_status, created_at ASC);
+    CREATE INDEX IF NOT EXISTS idx_knowledge_cloud_corrections_meeting_field
+      ON knowledge_cloud_corrections(meeting_id, field_path, version_number DESC);`);
+  },
 ];
 
 export async function initDb(): Promise<void> {

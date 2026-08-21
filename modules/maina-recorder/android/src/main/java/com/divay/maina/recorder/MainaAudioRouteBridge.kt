@@ -27,7 +27,9 @@ object MainaAudioRouteBridge {
     fun isExternalMicrophone(device: AudioDeviceInfo): Boolean = when (device.type) {
         AudioDeviceInfo.TYPE_USB_DEVICE,
         AudioDeviceInfo.TYPE_USB_HEADSET,
+        AudioDeviceInfo.TYPE_USB_ACCESSORY,
         AudioDeviceInfo.TYPE_BLUETOOTH_SCO,
+        AudioDeviceInfo.TYPE_BLE_HEADSET,
         AudioDeviceInfo.TYPE_WIRED_HEADSET,
         -> device.isSource
         else -> false

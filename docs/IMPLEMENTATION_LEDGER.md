@@ -2,6 +2,18 @@
 
 This file is the durable source of truth for what is built, what has automated evidence, and what still requires a Pixel test. Update it in the same change as every feature.
 
+## v0.10.6 correction lineage and silent input continuity — 2026-08-22
+
+Maina 0.10.6 (versionCode 32) is implemented, release-qualified, and installed on the Pixel with existing app data preserved.
+
+- Regenerated meeting title, summary, decisions, to-dos, and open questions are frozen as independent `mkc.correction.v1` rows after an immutable source snapshot exists. Later field versions explicitly supersede the prior correction key. The original source and transcript are never rewritten.
+- Correction retries reuse the exact stored JSON body. Authentication, conflict, validation, budget, and retryable outcomes remain distinct; auth failures require a deliberate settings save before retry.
+- Android native capture now treats external devices as replaceable input routes. USB receiver, wired headset, Bluetooth SCO, and built-in phone mic changes rebuild `AudioRecord` inside the same meeting, finalize the current crash-safe WAV chunk, and retry with bounded backoff without pausing or stopping the user session.
+- Existing receiver continuity is preserved during transmitter-only Hollyland switching because Android still sees one receiver route; a receiver disconnect falls back to Android's default phone input.
+- Automated proof: TypeScript, lint, 16 test files/73 tests, Expo dependency checks, Expo Doctor 21/21, Android export, native recorder unit tests, Kotlin compilation, release manifest assertions, signed arm64 assembly, and signature verification all pass.
+- Real-device proof: retained-data upgrade to 0.10.6 succeeded; local native capture and Qwen ASR produced 35 words from the final smoke; Gemini generated notes/decision/to-do; MKC source ingest returned HTTP 201; the meeting UI refreshed itself to `Synced to cloud`; a deliberate notes regeneration froze and synced five linked correction records (title, summary, decisions, to-dos, and open questions), all returning HTTP 201.
+- Still pending real-world evidence: physically disconnect/reconnect USB and Bluetooth inputs during one session, and complete the controlled three-hour overnight soak. The implementation and policy tests are green, but those hardware/long-duration claims remain unqualified until those tests run.
+
 ## Controlled long-session qualification preparation — 2026-08-22
 
 `scripts/android-soak-monitor.sh` is now the release-mode Pixel soak harness. It does not start the meeting itself: it waits for a real locked-screen clicker start, timestamps the observed `Maina is recording` state, resets battery statistics, captures logcat plus one-minute battery/temperature/memory/storage/audio-permission heartbeats, and schedules redundant stop-and-save commands on both the phone and Mac after the requested duration. It then observes post-call transcription and packet work before collecting final Android evidence.

@@ -63,6 +63,13 @@ export interface NativeCaptureStatus {
   startedElapsedMs?: number | null;
   lastError?: string | null;
   operationId?: number | null;
+  routeRestartCount?: number;
+  routeRecoveryActive?: boolean;
+  routedDeviceId?: number | null;
+  routedDeviceType?: number | null;
+  routedDeviceName?: string | null;
+  lastRouteChangeElapsedMs?: number | null;
+  captureGapMs?: number;
 }
 
 export interface NativeCaptureDirectoryInspection {

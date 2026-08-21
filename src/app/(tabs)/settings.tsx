@@ -43,6 +43,7 @@ import {
 } from '@/services/config';
 import { log } from '@/services/logger';
 import { queueEligibleMainaKnowledgeCloudSyncs } from '@/services/mainaKnowledgeCloud';
+import { queueEligibleMainaKnowledgeCloudCorrections } from '@/services/mainaKnowledgeCloudCorrections';
 import { queueEligibleMeetingPackets } from '@/services/meetingPacket';
 import { validateProviderSettings } from '@/services/providerValidation';
 
@@ -306,9 +307,13 @@ export default function SettingsScreen() {
     try {
       const next = await saveMainaKnowledgeCloudSettings(knowledgeCloudSettings);
       setKnowledgeCloudSettings(next);
-      const queued = next.enabled
+      const queuedSources = next.enabled
         ? await queueEligibleMainaKnowledgeCloudSyncs({ includeAuthFailures: true }).catch(() => 0)
         : 0;
+      const queuedCorrections = next.enabled
+        ? await queueEligibleMainaKnowledgeCloudCorrections({ includeAuthFailures: true }).catch(() => 0)
+        : 0;
+      const queued = queuedSources + queuedCorrections;
       setCloudSaveState('saved');
       setCloudSaveMessage(
         next.enabled

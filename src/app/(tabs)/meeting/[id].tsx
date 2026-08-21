@@ -18,10 +18,12 @@ import {
   getTranscriptPage,
   getTranscriptSummary,
   listMeetingTodos,
+  listKnowledgeCloudCorrections,
   listRecordingSegments,
   resetMeetingTranscript,
   setMeetingSummaryState,
   type Meeting,
+  type KnowledgeCloudCorrection,
   type RecordingSegment,
   type TodoItem,
   type TranscriptBlock,
@@ -37,6 +39,9 @@ import { inspectNativeCaptureDirectory, repairWavFiles } from '@/hardware/record
 import { segmentPath } from '@/hardware/recording/paths';
 import { maybeQueueMainaKnowledgeCloudSync } from '@/services/mainaKnowledgeCloud';
 import { describeMainaKnowledgeCloudSyncStatus } from '@/services/mainaKnowledgeCloudCore';
+import {
+  requeueMainaKnowledgeCloudCorrectionsForMeeting,
+} from '@/services/mainaKnowledgeCloudCorrections';
 import { chooseSummaryProviderLabel } from '@/services/meetingPacketMeta';
 import { maybeQueueMeetingPacket, runMeetingPacketGeneration } from '@/services/meetingPacket';
 import { log } from '@/services/logger';
@@ -204,6 +209,7 @@ export default function MeetingDetail() {
   const [todos, setTodos] = useState<TodoItem[]>([]);
   const [manualTodo, setManualTodo] = useState('');
   const [packetBusy, setPacketBusy] = useState(false);
+  const [cloudCorrections, setCloudCorrections] = useState<KnowledgeCloudCorrection[]>([]);
 
   const repassRef = useRef(false);
   const repassChainRef = useRef<Promise<void>>(Promise.resolve());
@@ -226,6 +232,37 @@ export default function MeetingDetail() {
       }),
     [meeting?.knowledgeCloudError, meeting?.knowledgeCloudSyncStatus],
   );
+  const cloudCorrectionState = useMemo(() => {
+    if (cloudCorrections.length === 0) return null;
+    const failed = cloudCorrections.find((item) => item.syncStatus.startsWith('sync_failed') || item.syncStatus === 'sync_blocked_budget');
+    const pending = cloudCorrections.find((item) => item.syncStatus === 'sync_queued' || item.syncStatus === 'syncing');
+    if (failed) {
+      return {
+        label: 'Notes update needs attention',
+        detail: failed.error ?? 'The meeting is safe on this phone. Retry the cloud update when ready.',
+        tone: 'warn' as const,
+        canRetry: ![
+          'sync_failed_auth',
+          'sync_failed_conflict',
+          'sync_failed_validation',
+        ].includes(failed.syncStatus),
+      };
+    }
+    if (pending) {
+      return {
+        label: 'Updating cloud notes',
+        detail: 'Maina is adding the latest version of your notes without replacing the original meeting.',
+        tone: 'muted' as const,
+        canRetry: true,
+      };
+    }
+    return {
+      label: 'Latest notes synced',
+      detail: 'The latest notes version is safely linked to the original meeting.',
+      tone: 'primary' as const,
+      canRetry: false,
+    };
+  }, [cloudCorrections]);
 
   const loadTranscript = useCallback(async (meetingId: string) => {
     const [page, summary] = await Promise.all([
@@ -251,6 +288,7 @@ export default function MeetingDetail() {
       await Promise.all([
         loadTranscript(m.id),
         listMeetingTodos(m.id).then(setTodos),
+        listKnowledgeCloudCorrections(m.id).then(setCloudCorrections),
       ]);
       if (!m.audioUri || m.segmentCount === 0) {
         setAudioAvailable(false);
@@ -268,13 +306,20 @@ export default function MeetingDetail() {
   useFocusEffect(useCallback(() => { load(); }, [load]));
 
   useEffect(() => {
-    if (!meeting || !(meeting.summaryStatus === 'queued' || meeting.summaryStatus === 'running')) return;
+    if (!meeting) return;
+    const packetPending = meeting.summaryStatus === 'queued' || meeting.summaryStatus === 'running';
+    const sourceSyncPending = meeting.knowledgeCloudSyncStatus === 'sync_queued'
+      || meeting.knowledgeCloudSyncStatus === 'syncing';
+    const correctionSyncPending = cloudCorrections.some(
+      (correction) => correction.syncStatus === 'sync_queued' || correction.syncStatus === 'syncing',
+    );
+    if (!packetPending && !sourceSyncPending && !correctionSyncPending) return;
     const timer = setTimeout(() => {
       load();
       refresh();
-    }, 2500);
+    }, 1500);
     return () => clearTimeout(timer);
-  }, [load, meeting, refresh]);
+  }, [cloudCorrections, load, meeting, refresh]);
 
   const loadMore = useCallback(async () => {
     if (!id || !hasMore || loadingMore) return;
@@ -605,6 +650,7 @@ export default function MeetingDetail() {
   const queueCloudSync = async () => {
     if (!id) return;
     await maybeQueueMainaKnowledgeCloudSync(id);
+    await requeueMainaKnowledgeCloudCorrectionsForMeeting(id, { includeAuthFailures: true });
     await refresh();
     load();
   };
@@ -838,30 +884,28 @@ export default function MeetingDetail() {
             const canRetryCloud =
               meeting?.knowledgeCloudSyncStatus === 'local_only'
               || meeting?.knowledgeCloudSyncStatus === 'sync_failed_retryable'
-              || meeting?.knowledgeCloudSyncStatus === 'sync_blocked_budget';
-            const needsCloudSettings = meeting?.knowledgeCloudSyncStatus === 'sync_failed_auth';
+              || meeting?.knowledgeCloudSyncStatus === 'sync_blocked_budget'
+              || cloudCorrectionState?.canRetry === true;
+            const needsCloudSettings = meeting?.knowledgeCloudSyncStatus === 'sync_failed_auth'
+              || cloudCorrections.some((correction) => correction.syncStatus === 'sync_failed_auth');
+            const visibleCloudState = cloudCorrectionState ?? cloudState;
 
             return (
               <Card style={{ gap: space.md, marginBottom: space.lg }}>
                 <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', gap: space.md }}>
                   <AppText variant="heading">Maina Knowledge Cloud</AppText>
                   <Chip
-                    label={cloudState.label}
+                    label={visibleCloudState.label}
                     tone={
-                      cloudState.tone === 'warn'
+                      visibleCloudState.tone === 'warn'
                         ? 'warn'
-                        : cloudState.tone === 'primary'
+                        : visibleCloudState.tone === 'primary'
                           ? 'primary'
                           : 'muted'
                     }
                   />
                 </View>
-                <AppText variant="body" muted>{cloudState.detail}</AppText>
-                {meeting?.knowledgeCloudSourceKey ? (
-                  <AppText variant="meta" muted>
-                    Source key: {meeting.knowledgeCloudSourceKey}
-                  </AppText>
-                ) : null}
+                <AppText variant="body" muted>{visibleCloudState.detail}</AppText>
                 {canRetryCloud ? (
                   <View style={{ gap: space.md }}>
                     <PrimaryButton

@@ -41,6 +41,7 @@ import {
   queueAudioArtifact,
 } from '@/services/remoteLog';
 import { reconcilePendingMainaKnowledgeCloudSyncs } from '@/services/mainaKnowledgeCloud';
+import { reconcilePendingMainaKnowledgeCloudCorrections } from '@/services/mainaKnowledgeCloudCorrections';
 import { reconcilePendingMeetingPackets } from '@/services/meetingPacket';
 import { initSentry, Sentry } from '@/services/sentry';
 import { installWatchdog } from '@/services/watchdog';
@@ -210,6 +211,9 @@ function RootLayout() {
         void reconcilePendingMainaKnowledgeCloudSyncs().catch((cause) => {
           log.warn('maina-cloud', 'pending cloud sync reconciliation failed', { err: String(cause) });
         });
+        void reconcilePendingMainaKnowledgeCloudCorrections().catch((cause) => {
+          log.warn('maina-cloud-correction', 'pending correction reconciliation failed', { err: String(cause) });
+        });
         setReady(true);
       } catch (e) {
         const message = e instanceof Error ? e.message : String(e);
@@ -227,6 +231,7 @@ function RootLayout() {
       await enforceAudioRetentionPolicy();
       await reconcilePendingMeetingPackets();
       await reconcilePendingMainaKnowledgeCloudSyncs();
+      await reconcilePendingMainaKnowledgeCloudCorrections();
       await flushDiagnostics().catch(() => {});
     };
     void syncAudioCleanup().catch((cause) => {
