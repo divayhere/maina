@@ -9,16 +9,22 @@ import { initDb } from '@/data/db';
 import {
   getMeeting,
   getTranscriptSummary,
+  listMeetings,
   listInterruptedRecordingSegments,
   markMeetingsAudioDeleted,
   recoverInterruptedMeetings,
+  startRecordingSegment,
+  finishRecordingSegment,
+  updateMeeting,
 } from '@/data/meetings';
 import { ErrorBoundary } from '@/design/ErrorBoundary';
 import { AppText, PrimaryButton } from '@/design/components';
 import { useAppTheme } from '@/design/theme';
 import {
   getPcmWavDurationsMs,
+  getNativeCaptureStatus,
   armRemoteControl,
+  inspectNativeCaptureDirectory,
   repairWavFiles,
 } from '@/hardware/recording/foreground';
 import { installHardwareTriggerListener } from '@/hardware/trigger/hardwareTrigger';
@@ -27,7 +33,9 @@ import { log } from '@/services/logger';
 import { enforceAudioRetentionPolicy } from '@/services/audioRetention';
 import {
   finalizeDiagnosticRun,
+  flushDiagnostics,
   getMeetingsWithDeletedAudio,
+  getDiagnosticsStatus,
   installRemoteLog,
   queueAudioArtifact,
 } from '@/services/remoteLog';
@@ -50,8 +58,63 @@ function RootLayout() {
     void (async () => {
       try {
         await installRemoteLog();
+        const diagnostics = await getDiagnosticsStatus().catch(() => null);
+        if (diagnostics) {
+          log[diagnostics.enabled ? 'info' : 'warn']('remote', 'diagnostics bridge ready', {
+            enabled: diagnostics.enabled,
+            pendingEvents: diagnostics.pendingEvents,
+            pendingArtifacts: diagnostics.pendingArtifacts,
+            failedArtifacts: diagnostics.failedArtifacts,
+            lastError: diagnostics.lastError ?? null,
+          });
+          await flushDiagnostics().catch(() => {});
+        }
         log.info('app', 'launch');
         await initDb();
+
+        // A process death can leave the active native WAV as *.partial. Finalize
+        // it before converting the meeting row to "interrupted", then register
+        // every recovered chunk so the ordinary recovery screen can re-run ASR.
+        const activeMeetings = (await listMeetings()).filter(
+          (meeting) => meeting.status === 'recording' && !!meeting.audioUri,
+        );
+        const liveMeetingIds: string[] = [];
+        for (const meeting of activeMeetings) {
+          const liveCapture = getNativeCaptureStatus();
+          if (liveCapture?.meetingId === meeting.id && liveCapture.state !== 'idle' && liveCapture.state !== 'error') {
+            liveMeetingIds.push(meeting.id);
+            log.info('recovery', 'active native capture left untouched during UI restart', {
+              meetingId: meeting.id,
+              state: liveCapture.state,
+            });
+            continue;
+          }
+          const inspection = await inspectNativeCaptureDirectory(meeting.audioUri!, true).catch((cause) => {
+            log.error('recovery', 'native capture directory recovery failed', {
+              meetingId: meeting.id,
+              err: String(cause),
+            });
+            return null;
+          });
+          if (!inspection) continue;
+          for (let index = 0; index < inspection.finalizedUris.length; index += 1) {
+            const uri = inspection.finalizedUris[index];
+            await startRecordingSegment(meeting.id, index, uri).catch(() => {});
+            await finishRecordingSegment(meeting.id, index, uri).catch(() => {});
+          }
+          await updateMeeting(meeting.id, {
+            segmentCount: inspection.finalizedUris.length,
+            lastError: inspection.partialUris.length > 0
+              ? 'Some recovery audio still needs finalization.'
+              : null,
+          });
+          log.warn('recovery', 'native capture directory recovered after restart', {
+            meetingId: meeting.id,
+            finalizedChunks: inspection.finalizedUris.length,
+            recoveredChunks: inspection.recoveredCount,
+            remainingPartials: inspection.partialUris.length,
+          });
+        }
 
         // Snapshot unfinished rows before changing their meeting state. The
         // deterministic artifact IDs make this safe to repeat after another crash.
@@ -61,7 +124,7 @@ function RootLayout() {
           interruptedSegments.map((segment) => segment.audioUri),
         );
         const interruptedMeetingIds = [...new Set(interruptedSegments.map((segment) => segment.meetingId))];
-        const recovered = await recoverInterruptedMeetings();
+        const recovered = await recoverInterruptedMeetings(liveMeetingIds);
 
         for (const segment of interruptedSegments) {
           await queueAudioArtifact({
@@ -151,6 +214,7 @@ function RootLayout() {
       await markMeetingsAudioDeleted(meetingIds);
       await enforceAudioRetentionPolicy();
       await reconcilePendingMeetingPackets();
+      await flushDiagnostics().catch(() => {});
     };
     void syncAudioCleanup().catch((cause) => {
       log.warn('meetings', 'audio cleanup state sync failed', { err: String(cause) });

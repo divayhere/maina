@@ -13,7 +13,12 @@ npm run lint
 npx expo install --check
 npx expo-doctor@latest
 
-if rg -q 'ScrollView' "$PROJECT_DIR/src/app/meeting/[id].tsx"; then
+MEETING_DETAIL="$PROJECT_DIR/src/app/(tabs)/meeting/[id].tsx"
+if [[ ! -f "$MEETING_DETAIL" ]]; then
+  echo "Meeting detail screen not found at expected route" >&2
+  exit 1
+fi
+if rg -q 'ScrollView' "$MEETING_DETAIL"; then
   echo "Meeting detail must not render transcripts through ScrollView" >&2
   exit 1
 fi

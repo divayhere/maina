@@ -32,12 +32,13 @@ import { AppText, Card, PrimaryButton } from '@/design/components';
 import { useMainaLayout } from '@/design/layout';
 import { useAppTheme } from '@/design/theme';
 import { radius, space } from '@/design/tokens';
-import { repairWavFiles } from '@/hardware/recording/foreground';
+import { inspectNativeCaptureDirectory, repairWavFiles } from '@/hardware/recording/foreground';
 import { segmentPath } from '@/hardware/recording/paths';
 import { chooseSummaryProviderLabel } from '@/services/meetingPacketMeta';
 import { maybeQueueMeetingPacket, runMeetingPacketGeneration } from '@/services/meetingPacket';
 import { log } from '@/services/logger';
 import { ensureStorageBudget } from '@/services/storageBudget';
+import { runLocalAsrPipeline } from '@/services/localAsrPipeline';
 import { buildMeetingExportText, shareMeetingExport } from '@/services/transcriptExport';
 import { useMeetings } from '@/state/meetingsStore';
 import { formatDateTime, formatDuration, formatTime } from '@/utils/format';
@@ -386,6 +387,38 @@ export default function MeetingDetail() {
     const storageDecision = await ensureStorageBudget('repass');
     if (!storageDecision.ok) {
       setRepassError(storageDecision.message ?? 'Maina needs more free space before retrying transcription.');
+      return;
+    }
+    const nativeInspection = await inspectNativeCaptureDirectory(m.audioUri, true).catch(() => null);
+    if (nativeInspection && nativeInspection.finalizedUris.length > 0) {
+      setRepassing(true);
+      setRepassIdx(0);
+      await updateMeeting(m.id, { transcript: null, status: 'transcribing', transcribedSegments: 0, lastError: null });
+      try {
+        const result = await runLocalAsrPipeline({
+          meetingId: m.id,
+          directory: m.audioUri,
+          meetingStartedAt: m.startedAt,
+          recoverPartials: true,
+          resetTranscript: true,
+        });
+        setRepassError(result.coverageComplete
+          ? null
+          : (result.lastError ?? `${result.failedWindows} local-ASR window(s) need another retry.`));
+        await refresh();
+        load();
+        if (result.hasText && result.coverageComplete) {
+          void maybeQueueMeetingPacket(m.id).catch((cause) => {
+            log.warn('summary', 'saved-audio auto packet queue failed', { meetingId: m.id, err: String(cause) });
+          });
+        }
+      } catch (cause) {
+        const message = cause instanceof Error ? cause.message : String(cause);
+        setRepassError(`Local transcription failed safely: ${message}`);
+        await updateMeeting(m.id, { status: 'recorded', lastError: message }).catch(() => {});
+      } finally {
+        setRepassing(false);
+      }
       return;
     }
     if (!supportsOnDevice()) {

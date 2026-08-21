@@ -16,7 +16,7 @@ export interface HardwareTriggerEvent {
   occurredAt: number;
 }
 
-export type CaptureState = 'idle' | 'recording' | 'paused' | 'finalizing';
+export type CaptureState = 'idle' | 'starting' | 'recording' | 'pausing' | 'paused' | 'resuming' | 'finalizing' | 'error';
 
 export interface RemoteControlStatus {
   armed: boolean;
@@ -43,6 +43,51 @@ export interface AudioRouteChangedEvent {
   deviceType: number;
   deviceName: string;
   occurredAt: number;
+}
+
+export type NativeCaptureSourceMode = 'unprocessed' | 'voice_recognition' | 'camcorder' | 'mic';
+
+export interface NativeCaptureStatus {
+  state: CaptureState;
+  meetingId?: string | null;
+  sourceMode?: NativeCaptureSourceMode | string | null;
+  resolvedAudioSource?: number | null;
+  chunkIndex?: number;
+  bytesWritten?: number;
+  startedElapsedMs?: number | null;
+  lastError?: string | null;
+  operationId?: number | null;
+}
+
+export interface NativeCaptureDirectoryInspection {
+  finalizedUris: string[];
+  partialUris: string[];
+  recoveredCount: number;
+  invalidPartialCount: number;
+  journalUri?: string | null;
+}
+
+export interface QwenAsrStatus {
+  ready: boolean;
+  root: string;
+  reason?: string | null;
+}
+
+export interface QwenAsrResult {
+  outcome: 'success' | 'empty';
+  text: string;
+  language: string;
+  processingMs: number;
+  durationMs: number;
+  engineId: string;
+  engineVersion: string;
+  windowStartMs: number;
+  windowEndMs: number;
+  rmsDbfs: number;
+  peakDbfs: number;
+  speechExpected: boolean;
+  truncationSuspected: boolean;
+  tokenCount: number;
 }
 
 export interface NativeEventSubscription {
@@ -147,6 +192,20 @@ interface MainaRecorderNativeModule {
   armRemoteControl(): Promise<RemoteControlStatus>;
   disarmRemoteControl(): Promise<void>;
   setCaptureState(state: CaptureState): Promise<void>;
+  startNativeCapture(
+    meetingId: string,
+    directory: string,
+    sourceMode: NativeCaptureSourceMode,
+    chunkDurationMs: number,
+  ): Promise<{ requested: boolean }>;
+  pauseNativeCapture(): Promise<{ requested: boolean }>;
+  resumeNativeCapture(): Promise<{ requested: boolean }>;
+  stopNativeCapture(): Promise<{ requested: boolean }>;
+  getNativeCaptureStatus(): NativeCaptureStatus;
+  inspectNativeCaptureDirectory(directory: string, recoverPartials: boolean): Promise<NativeCaptureDirectoryInspection>;
+  getQwenAsrStatus(): Promise<QwenAsrStatus>;
+  transcribeWithQwen(uri: string, startMs: number, endMs: number): Promise<QwenAsrResult>;
+  releaseQwenAsr(): Promise<void>;
   getRemoteControlStatus(): Promise<RemoteControlStatus>;
   openRemoteAccessibilitySettings(): Promise<void>;
   acknowledgeHardwareTrigger(commandId: string, action: string, accepted: boolean): Promise<void>;

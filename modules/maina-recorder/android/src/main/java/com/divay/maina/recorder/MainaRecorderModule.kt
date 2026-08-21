@@ -12,10 +12,10 @@ import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
 import java.io.File
 import java.io.RandomAccessFile
-import java.net.URI
 
 class MainaRecorderModule : Module() {
     private var triggerReceiverRegistered = false
+    private var qwenAsr: MainaQwenAsr? = null
 
     private val triggerReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
@@ -59,6 +59,8 @@ class MainaRecorderModule : Module() {
 
         OnDestroy {
             unregisterTriggerReceiver()
+            qwenAsr?.release()
+            qwenAsr = null
         }
 
         AsyncFunction("startForegroundSession") {
@@ -96,6 +98,61 @@ class MainaRecorderModule : Module() {
                 MainaRecordingService.ACTION_SET_STATE,
                 mapOf(MainaRecordingService.EXTRA_CAPTURE_STATE to state),
             )
+            Unit
+        }
+
+        // These calls are deliberately separate from Expo SpeechRecognizer.
+        // They are the staged bridge for the service-owned AudioRecord engine.
+        AsyncFunction("startNativeCapture") { meetingId: String, directory: String, sourceMode: String, chunkDurationMs: Long ->
+            require(meetingId.isNotBlank()) { "meetingId is required" }
+            require(directory.isNotBlank()) { "directory is required" }
+            startControlService(
+                requireContext(),
+                MainaRecordingService.ACTION_START_NATIVE_CAPTURE,
+                mapOf(
+                    MainaRecordingService.EXTRA_MEETING_ID to meetingId,
+                    MainaRecordingService.EXTRA_CAPTURE_DIRECTORY to directory,
+                    MainaRecordingService.EXTRA_SOURCE_MODE to sourceMode,
+                    MainaRecordingService.EXTRA_CHUNK_DURATION_MS to chunkDurationMs.toString(),
+                ),
+            )
+            mapOf("requested" to true)
+        }
+
+        AsyncFunction("pauseNativeCapture") {
+            startControlService(requireContext(), MainaRecordingService.ACTION_PAUSE_NATIVE_CAPTURE)
+            mapOf("requested" to true)
+        }
+
+        AsyncFunction("resumeNativeCapture") {
+            startControlService(requireContext(), MainaRecordingService.ACTION_RESUME_NATIVE_CAPTURE)
+            mapOf("requested" to true)
+        }
+
+        AsyncFunction("stopNativeCapture") {
+            startControlService(requireContext(), MainaRecordingService.ACTION_STOP_NATIVE_CAPTURE)
+            mapOf("requested" to true)
+        }
+
+        Function("getNativeCaptureStatus") {
+            MainaRecordingService.nativeCaptureStatus
+        }
+
+        AsyncFunction("inspectNativeCaptureDirectory") { directory: String, recoverPartials: Boolean ->
+            MainaNativeAudioCapture.inspectDirectory(directory, recoverPartials).asMap()
+        }
+
+        AsyncFunction("getQwenAsrStatus") {
+            qwen().status().asMap()
+        }
+
+        AsyncFunction("transcribeWithQwen") { uri: String, startMs: Long, endMs: Long ->
+            qwen().transcribe(uri, startMs, endMs).asMap()
+        }
+
+        AsyncFunction("releaseQwenAsr") {
+            qwenAsr?.release()
+            qwenAsr = null
             Unit
         }
 
@@ -214,6 +271,8 @@ class MainaRecorderModule : Module() {
     private fun requireContext(): Context =
         appContext.reactContext ?: throw IllegalStateException("React context is unavailable")
 
+    private fun qwen(): MainaQwenAsr = qwenAsr ?: MainaQwenAsr(requireContext()).also { qwenAsr = it }
+
     private fun startControlService(context: Context, action: String, extras: Map<String, String> = emptyMap()) {
         val intent = Intent(context, MainaRecordingService::class.java).setAction(action)
         extras.forEach { (key, value) -> intent.putExtra(key, value) }
@@ -244,7 +303,7 @@ class MainaRecorderModule : Module() {
     }
 
     private fun repairWav(uri: String): Boolean {
-        val file = fileFromUri(uri)
+        val file = mainaFileFromUriOrPath(uri)
         if (!file.exists() || file.length() < 44L) return false
         RandomAccessFile(file, "rw").use { wav ->
             val signature = ByteArray(4)
@@ -260,15 +319,10 @@ class MainaRecorderModule : Module() {
     }
 
     private fun pcmWavDurationMs(uri: String): Long? {
-        val file = fileFromUri(uri)
+        val file = mainaFileFromUriOrPath(uri)
         if (!file.isFile || file.length() < WAV_HEADER_BYTES) return null
         val pcmBytes = file.length() - WAV_HEADER_BYTES
         return pcmBytes * 1000L / PCM_BYTES_PER_SECOND
-    }
-
-    private fun fileFromUri(uri: String): File = when {
-        uri.startsWith("file://") -> File(URI(uri))
-        else -> File(uri)
     }
 
     private fun writeLittleEndianInt(file: RandomAccessFile, value: Long) {

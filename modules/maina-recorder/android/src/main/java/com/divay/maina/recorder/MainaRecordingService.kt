@@ -22,6 +22,8 @@ import android.os.SystemClock
 import android.os.VibrationEffect
 import android.os.Vibrator
 import java.util.UUID
+import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicLong
 
 /**
  * Keeps Maina's process in Android's microphone foreground state while the
@@ -34,6 +36,12 @@ class MainaRecordingService : Service() {
     private var lastRecordingSignature: String? = null
     private val knownExternalInputIds = mutableSetOf<Int>()
     private val heartbeatHandler = Handler(Looper.getMainLooper())
+    private val captureExecutor = Executors.newSingleThreadExecutor { runnable ->
+        Thread(runnable, "MainaCaptureCommands").apply { isDaemon = true }
+    }
+    private val captureOperationSequence = AtomicLong(0L)
+    @Volatile private var latestCaptureOperation = 0L
+    private lateinit var nativeCapture: MainaNativeAudioCapture
     private val serviceStartedAtMs = SystemClock.elapsedRealtime()
     private val heartbeatRunnable = object : Runnable {
         override fun run() {
@@ -87,7 +95,15 @@ class MainaRecordingService : Service() {
         const val NOTIFICATION_ID = 7001
         const val ACTION_ARM = "com.divay.maina.recorder.ARM"
         const val ACTION_SET_STATE = "com.divay.maina.recorder.SET_STATE"
+        const val ACTION_START_NATIVE_CAPTURE = "com.divay.maina.recorder.START_NATIVE_CAPTURE"
+        const val ACTION_PAUSE_NATIVE_CAPTURE = "com.divay.maina.recorder.PAUSE_NATIVE_CAPTURE"
+        const val ACTION_RESUME_NATIVE_CAPTURE = "com.divay.maina.recorder.RESUME_NATIVE_CAPTURE"
+        const val ACTION_STOP_NATIVE_CAPTURE = "com.divay.maina.recorder.STOP_NATIVE_CAPTURE"
         const val EXTRA_CAPTURE_STATE = "captureState"
+        const val EXTRA_MEETING_ID = "meetingId"
+        const val EXTRA_CAPTURE_DIRECTORY = "captureDirectory"
+        const val EXTRA_SOURCE_MODE = "sourceMode"
+        const val EXTRA_CHUNK_DURATION_MS = "chunkDurationMs"
 
         @Volatile
         var isRunning: Boolean = false
@@ -96,12 +112,26 @@ class MainaRecordingService : Service() {
         @Volatile
         var captureState: String = "idle"
             private set
+
+        @Volatile
+        var nativeCaptureStatus: Map<String, Any?> = mapOf("state" to "idle")
+            private set
     }
 
     override fun onCreate() {
         super.onCreate()
         createChannel()
         audioManager = getSystemService(AudioManager::class.java)
+        nativeCapture = MainaNativeAudioCapture(this) { level, eventName, payload ->
+            recordNativeEvent(
+                level = level,
+                category = "native-capture",
+                eventName = eventName,
+                message = "Native capture event: $eventName",
+                payload = payload,
+            )
+        }
+        nativeCaptureStatus = mapOf("state" to "idle")
         knownExternalInputIds += audioManager
             .getDevices(AudioManager.GET_DEVICES_INPUTS)
             .filter(MainaAudioRouteBridge::isExternalMicrophone)
@@ -187,6 +217,77 @@ class MainaRecordingService : Service() {
                 emitServiceHeartbeat()
             }
         }
+        when (intent?.action) {
+            ACTION_START_NATIVE_CAPTURE -> {
+                val meetingId = intent.getStringExtra(EXTRA_MEETING_ID).orEmpty()
+                val directory = intent.getStringExtra(EXTRA_CAPTURE_DIRECTORY).orEmpty()
+                val sourceMode = intent.getStringExtra(EXTRA_SOURCE_MODE) ?: "voice_recognition"
+                val chunkDurationMs = intent.getStringExtra(EXTRA_CHUNK_DURATION_MS)?.toLongOrNull()
+                    ?: intent.getLongExtra(EXTRA_CHUNK_DURATION_MS, 5 * 60_000L)
+                val operationId = captureOperationSequence.incrementAndGet().also { latestCaptureOperation = it }
+                nativeCaptureStatus = mapOf(
+                    "state" to "starting",
+                    "meetingId" to meetingId,
+                    "sourceMode" to sourceMode,
+                    "operationId" to operationId,
+                )
+                captureExecutor.execute {
+                    runCatching {
+                        nativeCapture.start(
+                        MainaNativeAudioCapture.Options(
+                            meetingId = meetingId,
+                            directory = directory,
+                            sourceMode = sourceMode,
+                            chunkDurationMs = chunkDurationMs,
+                        ),
+                        )
+                    }.onSuccess { snapshot ->
+                        if (latestCaptureOperation == operationId) {
+                            nativeCaptureStatus = snapshot.asMap() + mapOf("operationId" to operationId)
+                            heartbeatHandler.post {
+                                if (latestCaptureOperation == operationId) {
+                                    setCaptureState("recording")
+                                    refreshForegroundUi()
+                                }
+                            }
+                        }
+                    }.onFailure { cause ->
+                        val message = cause.message ?: cause.javaClass.simpleName
+                        if (latestCaptureOperation == operationId) {
+                            nativeCaptureStatus = mapOf(
+                                "state" to "error",
+                                "meetingId" to meetingId,
+                                "lastError" to message,
+                                "operationId" to operationId,
+                            )
+                        }
+                        recordNativeEvent(
+                            level = "error",
+                            category = "native-capture",
+                            eventName = "native-capture-start-failed",
+                            message = "Native capture could not start",
+                            payload = mapOf("error" to message, "operationId" to operationId),
+                        )
+                        heartbeatHandler.post {
+                            if (latestCaptureOperation == operationId) {
+                                setCaptureState("idle")
+                                refreshForegroundUi()
+                            }
+                        }
+                    }
+                }
+            }
+            ACTION_PAUSE_NATIVE_CAPTURE -> {
+                submitCaptureCommand("pausing", "paused") { nativeCapture.pause() }
+            }
+            ACTION_RESUME_NATIVE_CAPTURE -> {
+                submitCaptureCommand("resuming", "recording") { nativeCapture.resume() }
+            }
+            ACTION_STOP_NATIVE_CAPTURE -> {
+                setCaptureState("finalizing")
+                submitCaptureCommand("finalizing", "idle") { nativeCapture.stop() }
+            }
+        }
         val notification = buildNotification()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             startForeground(
@@ -206,6 +307,10 @@ class MainaRecordingService : Service() {
 
     override fun onDestroy() {
         isRunning = false
+        captureExecutor.execute {
+            runCatching { nativeCaptureStatus = nativeCapture.stop().asMap() }
+        }
+        captureExecutor.shutdown()
         heartbeatHandler.removeCallbacks(heartbeatRunnable)
         runCatching { audioManager.unregisterAudioRecordingCallback(recordingCallback) }
         runCatching { audioManager.unregisterAudioDeviceCallback(deviceCallback) }
@@ -227,6 +332,83 @@ class MainaRecordingService : Service() {
             enableVibration(false)
         }
         getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
+    }
+
+    private fun setCaptureState(nextState: String) {
+        val previousState = captureState
+        captureState = nextState
+        if (previousState == nextState) return
+        vibrateTransition(previousState, nextState)
+        recordNativeEvent(
+            level = "info",
+            category = "native-service",
+            eventName = "capture-state-changed",
+            message = "Recording service capture state changed",
+            payload = mapOf(
+                "previousState" to previousState,
+                "nextState" to nextState,
+                "serviceUptimeMs" to (SystemClock.elapsedRealtime() - serviceStartedAtMs),
+            ),
+        )
+    }
+
+    private fun submitCaptureCommand(
+        pendingState: String,
+        successfulCaptureState: String,
+        operation: () -> MainaNativeAudioCapture.Snapshot,
+    ) {
+        val operationId = captureOperationSequence.incrementAndGet().also { latestCaptureOperation = it }
+        nativeCaptureStatus = nativeCapture.snapshot().asMap() + mapOf(
+            "state" to pendingState,
+            "operationId" to operationId,
+        )
+        captureExecutor.execute {
+            runCatching(operation)
+                .onSuccess { snapshot ->
+                    if (latestCaptureOperation == operationId) {
+                        nativeCaptureStatus = snapshot.asMap() + mapOf("operationId" to operationId)
+                        heartbeatHandler.post {
+                            if (latestCaptureOperation == operationId) {
+                                setCaptureState(successfulCaptureState)
+                                refreshForegroundUi()
+                            }
+                        }
+                    }
+                }
+                .onFailure { cause ->
+                    val message = cause.message ?: cause.javaClass.simpleName
+                    if (latestCaptureOperation == operationId) {
+                        nativeCaptureStatus = nativeCapture.snapshot().asMap() + mapOf(
+                            "state" to "error",
+                            "lastError" to message,
+                            "operationId" to operationId,
+                        )
+                    }
+                    recordNativeEvent(
+                        level = "error",
+                        category = "native-capture",
+                        eventName = "native-capture-command-failed",
+                        message = "Native capture command failed",
+                        payload = mapOf(
+                            "pendingState" to pendingState,
+                            "error" to message,
+                            "operationId" to operationId,
+                        ),
+                    )
+                    heartbeatHandler.post {
+                        if (latestCaptureOperation == operationId) {
+                            setCaptureState(if (nativeCapture.snapshot().state == "idle") "idle" else captureState)
+                            refreshForegroundUi()
+                        }
+                    }
+                }
+        }
+    }
+
+    private fun refreshForegroundUi() {
+        if (!isRunning) return
+        updateMediaState()
+        getSystemService(NotificationManager::class.java).notify(NOTIFICATION_ID, buildNotification())
     }
 
     private fun buildNotification(): Notification {
@@ -369,6 +551,12 @@ class MainaRecordingService : Service() {
     }
 
     private fun emitServiceHeartbeat() {
+        if (::nativeCapture.isInitialized && captureState != "idle") {
+            nativeCaptureStatus = nativeCapture.snapshot().asMap() + mapOf(
+                "state" to nativeCaptureStatus["state"],
+                "operationId" to nativeCaptureStatus["operationId"],
+            )
+        }
         val runtime = Runtime.getRuntime()
         val memory = Debug.MemoryInfo().also { Debug.getMemoryInfo(it) }
         recordNativeEvent(

@@ -399,15 +399,21 @@ export async function updateMeeting(id: string, patch: Partial<Meeting>): Promis
  * If the app was killed mid-recording, the row is left in 'recording'.
  * The transcript was persisted as it went, so recover it rather than lose it.
  */
-export async function recoverInterruptedMeetings(): Promise<number> {
+export async function recoverInterruptedMeetings(excludedMeetingIds: string[] = []): Promise<number> {
   const db = await getDb();
+  const exclusion = excludedMeetingIds.length > 0
+    ? ` AND id NOT IN (${excludedMeetingIds.map(() => '?').join(', ')})`
+    : '';
   const rows = await db.getAllAsync<{ id: string }>(
-    "SELECT id FROM meetings WHERE status = 'recording'",
+    `SELECT id FROM meetings WHERE status = 'recording'${exclusion}`,
+    excludedMeetingIds,
   );
   if (rows.length === 0) return 0;
+  const rowIds = rows.map((row) => row.id);
   await db.runAsync(
-    "UPDATE meetings SET status = 'interrupted', updated_at = ? WHERE status = 'recording'",
-    [Date.now()],
+    `UPDATE meetings SET status = 'interrupted', updated_at = ?
+     WHERE id IN (${rowIds.map(() => '?').join(', ')})`,
+    [Date.now(), ...rowIds],
   );
   log.warn('meetings', 'recovered interrupted meetings', { count: rows.length });
   return rows.length;

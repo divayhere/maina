@@ -22,6 +22,63 @@ The following batch is now implemented locally and has passed the automated rele
 - Saved-audio re-transcription currently clears the existing transcript before rebuilding it. That keeps the flow deterministic, but if a re-pass fails halfway the previous transcript is not automatically restored. This is a known follow-up safety improvement, not a hidden regression.
 - Staging cleanup is intentionally aggressive for current testing: it removes all non-recording meetings. Before any broader sharing, this should become retention-aware rather than “clear test data” oriented.
 
+## v0.10 capture-first ASR staging — 2026-08-20
+
+This is an installed local staging build on the Pixel. The final v0.10.0 APK was
+installed in place, preserving the current model pack, settings and meeting
+data.
+
+| # | Item | Status | Evidence | Release blocker |
+|---:|---|---|---|---|
+| 1 | Capture-first ADR and ASR contracts | Implemented | `0009-capture-first-modular-local-asr.md`, `ASR_MODULE_CONTRACT.md` | None |
+| 2 | Deterministic ASR quality/coverage controller | Implemented | Windowing, short-tail merge, overlap de-duplication and lifecycle tests; full suite 47/47 passes | Hindi/Hinglish and long-run qualification |
+| 3 | Service-owned PCM/WAV chunk engine | Implemented in recorder staging path | Crash-safe partial WAVs, finalization/inspection/recovery, native compilation and device proof | 2–3-hour capture/recovery soak |
+| 4 | Official sherpa-onnx Android runtime | Validated and added | Official v1.13.6 AAR, SHA-256 `0012d9a28f15bd6fb966b62b70a75da3990512fdccce28b83098248ce4be1698` | Qwen model-pack installer + device proof |
+| 5 | Qwen model pack | Installed outside APK; short-run Pixel qualified | 26.119 s USB-mic recording decoded in 4.640 s with full interval coverage; app remained alive; packet generated | Installer/update flow, thermal and Hindi/Hinglish/long-run tests |
+
+### Local APK / device evidence
+
+- APK: `/Users/divay/Desktop/Software/Maina/android/app/build/outputs/apk/release/app-release.apk`
+- Version: `0.10.0`; Android version code: `26`.
+- APK SHA-256: `e1292df5ab5ee55c077566824c65f094363f27c4b60a5d6bc5e1917eec5a66e5`
+- APK v2 signature verification passed. The signing certificate SHA-256 remains
+  `4715df74d9a72125848ea45c0f15d2d2e75f25ada4203a406c390be0aac443b4`.
+- Installed in place with ADB on the connected Pixel as a standalone release
+  build; no Expo cloud build credit was used and app data was retained.
+- Maina Accessibility was enabled after install; `RECORD_AUDIO` and
+  `POST_NOTIFICATIONS` were granted.
+- App launch smoke passed in release mode: React Native started from the bundled
+  app, with no Metro dependency and no fatal AndroidRuntime crash in the launch
+  or transcription samples.
+- A real USB-microphone recording finalized to one durable WAV with no partial
+  chunks. Its 26.119-second local-Qwen pass completed in 4.640 seconds, produced
+  23 words, covered the complete interval and did not trigger the suspicious-
+  output gate.
+- The same flow automatically generated a Gemini packet using the saved setup.
+  The meeting UI refreshed to `Packet ready` with a summary, one decision and
+  one open to-do. This closes the observed packet-setup/retry failure.
+- `npm run verify:release` passed TypeScript, ESLint, dependency checks, Expo
+  Doctor 21/21, production export, Kotlin/app compilation, native tests, the
+  release verifier and 47 Vitest cases across 11 files.
+
+### Current guardrails
+
+- The staging recorder uses native capture + post-stop Qwen. The older
+  Expo/Android SpeechRecognizer path remains in the codebase as a rollback seam,
+  but it is not the active final-transcript path in this local staging build.
+- The native capture worker has no ASR/network/UI work in its hot loop.
+- ASR work runs away from Android's main thread. Audio is processed in bounded
+  windows and the recognizer is cached only for that pipeline run, then released.
+- Qwen is not embedded into the APK. A verified, resumable model-pack
+  install/update flow is still needed before this can become a normal user
+  release.
+- Speaker diarization and `You` voice identification remain contract seams, not
+  implemented features. Maina must not invent speaker labels meanwhile.
+- The current proof is deliberately limited: Hindi/Hinglish accuracy, a
+  60-minute transcription, a 2–3-hour lock-screen soak, thermal/battery behavior
+  and microphone-route transitions remain open gates. v0.10.0 must therefore be
+  treated as a staging/day-to-day test build, not a bug-free production claim.
+
 ## Approved next-build backlog — batch only, no APK until explicitly authorised
 
 Historical planning snapshot retained for traceability. The authoritative current state for this batch is the “Local implementation status — 2026-08-19” section above.

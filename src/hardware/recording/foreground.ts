@@ -5,6 +5,11 @@ import {
   type AudioInput,
   type AudioRouteChangedEvent,
   type CaptureState,
+  type NativeCaptureSourceMode,
+  type NativeCaptureDirectoryInspection,
+  type NativeCaptureStatus,
+  type QwenAsrResult,
+  type QwenAsrStatus,
   type RemoteControlStatus,
 } from '../../../modules/maina-recorder/src';
 
@@ -36,6 +41,57 @@ export async function disarmRemoteControl(): Promise<void> {
 
 export async function setNativeCaptureState(state: CaptureState): Promise<void> {
   if (Platform.OS === 'android' && MainaRecorder) await MainaRecorder.setCaptureState(state);
+}
+
+export async function startNativeCapture(options: {
+  meetingId: string;
+  directory: string;
+  sourceMode?: NativeCaptureSourceMode;
+  chunkDurationMs?: number;
+}): Promise<void> {
+  await requireAndroidModule().startNativeCapture(
+    options.meetingId,
+    options.directory,
+    options.sourceMode ?? 'voice_recognition',
+    options.chunkDurationMs ?? 5 * 60_000,
+  );
+}
+
+export async function pauseNativeCapture(): Promise<void> {
+  await requireAndroidModule().pauseNativeCapture();
+}
+
+export async function resumeNativeCapture(): Promise<void> {
+  await requireAndroidModule().resumeNativeCapture();
+}
+
+export async function stopNativeCapture(): Promise<void> {
+  await requireAndroidModule().stopNativeCapture();
+}
+
+export function getNativeCaptureStatus(): NativeCaptureStatus | null {
+  if (Platform.OS !== 'android' || !MainaRecorder) return null;
+  return MainaRecorder.getNativeCaptureStatus();
+}
+
+export async function inspectNativeCaptureDirectory(
+  directory: string,
+  recoverPartials = false,
+): Promise<NativeCaptureDirectoryInspection> {
+  return requireAndroidModule().inspectNativeCaptureDirectory(directory, recoverPartials);
+}
+
+export async function getQwenAsrStatus(): Promise<QwenAsrStatus | null> {
+  if (Platform.OS !== 'android' || !MainaRecorder) return null;
+  return MainaRecorder.getQwenAsrStatus();
+}
+
+export async function transcribeWithQwen(uri: string, startMs: number, endMs: number): Promise<QwenAsrResult> {
+  return requireAndroidModule().transcribeWithQwen(uri, startMs, endMs);
+}
+
+export async function releaseQwenAsr(): Promise<void> {
+  if (Platform.OS === 'android' && MainaRecorder) await MainaRecorder.releaseQwenAsr();
 }
 
 export async function getRemoteControlStatus(): Promise<RemoteControlStatus | null> {

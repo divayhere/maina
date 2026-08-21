@@ -1,5 +1,54 @@
 # Changelog
 
+## 0.10.0 — qualified native-Qwen capture pipeline
+
+- Fold ASR tails of five seconds or less into the preceding 25-second window. This avoids false incomplete-coverage results from decoding overlap/noise as a standalone tiny clip while keeping every default decode at or below 30 seconds.
+
+## 0.9.9 — app-storage Qwen loading
+
+- Initialize sherpa-onnx through its documented file loader when Qwen model files live in app storage. Passing Android's asset manager caused sherpa to treat absolute paths as APK asset names and terminate the process.
+
+## 0.9.8 — device-verified local ASR handoff
+
+- Fixed the native WAV duration parser to accept both `file:/...` and `file:///...` URIs. The former is emitted by Java `File.toURI()` and previously caused valid finalized audio to produce zero ASR windows.
+- Added native regression tests for Java, Expo, and plain-path capture file formats.
+
+## 0.9.7 — acknowledged capture and bounded local ASR
+
+- Makes native start, pause, resume, and stop observable state transitions; the UI now waits for the recorder service to acknowledge each command.
+- Moves blocking WAV finalization off Android's service main thread and prevents transcription from racing an unfinished `.partial` file.
+- Adds crash recovery for durable partial WAVs and registers recovered native chunks with the existing meeting-recovery flow.
+- Processes finalized audio through 25-second Qwen windows with one-second analysis overlap instead of sending ten-minute files to a bounded decoder.
+- Reuses one sherpa-onnx recognizer across a meeting, reads only the requested PCM window, validates the exact model pack, and releases model memory after processing.
+- Accounts for every ASR window, records audio levels/token limits, withholds automatic summaries when coverage is incomplete, and keeps the original audio available for retry.
+- Routes native saved-audio retries through the same modular local-ASR pipeline; legacy recordings retain their compatibility path.
+
+## [Unreleased] — capture-first ASR staging
+
+### Added
+
+- ADR 0009 defining service-owned capture, immutable audio, model-neutral
+  local-ASR interfaces, and audio-source calibration.
+- ASR adapter contract and deterministic coverage/repetition quality checks.
+- Isolated native PCM/WAV capture component with periodic sync, finalized WAV
+  headers, atomic chunk finalization, and an append-only recovery journal.
+- Official sherpa-onnx Android runtime dependency for the Qwen qualification
+  path. Qwen model data is intentionally not included in the APK.
+- Native-Qwen staging path is now wired behind the recorder entry point:
+  Maina captures durable WAV chunks first, then runs local Qwen transcription
+  after stop/save. This deliberately removes live ASR from the recording hot
+  path so recognition cannot interrupt audio capture.
+- Release-mode Android staging APK was built locally and installed on the Pixel
+  over ADB without using Expo cloud build credits. The Qwen model pack was
+  pushed outside the APK to app-specific external storage.
+
+### Not yet enabled
+
+- First end-to-end Pixel recording proof is still pending. App launch is clean,
+  model files are present, and automated/native compile gates pass, but the
+  first real record → stop → Qwen transcript run must still be tested through
+  the app UI/clicker.
+
 ## [Unreleased]
 
 ### Added
@@ -22,6 +71,18 @@
 - `npm run typecheck`, `npm test`, and `npm run lint` pass locally.
 - The latest packet-first/UI code still needs one fresh full `bash scripts/verify-release.sh` completion after this batch's final polish pass. Earlier transcript-safety foundations had already passed the local release verifier.
 - No APK was built from this batch yet.
+
+## 0.9.6 — reliability hardening for daily beta use
+
+- Hardened the patched native WAV recorder so a missing or changing meeting folder can no longer crash Maina during stop/save teardown.
+- Tightened discard/cancel teardown to wait for the active audio file to close before deleting local meeting artifacts.
+- Made external mic route loss recover faster and surface a clear in-session note when Maina switches back to the phone mic or refreshes an external route.
+- Added diagnostics readiness/queue visibility at launch and recording start, plus an explicit diagnostics flush after save/cancel so session evidence leaves the phone sooner.
+
+### Verification
+
+- `npm run typecheck`, `npm test`, `npm run lint`, `bash scripts/verify-release.sh`
+- Native Android compilation: `:maina-recorder:testDebugUnitTest`, `:maina-recorder:compileDebugKotlin`, `:app:compileDebugKotlin`
 
 ## 0.9.3 — permanent locked-screen control and idle efficiency
 
