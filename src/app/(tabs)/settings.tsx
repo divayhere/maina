@@ -27,6 +27,7 @@ import { useMainaLayout } from '@/design/layout';
 import { useAppTheme } from '@/design/theme';
 import { radius, space } from '@/design/tokens';
 import { getRemoteControlStatus, openRemoteAccessibilitySettings } from '@/hardware/recording/foreground';
+import { describeRemoteHealth, formatRemoteLastPress } from '@/hardware/trigger/remoteHealth';
 import type { RemoteControlStatus } from '../../../modules/maina-recorder/src';
 import { DEFAULT_CONFIG, getAppConfig, getProviderSettings, saveAppConfig, saveProviderSettings, type AppConfig, type ProviderSettings } from '@/services/config';
 import { log } from '@/services/logger';
@@ -139,6 +140,7 @@ export default function SettingsScreen() {
     () => getProvider(config.providerId) ?? getProvider(DEFAULT_CONFIG.providerId)!,
     [config.providerId],
   );
+  const remoteHealth = useMemo(() => describeRemoteHealth(remote), [remote]);
 
   const load = useCallback(async () => {
     const nextConfig = await getAppConfig();
@@ -352,21 +354,21 @@ export default function SettingsScreen() {
       <Card style={{ gap: space.sm }}>
         <AppText variant="label" muted>REMOTE CONTROL</AppText>
         <Row label="Maina" value={remote?.armed ? 'Ready · armed' : 'Open Maina to arm'} />
-        <Row
-          label="Locked-screen control"
-          value={remote?.accessibilityConnected ? 'Ready' : remote?.accessibilityEnabled ? 'Enabled · reconnecting' : 'Permission needed'}
-        />
+        <Row label="Locked-screen control" value={remoteHealth.statusLabel} helper={remoteHealth.detail} />
         <Row label="Capture" value={remote?.captureState ?? 'Checking…'} />
         <Row label="Button" value={remote?.trustedRemoteName ?? 'Disconnected or asleep'} />
-        <Row
-          label="Last press"
-          value={remote && remote.lastCommandAt > 0
-            ? `${remote.lastCommand} · ${new Date(remote.lastCommandAt).toLocaleTimeString()}`
-            : 'No press received'}
-        />
-        {!remote?.accessibilityConnected ? (
+        <Row label="Last press" value={formatRemoteLastPress(remote)} />
+        {remote?.accessibilityLastLifecycle && remote.accessibilityLastLifecycle !== 'never' ? (
+          <Row
+            label="Listener lifecycle"
+            value={`${remote.accessibilityLastLifecycle} · ${new Date(remote.accessibilityLastLifecycleAt).toLocaleTimeString()}`}
+          />
+        ) : null}
+        {remoteHealth.ctaAction === 'accessibility' ? (
           <Pressable onPress={() => void openRemoteAccessibilitySettings()} style={{ paddingTop: space.sm }}>
-            <AppText variant="label" color={theme.accent}>Enable locked-screen button control</AppText>
+            <AppText variant="label" color={theme.accent}>
+              {remoteHealth.ctaLabel ?? 'Open locked-screen button control'}
+            </AppText>
           </Pressable>
         ) : null}
       </Card>

@@ -4,6 +4,8 @@ import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.AccessibilityServiceInfo
 import android.content.ComponentName
 import android.content.Context
+import android.content.pm.PackageManager
+import android.os.Build
 import android.provider.Settings
 import android.util.Log
 import android.view.InputDevice
@@ -13,6 +15,8 @@ import android.view.accessibility.AccessibilityEvent
 /** Event-driven global key owner for the dedicated AB Shutter remote. */
 class MainaKeyAccessibilityService : AccessibilityService() {
     companion object {
+        private const val PREFS_NAME = "maina-accessibility-status"
+
         @Volatile
         var isConnected: Boolean = false
             private set
@@ -25,6 +29,39 @@ class MainaKeyAccessibilityService : AccessibilityService() {
             ).orEmpty()
             return enabled.split(':').any { it.equals(expected, ignoreCase = true) }
         }
+
+        fun lastLifecycle(context: Context): String =
+            prefs(context).getString("last_lifecycle", "never") ?: "never"
+
+        fun lastLifecycleAt(context: Context): Long =
+            prefs(context).getLong("last_lifecycle_at", 0L)
+
+        fun lastLifecycleBootCount(context: Context): Int =
+            prefs(context).getInt("last_lifecycle_boot_count", -1)
+
+        fun lastLifecyclePackageUpdatedAt(context: Context): Long =
+            prefs(context).getLong("last_lifecycle_package_updated_at", 0L)
+
+        fun currentBootCount(context: Context): Int =
+            Settings.Global.getInt(context.contentResolver, Settings.Global.BOOT_COUNT, -1)
+
+        fun currentPackageUpdatedAt(context: Context): Long = try {
+            val packageInfo = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                context.packageManager.getPackageInfo(
+                    context.packageName,
+                    PackageManager.PackageInfoFlags.of(0),
+                )
+            } else {
+                @Suppress("DEPRECATION")
+                context.packageManager.getPackageInfo(context.packageName, 0)
+            }
+            packageInfo.lastUpdateTime
+        } catch (_: Exception) {
+            0L
+        }
+
+        private fun prefs(context: Context) =
+            context.applicationContext.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
     }
 
     override fun onServiceConnected() {
@@ -40,6 +77,7 @@ class MainaKeyAccessibilityService : AccessibilityService() {
     }
 
     override fun onInterrupt() {
+        isConnected = false
         recordLifecycle("interrupted", "Maina remote accessibility service interrupted")
     }
 
@@ -75,10 +113,12 @@ class MainaKeyAccessibilityService : AccessibilityService() {
         // This service intentionally lives in a tiny secondary process. Do not
         // initialise React Native, WorkManager, or the diagnostics database here:
         // doing so would keep the full application awake while the phone is locked.
-        getSharedPreferences("maina-accessibility-status", Context.MODE_PRIVATE)
+        getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
             .edit()
             .putString("last_lifecycle", eventName)
             .putLong("last_lifecycle_at", System.currentTimeMillis())
+            .putInt("last_lifecycle_boot_count", currentBootCount(this))
+            .putLong("last_lifecycle_package_updated_at", currentPackageUpdatedAt(this))
             .apply()
         Log.i("MainaRemote", "$eventName: $message")
     }

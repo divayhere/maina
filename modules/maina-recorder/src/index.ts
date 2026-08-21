@@ -23,6 +23,12 @@ export interface RemoteControlStatus {
   captureState: CaptureState;
   accessibilityEnabled: boolean;
   accessibilityConnected: boolean;
+  accessibilityLastLifecycle: string;
+  accessibilityLastLifecycleAt: number;
+  accessibilityLastLifecycleBootCount: number;
+  accessibilityCurrentBootCount: number;
+  accessibilityLastLifecyclePackageUpdatedAt: number;
+  accessibilityCurrentPackageUpdatedAt: number;
   notificationsEnabled: boolean;
   inputDevices: string[];
   lastCommand: string;

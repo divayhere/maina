@@ -1,5 +1,5 @@
 import { router, useFocusEffect } from 'expo-router';
-import { useCallback } from 'react';
+import { useCallback, useState } from 'react';
 import { FlatList, Pressable, View } from 'react-native';
 
 import { AppText, Card, EmptyState, PrimaryButton } from '@/design/components';
@@ -7,8 +7,11 @@ import { type Meeting } from '@/data/meetings';
 import { useMainaLayout } from '@/design/layout';
 import { useAppTheme } from '@/design/theme';
 import { radius, space } from '@/design/tokens';
+import { getRemoteControlStatus, openRemoteAccessibilitySettings } from '@/hardware/recording/foreground';
+import { describeRemoteHealth, formatRemoteLastPress } from '@/hardware/trigger/remoteHealth';
 import { useMeetings } from '@/state/meetingsStore';
 import { formatDateTime, formatDuration } from '@/utils/format';
+import type { RemoteControlStatus } from '../../../modules/maina-recorder/src';
 
 const STATUS_LABEL: Record<string, string> = {
   recording: 'Recording',
@@ -74,12 +77,16 @@ export default function MeetingsScreen() {
   const { theme } = useAppTheme();
   const { topPadding, contentBottomPadding } = useMainaLayout();
   const { meetings, refresh } = useMeetings();
+  const [remote, setRemote] = useState<RemoteControlStatus | null>(null);
 
   useFocusEffect(
     useCallback(() => {
       refresh();
+      void getRemoteControlStatus().then(setRemote).catch(() => setRemote(null));
     }, [refresh]),
   );
+
+  const remoteHealth = describeRemoteHealth(remote);
 
   return (
     <View style={{ flex: 1, backgroundColor: theme.bg }}>
@@ -111,6 +118,22 @@ export default function MeetingsScreen() {
                 style={{ alignSelf: 'flex-start', backgroundColor: 'rgba(255,255,255,0.18)', shadowOpacity: 0 }}
               />
             </Card>
+            {remoteHealth.tone === 'warn' ? (
+              <Card style={{ gap: space.md, borderColor: theme.warn, backgroundColor: theme.surface }}>
+                <View style={{ gap: 6 }}>
+                  <AppText variant="heading">{remoteHealth.title}</AppText>
+                  <AppText variant="body" muted>{remoteHealth.detail}</AppText>
+                  <AppText variant="label" muted>{formatRemoteLastPress(remote)}</AppText>
+                </View>
+                {remoteHealth.ctaAction === 'accessibility' ? (
+                  <PrimaryButton
+                    label={remoteHealth.ctaLabel ?? 'Open clicker settings'}
+                    onPress={() => void openRemoteAccessibilitySettings()}
+                    style={{ alignSelf: 'flex-start' }}
+                  />
+                ) : null}
+              </Card>
+            ) : null}
             <View style={{ gap: space.xs }}>
               <AppText variant="title">Recent meetings</AppText>
               <AppText variant="body" muted>

@@ -412,6 +412,9 @@ class MainaRecordingService : Service() {
     }
 
     private fun buildNotification(): Notification {
+        val remoteStatus = MainaHardwareTrigger.status(this)
+        val accessibilityEnabled = remoteStatus["accessibilityEnabled"] as? Boolean ?: false
+        val accessibilityConnected = remoteStatus["accessibilityConnected"] as? Boolean ?: false
         val launchIntent = packageManager.getLaunchIntentForPackage(packageName)
         val pendingIntent = launchIntent?.let {
             PendingIntent.getActivity(
@@ -442,7 +445,11 @@ class MainaRecordingService : Service() {
                     "recording" -> "Audio recovery is active."
                     "paused" -> "Resume or stop and save this meeting."
                     "finalizing" -> "Finalising transcript and audio files."
-                    else -> "Remote control is armed until reboot or force-stop."
+                    else -> when {
+                        !accessibilityEnabled -> "Enable clicker control in Accessibility for locked-screen use."
+                        !accessibilityConnected -> "Re-open Maina and verify the clicker once before your meeting."
+                        else -> "Remote control is armed until reboot or force-stop."
+                    }
                 },
             )
             .setContentIntent(pendingIntent)

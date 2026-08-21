@@ -188,6 +188,17 @@ object MainaHardwareTrigger {
 
     fun status(context: Context): Map<String, Any> {
         val prefs = statusPrefs(context)
+        val accessibilityEnabled = MainaKeyAccessibilityService.isEnabled(context)
+        val accessibilityLifecycle = MainaKeyAccessibilityService.lastLifecycle(context)
+        val accessibilityLifecycleAt = MainaKeyAccessibilityService.lastLifecycleAt(context)
+        val lifecycleBootCount = MainaKeyAccessibilityService.lastLifecycleBootCount(context)
+        val currentBootCount = MainaKeyAccessibilityService.currentBootCount(context)
+        val lifecyclePackageUpdatedAt = MainaKeyAccessibilityService.lastLifecyclePackageUpdatedAt(context)
+        val currentPackageUpdatedAt = MainaKeyAccessibilityService.currentPackageUpdatedAt(context)
+        val accessibilityConnected = accessibilityEnabled &&
+            accessibilityLifecycle == "connected" &&
+            lifecycleBootCount == currentBootCount &&
+            lifecyclePackageUpdatedAt == currentPackageUpdatedAt
         val inputDevices = context.getSystemService(InputManager::class.java).inputDeviceIds
             .toList()
             .mapNotNull { InputDevice.getDevice(it) }
@@ -197,11 +208,14 @@ object MainaHardwareTrigger {
         return mapOf(
             "armed" to MainaRecordingService.isRunning,
             "captureState" to MainaRecordingService.captureState,
-            "accessibilityEnabled" to MainaKeyAccessibilityService.isEnabled(context),
-            // The accessibility listener is intentionally hosted in another
-            // process, so its in-memory connection flag isn't visible here.
-            // Android's enabled-services setting is the durable source of truth.
-            "accessibilityConnected" to MainaKeyAccessibilityService.isEnabled(context),
+            "accessibilityEnabled" to accessibilityEnabled,
+            "accessibilityConnected" to accessibilityConnected,
+            "accessibilityLastLifecycle" to accessibilityLifecycle,
+            "accessibilityLastLifecycleAt" to accessibilityLifecycleAt,
+            "accessibilityLastLifecycleBootCount" to lifecycleBootCount,
+            "accessibilityCurrentBootCount" to currentBootCount,
+            "accessibilityLastLifecyclePackageUpdatedAt" to lifecyclePackageUpdatedAt,
+            "accessibilityCurrentPackageUpdatedAt" to currentPackageUpdatedAt,
             "notificationsEnabled" to context.getSystemService(NotificationManager::class.java).areNotificationsEnabled(),
             "inputDevices" to inputDevices,
             "lastCommand" to (prefs.getString("last_command", "never") ?: "never"),
