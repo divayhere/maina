@@ -2,6 +2,7 @@ import { DEFAULT_PROVIDER_ID, getProvider } from '../core/summarization/provider
 import { getSetting, setSetting } from '../data/settings';
 
 const KEY_APP_CONFIG = 'app_config_v1';
+const KEY_MAINA_KNOWLEDGE_CLOUD_SETTINGS = 'maina_knowledge_cloud_settings_v1';
 const providerSettingsKey = (providerId: string) => `provider_settings_v1:${providerId}`;
 
 export interface AppConfig {
@@ -20,6 +21,12 @@ export interface ProviderSettings {
   customBaseUrl?: string;
 }
 
+export interface MainaKnowledgeCloudSettings {
+  enabled: boolean;
+  baseUrl: string;
+  token: string;
+}
+
 export const DEFAULT_CONFIG: AppConfig = {
   autoSummarize: true,
   keepAudioAfterTranscript: true,
@@ -27,6 +34,12 @@ export const DEFAULT_CONFIG: AppConfig = {
   exportFormat: 'md',
   audioRetentionDays: 7,
   audioRetentionMaxBytes: 1024 * 1024 * 1024,
+};
+
+export const DEFAULT_MAINA_KNOWLEDGE_CLOUD_SETTINGS: MainaKnowledgeCloudSettings = {
+  enabled: false,
+  baseUrl: 'https://mkc-backend.maina-knowledge-cloud.workers.dev',
+  token: '',
 };
 
 function safeParse<T>(value: string | null): Partial<T> | null {
@@ -46,6 +59,20 @@ function normalizeConfig(value?: Partial<AppConfig> | null): AppConfig {
     exportFormat: 'md',
     audioRetentionDays: value?.audioRetentionDays ?? DEFAULT_CONFIG.audioRetentionDays,
     audioRetentionMaxBytes: value?.audioRetentionMaxBytes ?? DEFAULT_CONFIG.audioRetentionMaxBytes,
+  };
+}
+
+function normalizeMainaKnowledgeCloudBaseUrl(value?: string | null) {
+  return (value ?? DEFAULT_MAINA_KNOWLEDGE_CLOUD_SETTINGS.baseUrl).trim().replace(/\/+$/, '');
+}
+
+function normalizeMainaKnowledgeCloudSettings(
+  value?: Partial<MainaKnowledgeCloudSettings> | null,
+): MainaKnowledgeCloudSettings {
+  return {
+    enabled: value?.enabled ?? DEFAULT_MAINA_KNOWLEDGE_CLOUD_SETTINGS.enabled,
+    baseUrl: normalizeMainaKnowledgeCloudBaseUrl(value?.baseUrl),
+    token: value?.token?.trim() ?? DEFAULT_MAINA_KNOWLEDGE_CLOUD_SETTINGS.token,
   };
 }
 
@@ -91,4 +118,18 @@ export async function saveProviderSettings(
 export async function hasProviderKey(providerId: string): Promise<boolean> {
   const settings = await getProviderSettings(providerId);
   return settings.apiKey.trim().length > 0;
+}
+
+export async function getMainaKnowledgeCloudSettings(): Promise<MainaKnowledgeCloudSettings> {
+  const raw = await getSetting(KEY_MAINA_KNOWLEDGE_CLOUD_SETTINGS);
+  return normalizeMainaKnowledgeCloudSettings(safeParse<MainaKnowledgeCloudSettings>(raw));
+}
+
+export async function saveMainaKnowledgeCloudSettings(
+  patch: Partial<MainaKnowledgeCloudSettings>,
+): Promise<MainaKnowledgeCloudSettings> {
+  const current = await getMainaKnowledgeCloudSettings();
+  const next = normalizeMainaKnowledgeCloudSettings({ ...current, ...patch });
+  await setSetting(KEY_MAINA_KNOWLEDGE_CLOUD_SETTINGS, JSON.stringify(next));
+  return next;
 }

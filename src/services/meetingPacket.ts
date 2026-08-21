@@ -11,6 +11,7 @@ import {
 import { getProvider } from '@/core/summarization/providers';
 import { getAppConfig, getProviderSettings, saveProviderSettings, type ProviderSettings } from '@/services/config';
 import { log } from '@/services/logger';
+import { maybeQueueMainaKnowledgeCloudSync } from '@/services/mainaKnowledgeCloud';
 import { validateProviderSettings } from '@/services/providerValidation';
 
 const inflight = new Map<string, Promise<void>>();
@@ -145,6 +146,12 @@ export function runMeetingPacketGeneration(meetingId: string): Promise<void> {
       await setMeetingSummaryState(meetingId, 'failed', { error: message }).catch(() => {});
     })
     .finally(() => {
+      void maybeQueueMainaKnowledgeCloudSync(meetingId).catch((cause) => {
+        log.warn('maina-cloud', 'cloud sync queue after meeting packet generation failed', {
+          meetingId,
+          err: String(cause),
+        });
+      });
       inflight.delete(meetingId);
     });
   inflight.set(meetingId, task);

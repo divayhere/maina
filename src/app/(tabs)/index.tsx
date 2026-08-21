@@ -9,6 +9,8 @@ import { type Meeting } from '@/data/meetings';
 import { useMainaLayout } from '@/design/layout';
 import { useAppTheme } from '@/design/theme';
 import { radius, space } from '@/design/tokens';
+import { describeMainaKnowledgeCloudSyncStatus } from '@/services/mainaKnowledgeCloudCore';
+import { countActionableNotifications } from '@/services/notifications';
 import { useMeetings } from '@/state/meetingsStore';
 import { formatDate, formatDuration, formatTime } from '@/utils/format';
 
@@ -35,6 +37,10 @@ function describeState(item: Meeting): { label: string; tone: 'primary' | 'warn'
 function MeetingRow({ item }: { item: Meeting }) {
   const { theme } = useAppTheme();
   const state = describeState(item);
+  const cloudState = describeMainaKnowledgeCloudSyncStatus({
+    status: item.knowledgeCloudSyncStatus,
+    error: item.knowledgeCloudError,
+  });
   const meta = `${formatDate(item.startedAt)} · ${formatTime(item.startedAt)} · ${formatDuration(item.durationMs)}${item.language ? ` · ${item.language}` : ''}`;
 
   return (
@@ -64,6 +70,12 @@ function MeetingRow({ item }: { item: Meeting }) {
               {state.detail ?? 'Transcript stays available as raw memory. Notes appear here once ready.'}
             </AppText>
           )}
+
+          {item.knowledgeCloudSyncStatus !== 'local_only' ? (
+            <AppText variant="meta" color={cloudState.tone === 'warn' ? theme.warn : cloudState.tone === 'primary' ? theme.primary : theme.textSoft}>
+              {cloudState.label}
+            </AppText>
+          ) : null}
 
           {state.working ? (
             <View style={{ height: 6, borderRadius: radius.pill, backgroundColor: theme.mutedSoft, overflow: 'hidden' }}>
@@ -95,6 +107,7 @@ export default function MeetingsScreen() {
   }, [meetings, query]);
 
   const interrupted = meetings.find((meeting) => meeting.status === 'interrupted');
+  const notificationCount = countActionableNotifications(meetings);
 
   return (
     <View style={{ flex: 1, backgroundColor: theme.bg }}>
@@ -106,6 +119,14 @@ export default function MeetingsScreen() {
         ItemSeparatorComponent={() => <View style={{ height: space.lg }} />}
         ListHeaderComponent={
           <View style={{ gap: space.lg, paddingTop: topPadding, marginBottom: space.lg }}>
+            <View style={{ gap: 6 }}>
+              <AppText variant="body" muted>
+                Your ambient meeting memory stays on this phone first, then turns into usable notes when the transcript is ready.
+              </AppText>
+              <AppText variant="meta" muted>
+                {meetings.length} recording{meetings.length === 1 ? '' : 's'} · {notificationCount} alert{notificationCount === 1 ? '' : 's'}
+              </AppText>
+            </View>
             {interrupted ? (
               <Pressable onPress={() => router.push(`/meeting/${interrupted.id}/recover`)}>
                 <Banner tone="warn" style={{ gap: 8 }}>
@@ -143,48 +164,6 @@ export default function MeetingsScreen() {
               />
             </View>
 
-            <Pressable onPress={() => router.push('/record')}>
-              {({ pressed }) => (
-                <View
-                  style={{
-                    borderRadius: 28,
-                    backgroundColor: theme.primary,
-                    paddingHorizontal: 20,
-                    paddingVertical: 18,
-                    shadowColor: theme.primary,
-                    shadowOpacity: 0.24,
-                    shadowRadius: 20,
-                    shadowOffset: { width: 0, height: 12 },
-                    elevation: 6,
-                    opacity: pressed ? 0.96 : 1,
-                  }}
-                >
-                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: 16 }}>
-                    <View
-                      style={{
-                        width: 72,
-                        height: 72,
-                        borderRadius: 36,
-                        backgroundColor: 'rgba(255,255,255,0.12)',
-                        alignItems: 'center',
-                        justifyContent: 'center',
-                      }}
-                    >
-                      <Ionicons name="mic-outline" size={34} color="#FFFFFF" />
-                    </View>
-                    <View style={{ flex: 1, gap: 8 }}>
-                      <AppText variant="title" color="#FFFFFF">
-                        Record a meeting
-                      </AppText>
-                      <AppText variant="meta" color="rgba(255,255,255,0.84)">
-                        Works with your configured clicker when Maina is armed
-                      </AppText>
-                    </View>
-                  </View>
-                </View>
-              )}
-            </Pressable>
-
             <SectionLabel>Recent</SectionLabel>
           </View>
         }
@@ -200,7 +179,7 @@ export default function MeetingsScreen() {
               <Banner tone="info" style={{ alignItems: 'center', gap: 8, paddingVertical: 28 }}>
                 <AppText variant="title">No recordings yet</AppText>
                 <AppText variant="body" muted style={{ textAlign: 'center' }}>
-                  Tap Record a meeting to make your first one.
+                  Use the center mic button below to make your first one.
                 </AppText>
               </Banner>
             )

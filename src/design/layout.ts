@@ -2,9 +2,9 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
 import { space } from './tokens';
 
-export const TAB_BAR_BASE_HEIGHT = 76;
+export const TAB_BAR_BASE_HEIGHT = 88;
 export const TOP_BAR_HEIGHT = 56;
-export const RECORD_BAR_BUTTON_SIZE = 60;
+export const RECORD_BAR_BUTTON_SIZE = 72;
 
 export function useMainaLayout() {
   const insets = useSafeAreaInsets();
@@ -16,7 +16,7 @@ export function useMainaLayout() {
     topBarHeight,
     topPadding: space.lg,
     tabBarHeight,
-    contentBottomPadding: tabBarHeight + space.lg,
+    contentBottomPadding: tabBarHeight + space.md,
     recordBarOverlap: 10,
   };
 }

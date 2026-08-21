@@ -14,6 +14,8 @@ import { RECORD_BAR_BUTTON_SIZE, TAB_BAR_BASE_HEIGHT, useMainaLayout } from './l
 import { useAppTheme } from './theme';
 import { space } from './tokens';
 import { AppText } from './components';
+import { countActionableNotifications } from '@/services/notifications';
+import { useMeetings } from '@/state/meetingsStore';
 
 export function TopBar({
   title,
@@ -64,6 +66,8 @@ export function DrawerMenu() {
   const { insets } = useMainaLayout();
   const pathname = usePathname();
   const [open, setOpen] = useState(false);
+  const { meetings } = useMeetings();
+  const notificationCount = countActionableNotifications(meetings);
 
   const items = useMemo(
     () => [
@@ -76,7 +80,33 @@ export function DrawerMenu() {
 
   return (
     <>
-      <TopBar title={resolveTitle(pathname)} onMenu={() => setOpen(true)} />
+      <TopBar
+        title={resolveTitle(pathname)}
+        onMenu={() => setOpen(true)}
+        right={
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Notifications"
+            onPress={() => router.push('/notifications')}
+            hitSlop={10}
+            style={({ pressed }) => [
+              styles.iconButton,
+              { backgroundColor: pressed ? theme.mutedSoft : 'transparent' },
+            ]}
+          >
+            <View>
+              <Ionicons name="notifications-outline" size={24} color={theme.text} />
+              {notificationCount > 0 ? (
+                <View style={[styles.notificationBadge, { backgroundColor: theme.warn }]}>
+                  <AppText variant="chip" color="#FFFFFF">
+                    {notificationCount > 9 ? '9+' : String(notificationCount)}
+                  </AppText>
+                </View>
+              ) : null}
+            </View>
+          </Pressable>
+        }
+      />
       <Modal animationType="fade" transparent visible={open} onRequestClose={() => setOpen(false)}>
         <Pressable style={[styles.scrim, { backgroundColor: theme.overlay }]} onPress={() => setOpen(false)}>
           <Pressable
@@ -145,8 +175,9 @@ export function MainaTabBar({ state, navigation }: any) {
   const visibleItems = [
     { key: 'index', label: 'Home', icon: 'home-outline' as const },
     { key: 'todos', label: 'To-dos', icon: 'checkmark-circle-outline' as const },
-    { key: 'settings', label: 'Settings', icon: 'settings-outline' as const },
   ];
+  const leftItem = visibleItems[0];
+  const rightItem = visibleItems[1];
 
   const goToTab = (routeName: string) => {
     const route = state.routes.find((item: { key: string; name: string; params?: object }) => item.name === routeName);
@@ -174,27 +205,38 @@ export function MainaTabBar({ state, navigation }: any) {
       ]}
     >
       <View style={styles.tabBarRow}>
-        {visibleItems.map((item) => {
-          const isActive = activeRoute === item.key;
-          return (
-            <Pressable
-              key={item.key}
-              accessibilityRole="button"
-              accessibilityState={{ selected: isActive }}
-              accessibilityLabel={item.label}
-              onPress={() => goToTab(item.key)}
-              style={({ pressed }) => [
-                styles.tabItem,
-                { opacity: pressed ? 0.96 : 1 },
-              ]}
-            >
-              <Ionicons name={item.icon} size={26} color={isActive ? theme.primary : theme.textSoft} />
-              <AppText variant="tab" color={isActive ? theme.primary : theme.textSoft}>
-                {item.label}
-              </AppText>
-            </Pressable>
-          );
-        })}
+        <Pressable
+          accessibilityRole="button"
+          accessibilityState={{ selected: activeRoute === leftItem.key }}
+          accessibilityLabel={leftItem.label}
+          onPress={() => goToTab(leftItem.key)}
+          style={({ pressed }) => [styles.tabItem, styles.tabItemLeft, { opacity: pressed ? 0.96 : 1 }]}
+        >
+          <Ionicons
+            name={leftItem.icon}
+            size={26}
+            color={activeRoute === leftItem.key ? theme.primary : theme.textSoft}
+          />
+          <AppText variant="tab" color={activeRoute === leftItem.key ? theme.primary : theme.textSoft}>
+            {leftItem.label}
+          </AppText>
+        </Pressable>
+        <Pressable
+          accessibilityRole="button"
+          accessibilityState={{ selected: activeRoute === rightItem.key }}
+          accessibilityLabel={rightItem.label}
+          onPress={() => goToTab(rightItem.key)}
+          style={({ pressed }) => [styles.tabItem, styles.tabItemRight, { opacity: pressed ? 0.96 : 1 }]}
+        >
+          <Ionicons
+            name={rightItem.icon}
+            size={26}
+            color={activeRoute === rightItem.key ? theme.primary : theme.textSoft}
+          />
+          <AppText variant="tab" color={activeRoute === rightItem.key ? theme.primary : theme.textSoft}>
+            {rightItem.label}
+          </AppText>
+        </Pressable>
       </View>
       <Pressable
         accessibilityRole="button"
@@ -208,8 +250,9 @@ export function MainaTabBar({ state, navigation }: any) {
             borderRadius: RECORD_BAR_BUTTON_SIZE / 2,
             backgroundColor: theme.primary,
             shadowColor: theme.primary,
-            right: 20,
-            bottom: Math.max(insets.bottom + 22, 26),
+            left: '50%',
+            marginLeft: -(RECORD_BAR_BUTTON_SIZE / 2),
+            bottom: Math.max(insets.bottom + 8, 14),
             transform: [{ scale: pressed ? 0.97 : 1 }],
           },
         ]}
@@ -225,7 +268,7 @@ export function MainaTabBar({ state, navigation }: any) {
             borderColor: '#FFFFFF',
           }}
         >
-          <Ionicons name="mic-outline" size={28} color="#FFFFFF" />
+          <Ionicons name="mic-outline" size={30} color="#FFFFFF" />
         </View>
       </Pressable>
     </View>
@@ -318,17 +361,22 @@ const styles = StyleSheet.create({
   },
   tabBarRow: {
     flex: 1,
-    flexDirection: 'row',
-    alignItems: 'flex-end',
-    paddingHorizontal: 10,
+    justifyContent: 'center',
   },
   tabItem: {
-    flex: 1,
-    minWidth: 0,
+    position: 'absolute',
+    bottom: 8,
+    width: '32%',
     alignItems: 'center',
     justifyContent: 'center',
-    gap: 4,
-    paddingBottom: 6,
+    gap: 2,
+    minHeight: 56,
+  },
+  tabItemLeft: {
+    left: 12,
+  },
+  tabItemRight: {
+    right: 12,
   },
   recordTabButton: {
     position: 'absolute',
@@ -339,5 +387,16 @@ const styles = StyleSheet.create({
     shadowRadius: 18,
     shadowOffset: { width: 0, height: 10 },
     elevation: 8,
+  },
+  notificationBadge: {
+    position: 'absolute',
+    top: -6,
+    right: -10,
+    minWidth: 18,
+    height: 18,
+    borderRadius: 9,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 4,
   },
 });

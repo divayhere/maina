@@ -16,7 +16,10 @@ describe('ASR window planning', () => {
   });
 
   it('folds a tiny tail into the preceding bounded window', () => {
-    expect(planAsrWindows(26_119)).toEqual([{ startMs: 0, endMs: 26_119, overlapBeforeMs: 0 }]);
+    expect(planAsrWindows(26_119)).toEqual([
+      { startMs: 0, endMs: 15_000, overlapBeforeMs: 0 },
+      { startMs: 13_000, endMs: 26_119, overlapBeforeMs: 2_000 },
+    ]);
   });
 
   it('rejects overlap settings that could loop forever', () => {

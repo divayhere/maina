@@ -30,14 +30,19 @@ import { describeRemoteHealth } from '@/hardware/trigger/remoteHealth';
 import type { RemoteControlStatus } from '../../../modules/maina-recorder/src';
 import {
   DEFAULT_CONFIG,
+  DEFAULT_MAINA_KNOWLEDGE_CLOUD_SETTINGS,
   getAppConfig,
+  getMainaKnowledgeCloudSettings,
   getProviderSettings,
   saveAppConfig,
+  saveMainaKnowledgeCloudSettings,
   saveProviderSettings,
   type AppConfig,
+  type MainaKnowledgeCloudSettings,
   type ProviderSettings,
 } from '@/services/config';
 import { log } from '@/services/logger';
+import { queueEligibleMainaKnowledgeCloudSyncs } from '@/services/mainaKnowledgeCloud';
 import { queueEligibleMeetingPackets } from '@/services/meetingPacket';
 import { validateProviderSettings } from '@/services/providerValidation';
 
@@ -153,11 +158,16 @@ export default function SettingsScreen() {
     model: getProvider(DEFAULT_CONFIG.providerId)?.defaultModel ?? '',
     customBaseUrl: '',
   });
+  const [knowledgeCloudSettings, setKnowledgeCloudSettings] = useState<MainaKnowledgeCloudSettings>(
+    DEFAULT_MAINA_KNOWLEDGE_CLOUD_SETTINGS,
+  );
   const [languages, setLanguages] = useState<LanguageProvisioningState | null>(null);
   const [onDevice, setOnDevice] = useState<boolean | null>(null);
   const [remote, setRemote] = useState<RemoteControlStatus | null>(null);
   const [saveState, setSaveState] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
   const [saveMessage, setSaveMessage] = useState<string | null>(null);
+  const [cloudSaveState, setCloudSaveState] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
+  const [cloudSaveMessage, setCloudSaveMessage] = useState<string | null>(null);
 
   const selectedProvider = useMemo(
     () => getProvider(config.providerId) ?? getProvider(DEFAULT_CONFIG.providerId)!,
@@ -167,13 +177,15 @@ export default function SettingsScreen() {
 
   const load = useCallback(async () => {
     const nextConfig = await getAppConfig();
-    const [nextProviderSettings, nextLanguages, nextRemote] = await Promise.all([
+    const [nextProviderSettings, nextLanguages, nextRemote, nextKnowledgeCloudSettings] = await Promise.all([
       getProviderSettings(nextConfig.providerId),
       provisionCoreLanguages(),
       getRemoteControlStatus(),
+      getMainaKnowledgeCloudSettings(),
     ]);
     setConfig(nextConfig);
     setProviderState(nextProviderSettings);
+    setKnowledgeCloudSettings(nextKnowledgeCloudSettings);
     setLanguages(nextLanguages);
     setRemote(nextRemote);
     setOnDevice(supportsOnDevice());
@@ -264,6 +276,53 @@ export default function SettingsScreen() {
             chip: 'Setup required',
             chipTone: 'warn' as const,
           };
+
+  const cloudBanner =
+    knowledgeCloudSettings.enabled && knowledgeCloudSettings.token.trim() && knowledgeCloudSettings.baseUrl.trim()
+      ? {
+          title: 'Maina Knowledge Cloud is connected',
+          body: 'Finalized meetings can sync to your private cloud memory automatically.',
+          chip: 'Connected',
+          chipTone: 'primary' as const,
+        }
+      : knowledgeCloudSettings.enabled
+        ? {
+            title: 'Maina Knowledge Cloud needs one more detail',
+            body: 'Turn it on only after the base URL and access token are saved.',
+            chip: 'Needs attention',
+            chipTone: 'warn' as const,
+          }
+        : {
+            title: 'Maina Knowledge Cloud is optional',
+            body: 'Leave it off if you want Maina to keep everything only on this phone.',
+            chip: 'Local only',
+            chipTone: 'muted' as const,
+          };
+
+  const saveKnowledgeCloudConfig = async () => {
+    Keyboard.dismiss();
+    setCloudSaveState('saving');
+    setCloudSaveMessage(null);
+    try {
+      const next = await saveMainaKnowledgeCloudSettings(knowledgeCloudSettings);
+      setKnowledgeCloudSettings(next);
+      const queued = next.enabled ? await queueEligibleMainaKnowledgeCloudSyncs().catch(() => 0) : 0;
+      setCloudSaveState('saved');
+      setCloudSaveMessage(
+        next.enabled
+          ? queued > 0
+            ? `Saved. Queued ${queued} earlier meeting${queued === 1 ? '' : 's'} for cloud sync.`
+            : 'Saved. New finalized meetings can sync to Maina Knowledge Cloud.'
+          : 'Saved. Meetings stay only on this phone until you turn cloud sync on again.',
+      );
+      setTimeout(() => setCloudSaveState('idle'), 1800);
+    } catch (cause) {
+      const message = cause instanceof Error ? cause.message : String(cause);
+      setCloudSaveState('error');
+      setCloudSaveMessage(message);
+      log.error('settings', 'maina knowledge cloud settings save failed', { err: message });
+    }
+  };
 
   return (
     <KeyboardAvoidingView style={{ flex: 1, backgroundColor: theme.bg }} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
@@ -370,6 +429,80 @@ export default function SettingsScreen() {
               {saveMessage ? (
                 <AppText variant="meta" color={saveState === 'error' ? theme.warn : saveState === 'saved' ? theme.primary : theme.textSoft}>
                   {saveMessage}
+                </AppText>
+              ) : null}
+            </View>
+          </View>
+        </Card>
+
+        <Card style={{ gap: space.xl }}>
+          <SectionLabel>Maina Knowledge Cloud</SectionLabel>
+          <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start', gap: space.md }}>
+            <View style={{ flex: 1, gap: 6 }}>
+              <AppText variant="title">{cloudBanner.title}</AppText>
+              <AppText variant="body" muted>{cloudBanner.body}</AppText>
+            </View>
+            <Chip label={cloudBanner.chip} tone={cloudBanner.chipTone} />
+          </View>
+          <View style={{ gap: space.md }}>
+            <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', gap: space.md }}>
+              <View style={{ flex: 1, gap: 4 }}>
+                <AppText variant="bodyStrong">Sync finalized meetings</AppText>
+                <AppText variant="meta" muted>
+                  Maina records and transcribes locally first, then sends one frozen meeting package to Maina Knowledge Cloud.
+                </AppText>
+              </View>
+              <Switch
+                value={knowledgeCloudSettings.enabled}
+                onValueChange={(value) =>
+                  setKnowledgeCloudSettings((current) => ({ ...current, enabled: value }))
+                }
+                thumbColor="#FFFFFF"
+                trackColor={{ false: theme.border, true: theme.primary }}
+              />
+            </View>
+
+            <LabeledInput
+              label="Base URL"
+              value={knowledgeCloudSettings.baseUrl}
+              onChangeText={(value) =>
+                setKnowledgeCloudSettings((current) => ({ ...current, baseUrl: value }))
+              }
+              placeholder="https://mkc-backend.maina-knowledge-cloud.workers.dev"
+            />
+
+            <LabeledInput
+              label="Access token"
+              value={knowledgeCloudSettings.token}
+              onChangeText={(value) =>
+                setKnowledgeCloudSettings((current) => ({ ...current, token: value }))
+              }
+              placeholder="Paste your Maina Knowledge Cloud token"
+              secureTextEntry
+            />
+
+            <Banner tone="info" style={{ gap: 8 }}>
+              <AppText variant="bodyStrong">Cloud sync never replaces the local meeting.</AppText>
+              <AppText variant="meta" muted>
+                If Maina Knowledge Cloud is unavailable, your meeting still stays on this phone and can sync later.
+              </AppText>
+            </Banner>
+
+            <View style={{ gap: space.md }}>
+              <PrimaryButton
+                label={
+                  cloudSaveState === 'saving'
+                    ? 'Saving...'
+                    : cloudSaveState === 'saved'
+                      ? 'Saved'
+                      : 'Save cloud settings'
+                }
+                onPress={() => void saveKnowledgeCloudConfig()}
+              />
+
+              {cloudSaveMessage ? (
+                <AppText variant="meta" color={cloudSaveState === 'error' ? theme.warn : cloudSaveState === 'saved' ? theme.primary : theme.textSoft}>
+                  {cloudSaveMessage}
                 </AppText>
               ) : null}
             </View>

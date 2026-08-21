@@ -28,13 +28,15 @@ import {
   updateTodoDone,
   updateMeeting,
 } from '@/data/meetings';
-import { AppText, Banner, Card, Chip, PrimaryButton, SectionLabel } from '@/design/components';
+import { AppText, Banner, Card, Chip, PrimaryButton, SecondaryButton, SectionLabel } from '@/design/components';
 import { TopBar } from '@/design/shell';
 import { useMainaLayout } from '@/design/layout';
 import { useAppTheme } from '@/design/theme';
 import { radius, space } from '@/design/tokens';
 import { inspectNativeCaptureDirectory, repairWavFiles } from '@/hardware/recording/foreground';
 import { segmentPath } from '@/hardware/recording/paths';
+import { maybeQueueMainaKnowledgeCloudSync } from '@/services/mainaKnowledgeCloud';
+import { describeMainaKnowledgeCloudSyncStatus } from '@/services/mainaKnowledgeCloudCore';
 import { chooseSummaryProviderLabel } from '@/services/meetingPacketMeta';
 import { maybeQueueMeetingPacket, runMeetingPacketGeneration } from '@/services/meetingPacket';
 import { log } from '@/services/logger';
@@ -216,6 +218,14 @@ export default function MeetingDetail() {
 
   const providerLabel = useMemo(() => chooseSummaryProviderLabel(meeting), [meeting]);
   const packetError = useMemo(() => formatPacketError(meeting?.lastError), [meeting?.lastError]);
+  const cloudState = useMemo(
+    () =>
+      describeMainaKnowledgeCloudSyncStatus({
+        status: meeting?.knowledgeCloudSyncStatus ?? 'local_only',
+        error: meeting?.knowledgeCloudError,
+      }),
+    [meeting?.knowledgeCloudError, meeting?.knowledgeCloudSyncStatus],
+  );
 
   const loadTranscript = useCallback(async (meetingId: string) => {
     const [page, summary] = await Promise.all([
@@ -592,6 +602,13 @@ export default function MeetingDetail() {
     await refresh();
   };
 
+  const queueCloudSync = async () => {
+    if (!id) return;
+    await maybeQueueMainaKnowledgeCloudSync(id);
+    await refresh();
+    load();
+  };
+
   const header = (
     <View style={{ gap: space.xl, paddingHorizontal: 16, paddingTop: space.xl, paddingBottom: space.xl }}>
       {meeting ? (
@@ -721,6 +738,7 @@ export default function MeetingDetail() {
 
   const overviewSections = [
     'summary',
+    'cloud',
     'decisions',
     'questions',
     'todos',
@@ -812,6 +830,54 @@ export default function MeetingDetail() {
                 ) : (
                   <AppText variant="body" muted>No decisions were extracted yet.</AppText>
                 )}
+              </Card>
+            );
+          }
+
+          if (item === 'cloud') {
+            const canRetryCloud =
+              meeting?.knowledgeCloudSyncStatus === 'local_only'
+              || meeting?.knowledgeCloudSyncStatus === 'sync_failed_retryable'
+              || meeting?.knowledgeCloudSyncStatus === 'sync_blocked_budget';
+
+            return (
+              <Card style={{ gap: space.md, marginBottom: space.lg }}>
+                <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', gap: space.md }}>
+                  <AppText variant="heading">Maina Knowledge Cloud</AppText>
+                  <Chip
+                    label={cloudState.label}
+                    tone={
+                      cloudState.tone === 'warn'
+                        ? 'warn'
+                        : cloudState.tone === 'primary'
+                          ? 'primary'
+                          : 'muted'
+                    }
+                  />
+                </View>
+                <AppText variant="body" muted>{cloudState.detail}</AppText>
+                {meeting?.knowledgeCloudSourceKey ? (
+                  <AppText variant="meta" muted>
+                    Source key: {meeting.knowledgeCloudSourceKey}
+                  </AppText>
+                ) : null}
+                {canRetryCloud ? (
+                  <View style={{ gap: space.md }}>
+                    <PrimaryButton
+                      label={meeting?.knowledgeCloudSyncStatus === 'local_only' ? 'Sync this meeting now' : 'Retry cloud sync'}
+                      onPress={() => void queueCloudSync()}
+                    />
+                    {meeting?.knowledgeCloudSyncStatus === 'local_only' ? (
+                      <ActionLink label="Open cloud settings" color={theme.primary} onPress={() => router.push('/settings')} />
+                    ) : null}
+                  </View>
+                ) : null}
+                {meeting?.knowledgeCloudSyncStatus === 'sync_succeeded' ? (
+                  <SecondaryButton
+                    label="Open cloud settings"
+                    onPress={() => router.push('/settings')}
+                  />
+                ) : null}
               </Card>
             );
           }

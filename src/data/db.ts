@@ -126,6 +126,16 @@ const MIGRATIONS: Migration[] = [
     CREATE INDEX IF NOT EXISTS idx_todo_items_done
       ON todo_items(done ASC, updated_at DESC);`);
   },
+  // v7 — Maina Knowledge Cloud sync state and frozen payload snapshot.
+  async (db) => {
+    await addColumnIfMissing(db, 'meetings', 'knowledge_cloud_sync_status', `TEXT NOT NULL DEFAULT 'local_only'`);
+    await addColumnIfMissing(db, 'meetings', 'knowledge_cloud_source_key', 'TEXT');
+    await addColumnIfMissing(db, 'meetings', 'knowledge_cloud_payload_json', 'TEXT');
+    await addColumnIfMissing(db, 'meetings', 'knowledge_cloud_synced_at', 'INTEGER');
+    await addColumnIfMissing(db, 'meetings', 'knowledge_cloud_last_attempt_at', 'INTEGER');
+    await addColumnIfMissing(db, 'meetings', 'knowledge_cloud_error', 'TEXT');
+    await addColumnIfMissing(db, 'meetings', 'knowledge_cloud_canonical_sha256', 'TEXT');
+  },
 ];
 
 export async function initDb(): Promise<void> {

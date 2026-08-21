@@ -53,6 +53,7 @@ import { recordingDir, segmentIndexFromUri, segmentPath } from '@/hardware/recor
 import { registerActiveTriggerHandler } from '@/hardware/trigger/hardwareTrigger';
 import { resolveRemoteAction } from '@/hardware/trigger/remoteControl';
 import { log } from '@/services/logger';
+import { maybeQueueMainaKnowledgeCloudSync } from '@/services/mainaKnowledgeCloud';
 import { runLocalAsrPipeline } from '@/services/localAsrPipeline';
 import {
   clearDiagnosticContext,
@@ -970,8 +971,11 @@ export default function RecordScreen() {
       }
       await refresh();
       if (hasText) {
-        void maybeQueueMeetingPacket(id).catch((cause) => {
+        await maybeQueueMeetingPacket(id).catch((cause) => {
           log.warn('summary', 'automatic packet queue failed', { meetingId: id, err: String(cause) });
+        });
+        void maybeQueueMainaKnowledgeCloudSync(id).catch((cause) => {
+          log.warn('maina-cloud', 'automatic cloud sync queue failed', { meetingId: id, err: String(cause) });
         });
       }
       log.info('record', 'meeting saved', {

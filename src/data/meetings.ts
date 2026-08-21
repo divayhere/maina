@@ -16,6 +16,15 @@ export type MeetingStatus =
   | 'summarized';
 
 export type SummaryStatus = 'idle' | 'queued' | 'running' | 'ready' | 'failed';
+export type KnowledgeCloudSyncStatus =
+  | 'local_only'
+  | 'sync_queued'
+  | 'syncing'
+  | 'sync_succeeded'
+  | 'sync_failed_retryable'
+  | 'sync_failed_conflict'
+  | 'sync_failed_validation'
+  | 'sync_blocked_budget';
 
 export interface Meeting {
   id: string;
@@ -40,6 +49,13 @@ export interface Meeting {
   updatedAt: number;
   lastError?: string | null;
   restartCount: number;
+  knowledgeCloudSyncStatus: KnowledgeCloudSyncStatus;
+  knowledgeCloudSourceKey?: string | null;
+  knowledgeCloudPayloadJson?: string | null;
+  knowledgeCloudSyncedAt?: number | null;
+  knowledgeCloudLastAttemptAt?: number | null;
+  knowledgeCloudError?: string | null;
+  knowledgeCloudCanonicalSha256?: string | null;
 }
 
 interface Row {
@@ -65,6 +81,13 @@ interface Row {
   updated_at: number;
   last_error: string | null;
   restart_count: number;
+  knowledge_cloud_sync_status: KnowledgeCloudSyncStatus;
+  knowledge_cloud_source_key: string | null;
+  knowledge_cloud_payload_json: string | null;
+  knowledge_cloud_synced_at: number | null;
+  knowledge_cloud_last_attempt_at: number | null;
+  knowledge_cloud_error: string | null;
+  knowledge_cloud_canonical_sha256: string | null;
 }
 
 function parseJsonList(value: string | null | undefined): string[] {
@@ -112,6 +135,13 @@ const toMeeting = (r: Row): Meeting => ({
   updatedAt: r.updated_at || r.started_at,
   lastError: r.last_error,
   restartCount: r.restart_count ?? 0,
+  knowledgeCloudSyncStatus: r.knowledge_cloud_sync_status ?? 'local_only',
+  knowledgeCloudSourceKey: r.knowledge_cloud_source_key,
+  knowledgeCloudPayloadJson: r.knowledge_cloud_payload_json,
+  knowledgeCloudSyncedAt: r.knowledge_cloud_synced_at,
+  knowledgeCloudLastAttemptAt: r.knowledge_cloud_last_attempt_at,
+  knowledgeCloudError: r.knowledge_cloud_error,
+  knowledgeCloudCanonicalSha256: r.knowledge_cloud_canonical_sha256,
 });
 
 export interface TodoItem {
@@ -352,6 +382,34 @@ export async function listMeetingsEligibleForSummaryQueue(): Promise<Meeting[]> 
   return rows.map(toMeeting);
 }
 
+export async function listMeetingsNeedingKnowledgeCloudSync(): Promise<Meeting[]> {
+  const db = await getDb();
+  const rows = await db.getAllAsync<Row>(
+    `SELECT m.*,
+            (SELECT COUNT(*) FROM todo_items t WHERE t.meeting_id = m.id AND t.done = 0) AS open_todo_count,
+            (SELECT COUNT(*) FROM todo_items t WHERE t.meeting_id = m.id) AS total_todo_count
+     FROM meetings m
+     WHERE m.knowledge_cloud_sync_status IN ('sync_queued', 'syncing', 'sync_failed_retryable', 'sync_blocked_budget')
+     ORDER BY m.started_at DESC`,
+  );
+  return rows.map(toMeeting);
+}
+
+export async function listMeetingsEligibleForKnowledgeCloudQueue(): Promise<Meeting[]> {
+  const db = await getDb();
+  const rows = await db.getAllAsync<Row>(
+    `SELECT m.*,
+            (SELECT COUNT(*) FROM todo_items t WHERE t.meeting_id = m.id AND t.done = 0) AS open_todo_count,
+            (SELECT COUNT(*) FROM todo_items t WHERE t.meeting_id = m.id) AS total_todo_count
+     FROM meetings m
+     WHERE m.status IN ('transcribed', 'summarized')
+       AND m.summary_status NOT IN ('queued', 'running')
+       AND m.knowledge_cloud_sync_status IN ('local_only', 'sync_failed_retryable', 'sync_blocked_budget')
+     ORDER BY m.started_at DESC`,
+  );
+  return rows.map(toMeeting);
+}
+
 export async function updateMeeting(id: string, patch: Partial<Meeting>): Promise<void> {
   const map: Record<string, string> = {
     title: 'title',
@@ -372,6 +430,13 @@ export async function updateMeeting(id: string, patch: Partial<Meeting>): Promis
     updatedAt: 'updated_at',
     lastError: 'last_error',
     restartCount: 'restart_count',
+    knowledgeCloudSyncStatus: 'knowledge_cloud_sync_status',
+    knowledgeCloudSourceKey: 'knowledge_cloud_source_key',
+    knowledgeCloudPayloadJson: 'knowledge_cloud_payload_json',
+    knowledgeCloudSyncedAt: 'knowledge_cloud_synced_at',
+    knowledgeCloudLastAttemptAt: 'knowledge_cloud_last_attempt_at',
+    knowledgeCloudError: 'knowledge_cloud_error',
+    knowledgeCloudCanonicalSha256: 'knowledge_cloud_canonical_sha256',
   };
   const cols: string[] = [];
   const vals: (string | number | null)[] = [];
