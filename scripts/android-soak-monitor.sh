@@ -76,9 +76,9 @@ snapshot() {
   local now battery level temperature voltage available_kb pid pss title text audio_mode
   now="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
   battery="$(adb_shell dumpsys battery 2>/dev/null || true)"
-  level="$(printf '%s\n' "$battery" | awk '/level:/{print $2; exit}')"
-  temperature="$(printf '%s\n' "$battery" | awk '/temperature:/{print $2; exit}')"
-  voltage="$(printf '%s\n' "$battery" | awk '/voltage:/{print $2; exit}')"
+  level="$(printf '%s\n' "$battery" | awk '$1 == "level:" {print $2; exit}')"
+  temperature="$(printf '%s\n' "$battery" | awk '$1 == "temperature:" {print $2; exit}')"
+  voltage="$(printf '%s\n' "$battery" | awk '$1 == "voltage:" {print $2; exit}')"
   available_kb="$(adb_shell df -k /data/user/0 2>/dev/null | awk 'NR==2 {print $4}')"
   pid="$(adb_shell pidof "$PACKAGE" 2>/dev/null | awk '{print $1}')"
   if [[ -n "$pid" ]]; then
@@ -203,8 +203,19 @@ adb_shell "nohup sh -c 'sleep $DURATION_SECONDS; am broadcast -a com.divay.maina
 snapshot "recording-started"
 echo "Recording detected. Stop-and-save is scheduled for $(date -r "$recording_deadline" '+%Y-%m-%d %H:%M:%S %Z')."
 
-while (( $(date +%s) < recording_deadline )); do
-  sleep 60
+while true; do
+  remaining=$(( recording_deadline - $(date +%s) ))
+  if (( remaining <= 0 )); then
+    break
+  fi
+  sleep_for=60
+  if (( remaining < sleep_for )); then
+    sleep_for="$remaining"
+  fi
+  sleep "$sleep_for"
+  if (( $(date +%s) >= recording_deadline )); then
+    break
+  fi
   if "$ADB" get-state >/dev/null 2>&1; then
     snapshot "recording"
     title="$(notification_title || true)"
@@ -249,8 +260,16 @@ snapshot "recording-stopped"
 echo "Recording stopped safely. Observing transcription/packet work for $POST_STOP_SECONDS more seconds."
 
 post_deadline=$(( $(date +%s) + POST_STOP_SECONDS ))
-while (( $(date +%s) < post_deadline )); do
-  sleep 60
+while true; do
+  remaining=$(( post_deadline - $(date +%s) ))
+  if (( remaining <= 0 )); then
+    break
+  fi
+  sleep_for=60
+  if (( remaining < sleep_for )); then
+    sleep_for="$remaining"
+  fi
+  sleep "$sleep_for"
   if "$ADB" get-state >/dev/null 2>&1; then
     snapshot "post-processing"
   else
