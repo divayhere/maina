@@ -2,7 +2,7 @@ import {
   getMeeting,
   getTranscriptPage,
   listMeetingTodos,
-  listMeetingsEligibleForKnowledgeCloudQueue,
+  listMeetingsEligibleForKnowledgeCloudQueueWithOptions,
   listMeetingsNeedingKnowledgeCloudSync,
   updateMeeting,
   type Meeting,
@@ -153,6 +153,14 @@ async function syncMeetingToMainaKnowledgeCloud(meetingId: string): Promise<void
       return;
     }
 
+    if (result.outcome === 'auth_failed') {
+      await updateMeeting(meetingId, {
+        knowledgeCloudSyncStatus: 'sync_failed_auth',
+        knowledgeCloudError: result.message,
+      });
+      return;
+    }
+
     if (result.outcome === 'conflict') {
       await updateMeeting(meetingId, {
         knowledgeCloudSyncStatus: 'sync_failed_conflict',
@@ -205,12 +213,15 @@ export function runMainaKnowledgeCloudSync(meetingId: string): Promise<void> {
   return task;
 }
 
-export async function maybeQueueMainaKnowledgeCloudSync(meetingId: string): Promise<boolean> {
+export async function maybeQueueMainaKnowledgeCloudSync(
+  meetingId: string,
+  options?: { includeAuthFailures?: boolean },
+): Promise<boolean> {
   const settings = await getMainaKnowledgeCloudSettings();
   if (!settings.enabled || !settings.baseUrl.trim() || !settings.token.trim()) return false;
 
   const meeting = await getMeeting(meetingId);
-  if (!meeting || !isMeetingEligibleForMainaKnowledgeCloudSync(meeting)) return false;
+  if (!meeting || !isMeetingEligibleForMainaKnowledgeCloudSync(meeting, options)) return false;
 
   const frozen = await freezePayloadSnapshot(meeting);
   if (!frozen) return false;
@@ -224,14 +235,16 @@ export async function maybeQueueMainaKnowledgeCloudSync(meetingId: string): Prom
   return true;
 }
 
-export async function queueEligibleMainaKnowledgeCloudSyncs(): Promise<number> {
+export async function queueEligibleMainaKnowledgeCloudSyncs(options?: {
+  includeAuthFailures?: boolean;
+}): Promise<number> {
   const settings = await getMainaKnowledgeCloudSettings();
   if (!settings.enabled || !settings.baseUrl.trim() || !settings.token.trim()) return 0;
 
-  const meetings = await listMeetingsEligibleForKnowledgeCloudQueue();
+  const meetings = await listMeetingsEligibleForKnowledgeCloudQueueWithOptions(options);
   let queued = 0;
   for (const meeting of meetings) {
-    if (await maybeQueueMainaKnowledgeCloudSync(meeting.id)) {
+    if (await maybeQueueMainaKnowledgeCloudSync(meeting.id, options)) {
       queued += 1;
     }
   }

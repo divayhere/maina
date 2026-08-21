@@ -306,7 +306,9 @@ export default function SettingsScreen() {
     try {
       const next = await saveMainaKnowledgeCloudSettings(knowledgeCloudSettings);
       setKnowledgeCloudSettings(next);
-      const queued = next.enabled ? await queueEligibleMainaKnowledgeCloudSyncs().catch(() => 0) : 0;
+      const queued = next.enabled
+        ? await queueEligibleMainaKnowledgeCloudSyncs({ includeAuthFailures: true }).catch(() => 0)
+        : 0;
       setCloudSaveState('saved');
       setCloudSaveMessage(
         next.enabled

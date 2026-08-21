@@ -3,6 +3,7 @@ export type MainaKnowledgeCloudSyncStatus =
   | 'sync_queued'
   | 'syncing'
   | 'sync_succeeded'
+  | 'sync_failed_auth'
   | 'sync_failed_retryable'
   | 'sync_failed_conflict'
   | 'sync_failed_validation'
@@ -89,6 +90,7 @@ export type MainaKnowledgeCloudSourcePackage = {
 
 export type MainaKnowledgeCloudResponseClassification =
   | { outcome: 'success'; canonicalSha256?: string | null }
+  | { outcome: 'auth_failed'; message: string }
   | { outcome: 'conflict'; message: string }
   | { outcome: 'validation'; message: string }
   | { outcome: 'blocked_budget'; message: string }
@@ -126,6 +128,7 @@ export function mainaKnowledgeCloudSourceKey(meetingId: string) {
 
 export function isMeetingEligibleForMainaKnowledgeCloudSync(
   meeting: MainaKnowledgeCloudMeetingShape,
+  options?: { includeAuthFailures?: boolean },
 ) {
   if (meeting.knowledgeCloudSyncStatus === 'sync_succeeded') return false;
   if (meeting.knowledgeCloudSyncStatus === 'sync_failed_conflict') return false;
@@ -137,6 +140,8 @@ export function isMeetingEligibleForMainaKnowledgeCloudSync(
       || meeting.knowledgeCloudSyncStatus === 'syncing'
       || meeting.knowledgeCloudSyncStatus === 'sync_failed_retryable'
       || meeting.knowledgeCloudSyncStatus === 'sync_blocked_budget'
+      || (options?.includeAuthFailures === true
+        && meeting.knowledgeCloudSyncStatus === 'sync_failed_auth')
       || meeting.knowledgeCloudSyncStatus === 'local_only'
     );
   }
@@ -236,6 +241,9 @@ export function classifyMainaKnowledgeCloudResponse(input: {
   }
 
   const message = body?.error?.message ?? `Maina Knowledge Cloud request failed with ${input.status}.`;
+  if (input.status === 401 || input.status === 403) {
+    return { outcome: 'auth_failed', message };
+  }
   if (input.status === 409) return { outcome: 'conflict', message };
   if (input.status === 422) return { outcome: 'validation', message };
   if (input.status === 503 && body?.error?.code === 'budget_guardrail_blocked') {
@@ -251,6 +259,8 @@ export function describeMainaKnowledgeCloudSyncStatus(input: {
   switch (input.status) {
     case 'sync_succeeded':
       return { label: 'Synced to cloud', detail: 'This meeting is stored in Maina Knowledge Cloud.', tone: 'primary' as MainaKnowledgeCloudTone };
+    case 'sync_failed_auth':
+      return { label: 'Cloud access needs attention', detail: input.error ?? 'Maina Knowledge Cloud rejected the saved access token. Update Settings before retrying.', tone: 'warn' as MainaKnowledgeCloudTone };
     case 'sync_queued':
       return { label: 'Waiting to sync', detail: 'This meeting is queued for Maina Knowledge Cloud.', tone: 'muted' as MainaKnowledgeCloudTone };
     case 'syncing':

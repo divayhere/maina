@@ -21,6 +21,7 @@ export type KnowledgeCloudSyncStatus =
   | 'sync_queued'
   | 'syncing'
   | 'sync_succeeded'
+  | 'sync_failed_auth'
   | 'sync_failed_retryable'
   | 'sync_failed_conflict'
   | 'sync_failed_validation'
@@ -396,7 +397,16 @@ export async function listMeetingsNeedingKnowledgeCloudSync(): Promise<Meeting[]
 }
 
 export async function listMeetingsEligibleForKnowledgeCloudQueue(): Promise<Meeting[]> {
+  return listMeetingsEligibleForKnowledgeCloudQueueWithOptions();
+}
+
+export async function listMeetingsEligibleForKnowledgeCloudQueueWithOptions(options?: {
+  includeAuthFailures?: boolean;
+}): Promise<Meeting[]> {
   const db = await getDb();
+  const eligibleStatuses = options?.includeAuthFailures
+    ? `'local_only', 'sync_failed_auth', 'sync_failed_retryable', 'sync_blocked_budget'`
+    : `'local_only', 'sync_failed_retryable', 'sync_blocked_budget'`;
   const rows = await db.getAllAsync<Row>(
     `SELECT m.*,
             (SELECT COUNT(*) FROM todo_items t WHERE t.meeting_id = m.id AND t.done = 0) AS open_todo_count,
@@ -404,7 +414,7 @@ export async function listMeetingsEligibleForKnowledgeCloudQueue(): Promise<Meet
      FROM meetings m
      WHERE m.status IN ('transcribed', 'summarized')
        AND m.summary_status NOT IN ('queued', 'running')
-       AND m.knowledge_cloud_sync_status IN ('local_only', 'sync_failed_retryable', 'sync_blocked_budget')
+       AND m.knowledge_cloud_sync_status IN (${eligibleStatuses})
      ORDER BY m.started_at DESC`,
   );
   return rows.map(toMeeting);

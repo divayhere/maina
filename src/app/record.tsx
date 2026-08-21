@@ -83,6 +83,11 @@ interface EndWaiter {
   timer: ReturnType<typeof setTimeout>;
 }
 
+interface AndroidLanguageSwitchEvent {
+  languageSwitchResult?: string;
+  languageSwitchResultCode?: number;
+}
+
 interface AsrQualityMetrics {
   finalResults: number;
   partialResults: number;
@@ -393,18 +398,21 @@ export default function RecordScreen() {
 
   useSpeechRecognitionEvent('languagedetection', (event) => {
     lastEventRef.current = Date.now();
+    // Android includes these optional language-switch diagnostics at runtime,
+    // but expo-speech-recognition's public event type does not declare them.
+    const androidEvent = event as typeof event & AndroidLanguageSwitchEvent;
     const language = event.detectedLanguage?.toLocaleLowerCase() ?? 'unknown';
     if (event.detectedLanguage) detectedLanguageRef.current = event.detectedLanguage;
     const quality = asrQualityRef.current;
     if (language.startsWith('en')) quality.detectedEnglish += 1;
     if (language.startsWith('hi')) quality.detectedHindi += 1;
-    if (event.languageSwitchResult === 'succeeded') quality.languageSwitchSucceeded += 1;
-    if (event.languageSwitchResult === 'failed' || event.languageSwitchResult === 'skipped-no-model-or-not-allowed') {
+    if (androidEvent.languageSwitchResult === 'succeeded') quality.languageSwitchSucceeded += 1;
+    if (androidEvent.languageSwitchResult === 'failed' || androidEvent.languageSwitchResult === 'skipped-no-model-or-not-allowed') {
       quality.languageSwitchFailed += 1;
     }
     const now = Date.now();
-    const important = event.languageSwitchResult === 'succeeded' ||
-      event.languageSwitchResult === 'failed' ||
+    const important = androidEvent.languageSwitchResult === 'succeeded' ||
+      androidEvent.languageSwitchResult === 'failed' ||
       (event.confidence ?? 0) >= 0.8;
     const changed = lastLanguageLogRef.current.language !== language;
     if (!important && !changed && now - lastLanguageLogRef.current.at < 10_000) return;
@@ -413,8 +421,8 @@ export default function RecordScreen() {
       language: event.detectedLanguage,
       confidence: event.confidence,
       alternatives: event.topLocaleAlternatives,
-      switchResult: event.languageSwitchResult,
-      switchResultCode: event.languageSwitchResultCode,
+      switchResult: androidEvent.languageSwitchResult,
+      switchResultCode: androidEvent.languageSwitchResultCode,
       allowedLanguages: ACTIVE_LANGUAGES,
     });
   });

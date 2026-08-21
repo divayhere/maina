@@ -839,6 +839,7 @@ export default function MeetingDetail() {
               meeting?.knowledgeCloudSyncStatus === 'local_only'
               || meeting?.knowledgeCloudSyncStatus === 'sync_failed_retryable'
               || meeting?.knowledgeCloudSyncStatus === 'sync_blocked_budget';
+            const needsCloudSettings = meeting?.knowledgeCloudSyncStatus === 'sync_failed_auth';
 
             return (
               <Card style={{ gap: space.md, marginBottom: space.lg }}>
@@ -871,6 +872,12 @@ export default function MeetingDetail() {
                       <ActionLink label="Open cloud settings" color={theme.primary} onPress={() => router.push('/settings')} />
                     ) : null}
                   </View>
+                ) : null}
+                {needsCloudSettings ? (
+                  <SecondaryButton
+                    label="Open cloud settings"
+                    onPress={() => router.push('/settings')}
+                  />
                 ) : null}
                 {meeting?.knowledgeCloudSyncStatus === 'sync_succeeded' ? (
                   <SecondaryButton

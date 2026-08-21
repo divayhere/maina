@@ -14,6 +14,11 @@ export interface MainaNotification {
 
 function syncFailureCopy(status: KnowledgeCloudSyncStatus, error?: string | null) {
   switch (status) {
+    case 'sync_failed_auth':
+      return {
+        title: 'Cloud token needs updating',
+        body: error ?? 'Maina Knowledge Cloud rejected the saved access token. Update cloud settings and retry.',
+      };
     case 'sync_failed_conflict':
       return {
         title: 'Cloud sync conflict',

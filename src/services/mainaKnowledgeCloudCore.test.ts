@@ -56,6 +56,23 @@ describe('mainaKnowledgeCloudCore', () => {
     ).toBe(true);
   });
 
+  it('does not auto-retry auth failures until settings change', () => {
+    const authFailedMeeting = {
+      ...baseMeeting,
+      status: 'recorded',
+      summaryStatus: 'failed',
+      knowledgeCloudSyncStatus: 'sync_failed_auth' as const,
+      knowledgeCloudPayloadJson: '{"schema_version":"mkc.source.v1"}',
+    };
+
+    expect(isMeetingEligibleForMainaKnowledgeCloudSync(authFailedMeeting)).toBe(false);
+    expect(
+      isMeetingEligibleForMainaKnowledgeCloudSync(authFailedMeeting, {
+        includeAuthFailures: true,
+      }),
+    ).toBe(true);
+  });
+
   it('builds a canonical source package from meeting data', () => {
     const payload = buildMainaKnowledgeCloudSourcePackage({
       meeting: baseMeeting,
@@ -88,6 +105,15 @@ describe('mainaKnowledgeCloudCore', () => {
     });
     expect(
       classifyMainaKnowledgeCloudResponse({
+        status: 401,
+        body: { error: { message: 'invalid token' } },
+      }),
+    ).toEqual({
+      outcome: 'auth_failed',
+      message: 'invalid token',
+    });
+    expect(
+      classifyMainaKnowledgeCloudResponse({
         status: 503,
         body: { error: { code: 'budget_guardrail_blocked', message: 'budget paused' } },
       }),
@@ -100,5 +126,6 @@ describe('mainaKnowledgeCloudCore', () => {
   it('describes sync status in user-facing language', () => {
     expect(describeMainaKnowledgeCloudSyncStatus({ status: 'sync_succeeded' }).label).toBe('Synced to cloud');
     expect(describeMainaKnowledgeCloudSyncStatus({ status: 'local_only' }).label).toBe('Only on this phone');
+    expect(describeMainaKnowledgeCloudSyncStatus({ status: 'sync_failed_auth' }).label).toBe('Cloud access needs attention');
   });
 });
