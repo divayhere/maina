@@ -41,6 +41,7 @@ yarn-error.*
 modules/*/android/build/
 maina-knowledge-cloud/
 tmp-installed-base.apk
+.artifacts/
 
 # typescript
 *.tsbuildinfo

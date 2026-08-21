@@ -2,6 +2,12 @@
 
 This file is the durable source of truth for what is built, what has automated evidence, and what still requires a Pixel test. Update it in the same change as every feature.
 
+## Controlled long-session qualification preparation — 2026-08-22
+
+`scripts/android-soak-monitor.sh` is now the release-mode Pixel soak harness. It does not start the meeting itself: it waits for a real locked-screen clicker start, timestamps the observed `Maina is recording` state, resets battery statistics, captures logcat plus one-minute battery/temperature/memory/storage/audio-permission heartbeats, and schedules redundant stop-and-save commands on both the phone and Mac after the requested duration. It then observes post-call transcription and packet work before collecting final Android evidence.
+
+The harness passed Bash syntax, failure-path argument checks, repository diff checks, and a live preflight against the installed Pixel/Maina 0.10.5 state. The actual three-hour run remains the qualification gate; adding a harness is not evidence that the app passed the soak.
+
 ## Local implementation status — 2026-08-19
 
 The following batch is now implemented locally and has passed the automated release gate. No APK was built from this batch yet.
@@ -10,11 +16,11 @@ The following batch is now implemented locally and has passed the automated rele
 |---:|---|---|---|---|
 | 1 | Long-transcript safety and recovery viewer | Implemented | Transcript blocks added; Record screen now keeps only a small live tail; meeting detail moved to paged `FlashList`; interrupted meetings route to a lightweight recovery screen first | Multi-hour open/scroll/export on device |
 | 2 | Durable native recording diagnostics | Implemented | Native service heartbeat, storage snapshot, retained-audio accounting, and diagnostics purge path compile and pass release verification | Confirm Supabase/Sentry timelines during real long captures |
-| 3 | Long-session QA gate | Partially implemented | New release verifier and QC matrix added; automated gates pass | Full Pixel soak protocol still required |
+| 3 | Long-session QA gate | Harness implemented; qualification pending | Release verifier, QC matrix, and `scripts/android-soak-monitor.sh` preflight pass | Complete the controlled three-hour Pixel run and inspect its evidence |
 | 4 | Timestamp-ready transcript schema | Implemented | SQLite migration v5 adds `transcript_blocks` with timestamps/language/speaker seam; repository helpers and tests pass | Verify timestamps remain usable across long sessions |
 | 5 | Optional later speaker diarization seam | Implemented as seam only | Schema/UI accept nullable `speakerId`; no fake labels rendered | Future diarization engine only |
 | 6 | Storage-pressure resilience and staging cleanup controls | Implemented for staging | Shared storage budget gate, maintainer cleanup actions, and purge APIs compile and pass tests | Validate low-space behavior on device |
-| 7 | Battery and performance budget gate | Partially implemented | Native heartbeat includes memory/storage process signals; release verifier passes | Collect armed-idle and recording battery evidence on Pixel |
+| 7 | Battery and performance budget gate | Instrumented; qualification pending | Native heartbeat plus soak harness capture battery, temperature, voltage, PSS, free storage, audio AppOps and final batterystats | Collect and assess the three-hour Pixel evidence |
 
 ### Known remaining software-level tradeoffs before the next APK
 
