@@ -3,6 +3,7 @@ package com.divay.maina.recorder
 import android.content.ContentValues
 import android.content.Context
 import android.database.sqlite.SQLiteDatabase
+import android.os.Build
 import java.io.File
 
 internal object MainaDatabasePathResolver {
@@ -15,6 +16,37 @@ internal object MainaDatabasePathResolver {
             expoDatabasePath.isFile -> expoDatabasePath
             legacyDatabasePath.isFile -> legacyDatabasePath
             else -> expoDatabasePath
+        }
+    }
+}
+
+internal object MainaDatabaseConnectionConfigurator {
+    const val BUSY_TIMEOUT_MS = 5_000
+
+    enum class BusyTimeoutMode {
+        PER_CONNECTION,
+        QUERY_FALLBACK,
+    }
+
+    fun busyTimeoutMode(sdkInt: Int): BusyTimeoutMode =
+        if (sdkInt >= Build.VERSION_CODES.R) {
+            BusyTimeoutMode.PER_CONNECTION
+        } else {
+            BusyTimeoutMode.QUERY_FALLBACK
+        }
+
+    fun configure(db: SQLiteDatabase, sdkInt: Int = Build.VERSION.SDK_INT) {
+        // Use the framework API so foreign-key enforcement is applied to the
+        // database connection pool, not only whichever connection happens to
+        // execute a PRAGMA statement.
+        db.setForeignKeyConstraintsEnabled(true)
+
+        val sql = "PRAGMA busy_timeout = $BUSY_TIMEOUT_MS"
+        when (busyTimeoutMode(sdkInt)) {
+            BusyTimeoutMode.PER_CONNECTION -> db.execPerConnectionSQL(sql, null)
+            BusyTimeoutMode.QUERY_FALLBACK -> db.rawQuery(sql, null).use { cursor ->
+                check(cursor.moveToFirst()) { "SQLite did not apply the busy timeout" }
+            }
         }
     }
 }
@@ -261,8 +293,7 @@ internal class MainaAppDatabase(private val context: Context) {
         )
         require(path.isFile) { "Maina database is not initialized yet" }
         return SQLiteDatabase.openDatabase(path.path, null, SQLiteDatabase.OPEN_READWRITE).apply {
-            execSQL("PRAGMA foreign_keys = ON")
-            execSQL("PRAGMA busy_timeout = 5000")
+            MainaDatabaseConnectionConfigurator.configure(this)
         }
     }
 
