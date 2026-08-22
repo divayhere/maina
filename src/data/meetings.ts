@@ -1017,6 +1017,7 @@ export async function importNativePostProcessingResult(input: {
     hasText || input.windowCount === 0 ? null : 'Local transcription produced no text.'
   );
 
+  let didImport = false;
   await db.withExclusiveTransactionAsync(async (transaction) => {
     const inTransaction = await transaction.getFirstAsync<{ native_postprocess_run_id: string | null }>(
       'SELECT native_postprocess_run_id FROM meetings WHERE id = ?',
@@ -1082,7 +1083,9 @@ export async function importNativePostProcessingResult(input: {
         input.meetingId,
       ],
     );
+    didImport = true;
   });
+  if (!didImport) return 'already_imported';
   log.info('meetings', 'native post-processing result imported', {
     meetingId: input.meetingId,
     runId: input.runId,

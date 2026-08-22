@@ -206,10 +206,10 @@ internal class MainaPostProcessingService : Service() {
                     "MainaPostProcessing",
                     "Chunk start meetingId=$meetingId chunkIndex=$chunkIndex chunkDurationMs=$chunkDurationMs windows=${windows.size} uri=$uri",
                 )
-                windows.forEach { window ->
+                windows.forEachIndexed { windowIndex, window ->
                     Log.i(
                         "MainaPostProcessing",
-                        "Window start meetingId=$meetingId chunkIndex=$chunkIndex windowIndex=${window.index} startMs=${window.startMs} endMs=${window.endMs}",
+                        "Window start meetingId=$meetingId chunkIndex=$chunkIndex windowIndex=$windowIndex startMs=${window.startMs} endMs=${window.endMs}",
                     )
                     try {
                         val result = asr.transcribe(uri, window.startMs, window.endMs)
@@ -225,13 +225,13 @@ internal class MainaPostProcessingService : Service() {
                             }
                             Log.w(
                                 "MainaPostProcessing",
-                                "Window suspicious meetingId=$meetingId chunkIndex=$chunkIndex windowIndex=${window.index} speechExpected=${result.speechExpected} truncationSuspected=${result.truncationSuspected} language=${result.language} processingMs=${result.processingMs}",
+                                "Window suspicious meetingId=$meetingId chunkIndex=$chunkIndex windowIndex=$windowIndex speechExpected=${result.speechExpected} truncationSuspected=${result.truncationSuspected} language=${result.language} processingMs=${result.processingMs}",
                             )
                         } else {
                             completedWindows += 1
                             Log.i(
                                 "MainaPostProcessing",
-                                "Window done meetingId=$meetingId chunkIndex=$chunkIndex windowIndex=${window.index} language=${result.language} processingMs=${result.processingMs} chars=${text.length}",
+                                "Window done meetingId=$meetingId chunkIndex=$chunkIndex windowIndex=$windowIndex language=${result.language} processingMs=${result.processingMs} chars=${text.length}",
                             )
                         }
                         if (text.isNotBlank()) {
@@ -252,7 +252,7 @@ internal class MainaPostProcessingService : Service() {
                         lastError = error.message ?: error.javaClass.simpleName
                         Log.w(
                             "MainaPostProcessing",
-                            "Window failed meetingId=$meetingId chunkIndex=$chunkIndex windowIndex=${window.index} message=${lastError}",
+                            "Window failed meetingId=$meetingId chunkIndex=$chunkIndex windowIndex=$windowIndex message=${lastError}",
                             error,
                         )
                     }
