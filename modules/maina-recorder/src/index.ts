@@ -84,11 +84,33 @@ export interface NativeCaptureDirectoryInspection {
 export interface NativePostProcessingRequest {
   meetingId: string;
   directory: string;
+  meetingStartedAt?: number;
   captureEndedAt?: number;
   wallDurationMs?: number;
   audioDurationMs?: number;
   routeRestartCount?: number;
   captureGapMs?: number;
+}
+
+export interface NativePostProcessingResult {
+  meetingId: string;
+  runId: string;
+  state: 'running' | 'complete' | 'deferred' | string;
+  active: boolean;
+  meetingStartedAt: number;
+  captureEndedAt?: number | null;
+  durationMs: number;
+  audioDurationMs: number;
+  segmentCount: number;
+  processedSegments: number;
+  windowCount: number;
+  completedWindows: number;
+  failedWindows: number;
+  routeRestartCount: number;
+  captureGapMs: number;
+  lastError?: string | null;
+  updatedAt: number;
+  blocks: Array<{ sequence: number; segmentIndex: number; startedAt: number; endedAt: number; language: string; text: string }>;
 }
 
 export interface QwenAsrStatus {
@@ -221,12 +243,14 @@ interface MainaRecorderNativeModule {
     directory: string,
     sourceMode: NativeCaptureSourceMode,
     chunkDurationMs: number,
+    meetingStartedAt: number,
   ): Promise<{ requested: boolean }>;
   pauseNativeCapture(): Promise<{ requested: boolean }>;
   resumeNativeCapture(): Promise<{ requested: boolean }>;
   stopNativeCapture(): Promise<{ requested: boolean }>;
   abortNativeCapture(): Promise<{ requested: boolean }>;
   startNativePostProcessing(request: NativePostProcessingRequest): Promise<{ requested: boolean }>;
+  readNativePostProcessingResult(meetingId: string): Promise<NativePostProcessingResult | null>;
   getNativeCaptureStatus(): NativeCaptureStatus;
   inspectNativeCaptureDirectory(directory: string, recoverPartials: boolean): Promise<NativeCaptureDirectoryInspection>;
   getQwenAsrStatus(): Promise<QwenAsrStatus>;

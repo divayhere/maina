@@ -1,6 +1,16 @@
-import { getMeeting, listMeetings, updateMeeting, type Meeting } from '@/data/meetings';
+import {
+  getMeeting,
+  importNativePostProcessingResult,
+  listMeetings,
+  updateMeeting,
+  type Meeting,
+} from '@/data/meetings';
 import { completedCaptureDurationRepair } from '@/core/recording/checkpoint';
-import { getNativeCaptureStatus, startNativePostProcessing } from '@/hardware/recording/foreground';
+import {
+  getNativeCaptureStatus,
+  readNativePostProcessingResult,
+  startNativePostProcessing,
+} from '@/hardware/recording/foreground';
 import { log } from '@/services/logger';
 import { getNativeCaptureMetrics } from '@/services/nativeCaptureMetrics';
 
@@ -31,6 +41,7 @@ async function launchNativePostProcessing(meeting: Meeting) {
     await startNativePostProcessing({
       meetingId: meeting.id,
       directory: meeting.audioUri,
+      meetingStartedAt: meeting.startedAt,
       captureEndedAt: metrics.stoppedAt ?? undefined,
       wallDurationMs: metrics.wallDurationMs,
       audioDurationMs: metrics.audioDurationMs,
@@ -64,6 +75,37 @@ export async function reconcilePendingNativeMeetingWork(): Promise<number> {
   let resumed = 0;
 
   for (const meeting of meetings) {
+    const nativeResult = await readNativePostProcessingResult(meeting.id).catch((cause) => {
+      log.warn('recovery', 'native post-processing outbox read failed', {
+        meetingId: meeting.id,
+        err: String(cause),
+      });
+      return null;
+    });
+    if (nativeResult?.state === 'complete') {
+      const imported = await importNativePostProcessingResult({
+        meetingId: nativeResult.meetingId,
+        runId: nativeResult.runId,
+        captureEndedAt: nativeResult.captureEndedAt,
+        durationMs: nativeResult.durationMs,
+        audioDurationMs: nativeResult.audioDurationMs,
+        segmentCount: nativeResult.segmentCount,
+        processedSegments: nativeResult.processedSegments,
+        windowCount: nativeResult.windowCount,
+        completedWindows: nativeResult.completedWindows,
+        failedWindows: nativeResult.failedWindows,
+        routeRestartCount: nativeResult.routeRestartCount,
+        lastError: nativeResult.lastError,
+        blocks: nativeResult.blocks,
+      });
+      log.info('recovery', 'native post-processing outbox reconciled', {
+        meetingId: meeting.id,
+        runId: nativeResult.runId,
+        imported,
+        blocks: nativeResult.blocks.length,
+      });
+      continue;
+    }
     const repairedDurationMs = completedCaptureDurationRepair(meeting);
     if (repairedDurationMs != null) {
       await updateMeeting(meeting.id, { durationMs: repairedDurationMs });
@@ -78,6 +120,7 @@ export async function reconcilePendingNativeMeetingWork(): Promise<number> {
       && nativeStatus.state !== 'idle'
       && nativeStatus.state !== 'error';
     if (isLiveNativeMeeting) continue;
+    if (nativeResult?.active) continue;
     if (!meeting.audioUri) continue;
 
     if (meeting.status === 'recording') {

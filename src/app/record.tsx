@@ -615,6 +615,7 @@ export default function RecordScreen() {
             directory: dir,
             sourceMode: 'voice_recognition',
             chunkDurationMs: MAX_FILE_MS,
+            meetingStartedAt: startedAtRef.current,
           });
           // The microphone is owned by the foreground service, not the React
           // runtime.  Do not make starting a recording depend on a JS polling
@@ -624,10 +625,12 @@ export default function RecordScreen() {
           lastEventRef.current = sessionStartedAtRef.current;
           listeningRef.current = true;
           setListening(true);
-          showCaptureNote(qwenStatus?.ready
-            ? 'Maina is recording safely. Notes come after you stop.'
-            : 'Maina is recording safely. Speech setup is still finishing in the background.',
-          10_000);
+          // Recording state is expressed by the live pulse and timer. Do not
+          // add a second, stale speech-status banner: the final transcript is
+          // deliberately post-call and audio-route changes stay invisible.
+          if (!qwenStatus?.ready) {
+            log.warn('asr', 'local ASR setup is not ready at capture start');
+          }
           log.info('record', 'meeting capture started', {
             language: 'auto',
             segmentMinutes: MAX_FILE_MS / 60000,
@@ -1103,7 +1106,7 @@ export default function RecordScreen() {
           {paused ? 'Paused' : 'Listening'}
         </AppText>
         <AppText variant="body" muted style={styles.center}>
-          Keep your phone where it can hear the conversation. Your notes and to-dos come soon after you stop.
+          Keep your phone where it can hear the conversation. Maina keeps the audio safe on this phone and writes the transcript after you stop.
         </AppText>
       </View>
 
@@ -1132,13 +1135,7 @@ export default function RecordScreen() {
             ) : null}
           </ScrollView>
         </Card>
-      ) : (
-        <Banner tone="info" style={{ marginBottom: space.md }}>
-          <AppText variant="body" muted style={styles.center}>
-            Maina keeps the audio locally. Transcript appears after you stop.
-          </AppText>
-        </Banner>
-      )}
+      ) : null}
 
       <View style={{ paddingBottom: insets.bottom + space.lg, gap: space.md }}>
         <PrimaryButton label="Stop and save" onPress={stopAndSave} />
@@ -1149,7 +1146,7 @@ export default function RecordScreen() {
           </AppText>
         </Pressable>
         <AppText variant="body" muted style={styles.center}>
-          Recordings are stored on this phone.
+          Recordings stay on this phone first.
         </AppText>
       </View>
     </View>

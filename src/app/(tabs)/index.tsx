@@ -1,7 +1,7 @@
 import { Ionicons } from '@expo/vector-icons';
 import { router, useFocusEffect } from 'expo-router';
-import { useCallback, useMemo, useState } from 'react';
-import { FlatList, Pressable, TextInput, View } from 'react-native';
+import { useCallback, useEffect, useMemo, useState } from 'react';
+import { AppState, FlatList, Pressable, TextInput, View } from 'react-native';
 
 import { AppText, Banner, Card, Chip, EmptyState, SectionLabel } from '@/design/components';
 import { DrawerMenu } from '@/design/shell';
@@ -124,6 +124,13 @@ export default function MeetingsScreen() {
       return () => clearInterval(timer);
     }, [refresh]),
   );
+
+  useEffect(() => {
+    const subscription = AppState.addEventListener('change', (state) => {
+      if (state === 'active') void refresh();
+    });
+    return () => subscription.remove();
+  }, [refresh]);
 
   const filtered = useMemo(() => {
     const needle = query.trim().toLowerCase();

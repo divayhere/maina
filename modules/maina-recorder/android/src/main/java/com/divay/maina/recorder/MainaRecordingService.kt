@@ -44,6 +44,7 @@ class MainaRecordingService : Service() {
     private lateinit var nativeCapture: MainaNativeAudioCapture
     @Volatile private var lastCaptureMeetingId: String? = null
     @Volatile private var lastCaptureDirectory: String? = null
+    @Volatile private var lastCaptureStartedAt: Long = 0L
     @Volatile private var postProcessingHandledMeetingId: String? = null
     private val serviceStartedAtMs = SystemClock.elapsedRealtime()
     private val heartbeatRunnable = object : Runnable {
@@ -108,6 +109,7 @@ class MainaRecordingService : Service() {
         const val EXTRA_CAPTURE_DIRECTORY = "captureDirectory"
         const val EXTRA_SOURCE_MODE = "sourceMode"
         const val EXTRA_CHUNK_DURATION_MS = "chunkDurationMs"
+        const val EXTRA_MEETING_STARTED_AT = "meetingStartedAt"
 
         @Volatile
         var isRunning: Boolean = false
@@ -228,9 +230,12 @@ class MainaRecordingService : Service() {
                 val sourceMode = intent.getStringExtra(EXTRA_SOURCE_MODE) ?: "voice_recognition"
                 val chunkDurationMs = intent.getStringExtra(EXTRA_CHUNK_DURATION_MS)?.toLongOrNull()
                     ?: intent.getLongExtra(EXTRA_CHUNK_DURATION_MS, 5 * 60_000L)
+                val meetingStartedAt = intent.getStringExtra(EXTRA_MEETING_STARTED_AT)?.toLongOrNull()
+                    ?: intent.getLongExtra(EXTRA_MEETING_STARTED_AT, System.currentTimeMillis())
                 val operationId = captureOperationSequence.incrementAndGet().also { latestCaptureOperation = it }
                 lastCaptureMeetingId = meetingId
                 lastCaptureDirectory = directory
+                lastCaptureStartedAt = meetingStartedAt
                 postProcessingHandledMeetingId = null
                 nativeCaptureStatus = mapOf(
                     "state" to "starting",
@@ -318,6 +323,7 @@ class MainaRecordingService : Service() {
                             putExtra(MainaPostProcessingService.EXTRA_MEETING_ID, meetingId)
                             putExtra(MainaPostProcessingService.EXTRA_DIRECTORY, directory)
                             putExtra(MainaPostProcessingService.EXTRA_CAPTURE_ENDED_AT, System.currentTimeMillis())
+                            putExtra(MainaPostProcessingService.EXTRA_MEETING_STARTED_AT, lastCaptureStartedAt)
                             putExtra(
                                 MainaPostProcessingService.EXTRA_ROUTE_RESTART_COUNT,
                                 snapshot.routeRestartCount,
@@ -336,7 +342,18 @@ class MainaRecordingService : Service() {
                         }.onFailure { cause ->
                             val message = cause.message ?: cause.javaClass.simpleName
                             runCatching {
-                                MainaAppDatabase(applicationContext).markTranscriptionDeferred(
+                                MainaPostProcessingOutbox.shared(applicationContext).begin(
+                                    meetingId,
+                                    lastCaptureStartedAt,
+                                    System.currentTimeMillis(),
+                                    0L,
+                                    0L,
+                                    0,
+                                    0,
+                                    snapshot.routeRestartCount,
+                                    snapshot.captureGapMs,
+                                )
+                                MainaPostProcessingOutbox.shared(applicationContext).defer(
                                     meetingId,
                                     "Saved audio is waiting for local transcription: $message",
                                 )
@@ -365,6 +382,7 @@ class MainaRecordingService : Service() {
                         postProcessingHandledMeetingId = snapshot.meetingId ?: lastCaptureMeetingId
                         lastCaptureMeetingId = null
                         lastCaptureDirectory = null
+                        lastCaptureStartedAt = 0L
                     },
                 )
             }

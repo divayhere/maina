@@ -9,7 +9,12 @@ import { log } from '../services/logger';
 let dbPromise: Promise<SQLite.SQLiteDatabase> | null = null;
 
 export function getDb(): Promise<SQLite.SQLiteDatabase> {
-  if (!dbPromise) dbPromise = SQLite.openDatabaseAsync('maina.db');
+  // Android can keep the app process alive while React Native recreates its
+  // runtime. expo-sqlite SDK 57 has an open issue around reusing a cached
+  // native handle across that lifecycle. One fresh connection per JS runtime
+  // avoids inheriting a released/poisoned handle; `dbPromise` still keeps one
+  // connection for the lifetime of this runtime.
+  if (!dbPromise) dbPromise = SQLite.openDatabaseAsync('maina.db', { useNewConnection: true });
   return dbPromise;
 }
 
@@ -171,6 +176,13 @@ const MIGRATIONS: Migration[] = [
     await addColumnIfMissing(db, 'meetings', 'transcription_window_count', 'INTEGER NOT NULL DEFAULT 0');
     await addColumnIfMissing(db, 'meetings', 'transcription_completed_windows', 'INTEGER NOT NULL DEFAULT 0');
     await addColumnIfMissing(db, 'meetings', 'transcription_failed_windows', 'INTEGER NOT NULL DEFAULT 0');
+  },
+  // v10 — native ASR writes to an isolated native outbox, then the foreground
+  // app imports one immutable run into expo-sqlite. The imported run id makes
+  // app restarts/retries idempotent without sharing SQLite handles.
+  async (db) => {
+    await addColumnIfMissing(db, 'meetings', 'native_postprocess_run_id', 'TEXT');
+    await addColumnIfMissing(db, 'meetings', 'native_postprocess_imported_at', 'INTEGER');
   },
 ];
 

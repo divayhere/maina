@@ -103,7 +103,7 @@ class MainaRecorderModule : Module() {
 
         // These calls are deliberately separate from Expo SpeechRecognizer.
         // They are the staged bridge for the service-owned AudioRecord engine.
-        AsyncFunction("startNativeCapture") { meetingId: String, directory: String, sourceMode: String, chunkDurationMs: Long ->
+        AsyncFunction("startNativeCapture") { meetingId: String, directory: String, sourceMode: String, chunkDurationMs: Long, meetingStartedAt: Long ->
             require(meetingId.isNotBlank()) { "meetingId is required" }
             require(directory.isNotBlank()) { "directory is required" }
             startControlService(
@@ -114,6 +114,7 @@ class MainaRecorderModule : Module() {
                     MainaRecordingService.EXTRA_CAPTURE_DIRECTORY to directory,
                     MainaRecordingService.EXTRA_SOURCE_MODE to sourceMode,
                     MainaRecordingService.EXTRA_CHUNK_DURATION_MS to chunkDurationMs.toString(),
+                    MainaRecordingService.EXTRA_MEETING_STARTED_AT to meetingStartedAt.toString(),
                 ),
             )
             mapOf("requested" to true)
@@ -163,6 +164,9 @@ class MainaRecorderModule : Module() {
                 request["captureGapMs"]?.toString()?.toLongOrNull()?.let {
                     putExtra(MainaPostProcessingService.EXTRA_CAPTURE_GAP_MS, it)
                 }
+                request["meetingStartedAt"]?.toString()?.toLongOrNull()?.let {
+                    putExtra(MainaPostProcessingService.EXTRA_MEETING_STARTED_AT, it)
+                }
             }
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 requireContext().startForegroundService(intent)
@@ -170,6 +174,13 @@ class MainaRecorderModule : Module() {
                 requireContext().startService(intent)
             }
             mapOf("requested" to true)
+        }
+
+        AsyncFunction("readNativePostProcessingResult") { meetingId: String ->
+            MainaPostProcessingOutbox.shared(requireContext()).read(
+                meetingId,
+                MainaPostProcessingService.isProcessing(meetingId),
+            )
         }
 
         Function("getNativeCaptureStatus") {

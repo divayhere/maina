@@ -8,6 +8,7 @@ import {
   type NativeCaptureSourceMode,
   type NativeCaptureDirectoryInspection,
   type NativePostProcessingRequest,
+  type NativePostProcessingResult,
   type NativeCaptureStatus,
   type QwenAsrResult,
   type QwenAsrStatus,
@@ -49,12 +50,14 @@ export async function startNativeCapture(options: {
   directory: string;
   sourceMode?: NativeCaptureSourceMode;
   chunkDurationMs?: number;
+  meetingStartedAt: number;
 }): Promise<void> {
   await requireAndroidModule().startNativeCapture(
     options.meetingId,
     options.directory,
     options.sourceMode ?? 'voice_recognition',
     options.chunkDurationMs ?? 5 * 60_000,
+    options.meetingStartedAt,
   );
 }
 
@@ -76,6 +79,11 @@ export async function abortNativeCapture(): Promise<void> {
 
 export async function startNativePostProcessing(request: NativePostProcessingRequest): Promise<void> {
   await requireAndroidModule().startNativePostProcessing(request);
+}
+
+export async function readNativePostProcessingResult(meetingId: string): Promise<NativePostProcessingResult | null> {
+  if (Platform.OS !== 'android' || !MainaRecorder) return null;
+  return MainaRecorder.readNativePostProcessingResult(meetingId);
 }
 
 export function getNativeCaptureStatus(): NativeCaptureStatus | null {

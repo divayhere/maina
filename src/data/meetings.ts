@@ -119,6 +119,8 @@ export interface Meeting {
   knowledgeCloudLastAttemptAt?: number | null;
   knowledgeCloudError?: string | null;
   knowledgeCloudCanonicalSha256?: string | null;
+  nativePostprocessRunId?: string | null;
+  nativePostprocessImportedAt?: number | null;
 }
 
 interface Row {
@@ -156,6 +158,8 @@ interface Row {
   knowledge_cloud_last_attempt_at: number | null;
   knowledge_cloud_error: string | null;
   knowledge_cloud_canonical_sha256: string | null;
+  native_postprocess_run_id: string | null;
+  native_postprocess_imported_at: number | null;
 }
 
 function parseJsonList(value: string | null | undefined): string[] {
@@ -215,6 +219,8 @@ const toMeeting = (r: Row): Meeting => ({
   knowledgeCloudLastAttemptAt: r.knowledge_cloud_last_attempt_at,
   knowledgeCloudError: r.knowledge_cloud_error,
   knowledgeCloudCanonicalSha256: r.knowledge_cloud_canonical_sha256,
+  nativePostprocessRunId: r.native_postprocess_run_id,
+  nativePostprocessImportedAt: r.native_postprocess_imported_at,
 });
 
 export interface TodoItem {
@@ -684,6 +690,8 @@ export async function updateMeeting(id: string, patch: Partial<Meeting>): Promis
     knowledgeCloudLastAttemptAt: 'knowledge_cloud_last_attempt_at',
     knowledgeCloudError: 'knowledge_cloud_error',
     knowledgeCloudCanonicalSha256: 'knowledge_cloud_canonical_sha256',
+    nativePostprocessRunId: 'native_postprocess_run_id',
+    nativePostprocessImportedAt: 'native_postprocess_imported_at',
   };
   const cols: string[] = [];
   const vals: (string | number | null)[] = [];
@@ -961,6 +969,128 @@ export async function commitTranscriptFinalBlocks(input: {
     [input.meetingId, baseSequence, baseSequence + chunks.length],
   );
   return rows.map(toTranscriptBlock);
+}
+
+/**
+ * Imports one completed native-ASR run. Native background work never opens
+ * `maina.db`: it writes to its own outbox and this foreground-only transaction
+ * becomes the sole writer of Expo's database. A stable run id makes a retry
+ * harmless if Maina dies between import and acknowledgement.
+ */
+export async function importNativePostProcessingResult(input: {
+  meetingId: string;
+  runId: string;
+  durationMs: number;
+  audioDurationMs: number;
+  captureEndedAt?: number | null;
+  segmentCount: number;
+  processedSegments: number;
+  windowCount: number;
+  completedWindows: number;
+  failedWindows: number;
+  routeRestartCount: number;
+  lastError?: string | null;
+  blocks: Array<{
+    sequence: number;
+    segmentIndex?: number | null;
+    startedAt?: number | null;
+    endedAt?: number | null;
+    language?: string | null;
+    text: string;
+  }>;
+}): Promise<'imported' | 'already_imported'> {
+  const db = await getDb();
+  const current = await db.getFirstAsync<{ native_postprocess_run_id: string | null }>(
+    'SELECT native_postprocess_run_id FROM meetings WHERE id = ?',
+    [input.meetingId],
+  );
+  if (!current) return 'already_imported';
+  if (current.native_postprocess_run_id === input.runId) return 'already_imported';
+
+  const blocks = input.blocks
+    .map((block) => ({ ...block, text: block.text.trim() }))
+    .filter((block) => block.text.length > 0)
+    .sort((left, right) => left.sequence - right.sequence);
+  const now = Date.now();
+  const hasText = blocks.length > 0;
+  const finalError = input.lastError?.trim() || (
+    hasText || input.windowCount === 0 ? null : 'Local transcription produced no text.'
+  );
+
+  await db.withExclusiveTransactionAsync(async (transaction) => {
+    const inTransaction = await transaction.getFirstAsync<{ native_postprocess_run_id: string | null }>(
+      'SELECT native_postprocess_run_id FROM meetings WHERE id = ?',
+      [input.meetingId],
+    );
+    if (!inTransaction || inTransaction.native_postprocess_run_id === input.runId) return;
+
+    await transaction.runAsync('DELETE FROM transcript_blocks WHERE meeting_id = ?', [input.meetingId]);
+    // AI-derived packet content must not pretend it describes a changed raw
+    // transcript. Keep manually-created tasks, but clear machine-generated
+    // tasks so the normal auto-summary path can recreate them truthfully.
+    await transaction.runAsync(
+      "DELETE FROM todo_items WHERE meeting_id = ? AND origin = 'ai'",
+      [input.meetingId],
+    );
+    for (const block of blocks) {
+      await transaction.runAsync(
+        `INSERT INTO transcript_blocks
+          (block_id, meeting_id, sequence, status, segment_index, started_at, ended_at, language, speaker_id, text, word_count, char_count, created_at, updated_at)
+         VALUES (?, ?, ?, 'final', ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?)`,
+        [
+          `native-${input.runId}-${block.sequence}`,
+          input.meetingId,
+          block.sequence,
+          block.segmentIndex ?? null,
+          block.startedAt ?? null,
+          block.endedAt ?? null,
+          block.language ?? 'auto',
+          block.text,
+          transcriptWordCount(block.text),
+          block.text.length,
+          now,
+          now,
+        ],
+      );
+    }
+    await transaction.runAsync(
+      `UPDATE meetings
+       SET duration_ms = ?, audio_duration_ms = ?, capture_ended_at = ?,
+           segment_count = ?, transcribed_segments = ?,
+           transcription_window_count = ?, transcription_completed_windows = ?,
+           transcription_failed_windows = ?, restart_count = ?,
+           transcript = NULL, language = 'auto',
+           status = ?, summary = NULL, decisions_json = NULL, open_questions_json = NULL,
+           summary_status = 'idle', summary_provider_id = NULL, summary_model = NULL, summarized_at = NULL,
+           last_error = ?, native_postprocess_run_id = ?, native_postprocess_imported_at = ?, updated_at = ?
+       WHERE id = ?`,
+      [
+        Math.max(0, input.durationMs),
+        Math.max(0, input.audioDurationMs),
+        input.captureEndedAt ?? null,
+        Math.max(0, input.segmentCount),
+        Math.max(0, input.processedSegments),
+        Math.max(0, input.windowCount),
+        Math.max(0, input.completedWindows),
+        Math.max(0, input.failedWindows),
+        Math.max(0, input.routeRestartCount),
+        hasText ? 'transcribed' : 'recorded',
+        finalError,
+        input.runId,
+        now,
+        now,
+        input.meetingId,
+      ],
+    );
+  });
+  log.info('meetings', 'native post-processing result imported', {
+    meetingId: input.meetingId,
+    runId: input.runId,
+    blocks: blocks.length,
+    completedWindows: input.completedWindows,
+    failedWindows: input.failedWindows,
+  });
+  return 'imported';
 }
 
 export async function getTranscriptPage(

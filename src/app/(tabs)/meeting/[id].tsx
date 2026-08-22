@@ -5,7 +5,7 @@ import { FlashList } from '@shopify/flash-list';
 import { router, useFocusEffect, useLocalSearchParams } from 'expo-router';
 import { useSpeechRecognitionEvent } from 'expo-speech-recognition';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ActivityIndicator, Alert, Pressable, StyleSheet, TextInput, View } from 'react-native';
+import { ActivityIndicator, Alert, AppState, Pressable, StyleSheet, TextInput, View } from 'react-native';
 
 import { chooseRecognitionLanguage, startFileSession, stopSession, supportsOnDevice } from '@/core/transcription/nativeSpeech';
 import { appendWithoutOverlap } from '@/core/transcription/transcript';
@@ -314,6 +314,16 @@ export default function MeetingDetail() {
   }, [allowInterrupted, id, loadTranscript]);
 
   useFocusEffect(useCallback(() => { load(); }, [load]));
+
+  useEffect(() => {
+    const subscription = AppState.addEventListener('change', (state) => {
+      if (state === 'active') {
+        load();
+        refresh();
+      }
+    });
+    return () => subscription.remove();
+  }, [load, refresh]);
 
   useEffect(() => {
     if (!meeting) return;
