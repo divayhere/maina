@@ -80,6 +80,16 @@ export interface NativeCaptureDirectoryInspection {
   journalUri?: string | null;
 }
 
+export interface NativePostProcessingRequest {
+  meetingId: string;
+  directory: string;
+  captureEndedAt?: number;
+  wallDurationMs?: number;
+  audioDurationMs?: number;
+  routeRestartCount?: number;
+  captureGapMs?: number;
+}
+
 export interface QwenAsrStatus {
   ready: boolean;
   root: string;
@@ -214,6 +224,8 @@ interface MainaRecorderNativeModule {
   pauseNativeCapture(): Promise<{ requested: boolean }>;
   resumeNativeCapture(): Promise<{ requested: boolean }>;
   stopNativeCapture(): Promise<{ requested: boolean }>;
+  abortNativeCapture(): Promise<{ requested: boolean }>;
+  startNativePostProcessing(request: NativePostProcessingRequest): Promise<{ requested: boolean }>;
   getNativeCaptureStatus(): NativeCaptureStatus;
   inspectNativeCaptureDirectory(directory: string, recoverPartials: boolean): Promise<NativeCaptureDirectoryInspection>;
   getQwenAsrStatus(): Promise<QwenAsrStatus>;

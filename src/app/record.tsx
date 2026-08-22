@@ -23,7 +23,6 @@ import {
   deleteMeeting,
   discardTranscriptDraftBlock,
   finishRecordingSegment,
-  getTranscriptSummary,
   newId,
   startRecordingSegment,
   type TranscriptBlock,
@@ -35,6 +34,7 @@ import { useMainaLayout } from '@/design/layout';
 import { useAppTheme } from '@/design/theme';
 import { space } from '@/design/tokens';
 import {
+  abortNativeCapture,
   getNativeCaptureStatus,
   getQwenAsrStatus,
   listAudioInputs,
@@ -53,17 +53,14 @@ import { recordingDir, segmentIndexFromUri, segmentPath } from '@/hardware/recor
 import { registerActiveTriggerHandler } from '@/hardware/trigger/hardwareTrigger';
 import { resolveRemoteAction } from '@/hardware/trigger/remoteControl';
 import { log } from '@/services/logger';
-import { maybeQueueMainaKnowledgeCloudSync } from '@/services/mainaKnowledgeCloud';
-import { runLocalAsrPipeline } from '@/services/localAsrPipeline';
+import { getNativeCaptureMetrics } from '@/services/nativeCaptureMetrics';
 import {
   clearDiagnosticContext,
-  finalizeDiagnosticRun,
   flushDiagnostics,
   getDiagnosticsStatus,
   queueAudioArtifact,
   setDiagnosticContext,
 } from '@/services/remoteLog';
-import { maybeQueueMeetingPacket } from '@/services/meetingPacket';
 import { ensureStorageBudget } from '@/services/storageBudget';
 import { useMeetings } from '@/state/meetingsStore';
 import { formatDuration, formatTime } from '@/utils/format';
@@ -179,7 +176,6 @@ export default function RecordScreen() {
   const pausedRef = useRef(false);
   const controlBusyRef = useRef(false);
   const detectedLanguageRef = useRef('en-IN');
-  const captureStopAcknowledgedRef = useRef(false);
   const captureNoteTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const [recentBlocks, setRecentBlocks] = useState<TranscriptBlock[]>([]);
@@ -251,13 +247,6 @@ export default function RecordScreen() {
     });
   };
 
-  const transcribeNativeCapture = (recoverPartials: boolean) => runLocalAsrPipeline({
-    meetingId: idRef.current,
-    directory: dirRef.current,
-    meetingStartedAt: startedAtRef.current,
-    recoverPartials,
-    onBlocks: pushRecentBlocks,
-  });
   const persist = (force = false): Promise<void> => {
     if (!meetingCreatedRef.current) return Promise.resolve();
     const now = Date.now();
@@ -534,7 +523,6 @@ export default function RecordScreen() {
         await FileSystem.makeDirectoryAsync(dir, { intermediates: true });
         dirRef.current = dir;
         if (CAPTURE_ENGINE === 'native-qwen') {
-          captureStopAcknowledgedRef.current = false;
           langRef.current = 'auto';
           detectedLanguageRef.current = 'auto';
         } else {
@@ -757,6 +745,31 @@ export default function RecordScreen() {
         // after a locked-screen command. The service is the source of truth;
         // JS may have been paused while a clicker command completed.
         const status = getNativeCaptureStatus();
+        if (status?.state === 'idle' && meetingCreatedRef.current) {
+          void (async () => {
+            const metrics = dirRef.current
+              ? await getNativeCaptureMetrics(dirRef.current, true).catch(() => null)
+              : null;
+            activeRef.current = false;
+            listeningRef.current = false;
+            setListening(false);
+            setPaused(false);
+            if (metrics) {
+              await updateMeeting(idRef.current, {
+                durationMs: metrics.wallDurationMs,
+                audioDurationMs: metrics.audioDurationMs,
+                captureEndedAt: metrics.stoppedAt ?? Date.now(),
+                segmentCount: metrics.finalizedUris.length,
+                restartCount: metrics.routeRestartCount,
+                status: metrics.finalizedUris.length > 0 ? 'transcribing' : 'interrupted',
+                lastError: metrics.captureGapMs > 0 ? `Capture gap detected: ${metrics.captureGapMs}ms` : null,
+              }).catch(() => {});
+            }
+            await refresh();
+            router.replace(`/meeting/${idRef.current}`);
+          })();
+          return;
+        }
         if (status?.state === 'paused') {
           pausedRef.current = true;
           setPaused(true);
@@ -889,19 +902,16 @@ export default function RecordScreen() {
     await finalizeTranscriptText(interimRef.current);
     if (CAPTURE_ENGINE === 'native-qwen') {
       showCaptureNote('Saving audio and starting local transcription...', 60_000);
-      let captureStopAcknowledged = false;
       await stopNativeCapture().then(async () => {
         const finalStatus = await waitForNativeCaptureState(getNativeCaptureStatus, 'idle', {
           timeoutMs: 20_000,
         });
-        captureStopAcknowledged = true;
         log.info('record', 'native capture finalization acknowledged', { nativeStatus: finalStatus });
       }).catch((cause) => {
         log.error('record', 'native capture stop failed', { err: String(cause) });
       });
       listeningRef.current = false;
       setListening(false);
-      captureStopAcknowledgedRef.current = captureStopAcknowledged;
     } else if (!pausedRef.current) {
       const endPromise = waitForRecognizerEnd();
       const audioEndPromise = waitForAudioEnd();
@@ -913,56 +923,24 @@ export default function RecordScreen() {
     try {
       await transcriptChainRef.current.catch(() => {});
       await persist(true);
-      const nativeTranscription = CAPTURE_ENGINE === 'native-qwen'
-        ? await transcribeNativeCapture(captureStopAcknowledgedRef.current)
-        : null;
-      const transcriptSummary = await getTranscriptSummary(id);
-      const hasText = transcriptSummary.hasText;
-      const transcriptComplete = nativeTranscription?.coverageComplete ?? hasText;
-      await updateMeeting(id, {
-        transcript: null,
-        status: hasText ? 'transcribed' : 'recorded',
-        ...(hasText && transcriptComplete ? { lastError: null } : {}),
-      });
-      const endedAt = Date.now();
-      await artifactQueueRef.current.catch(() => {});
-      try {
-        const health = healthRef.current.snapshot(endedAt);
-        const quality = asrQualityRef.current;
-        await finalizeDiagnosticRun({
-          runId: recordingSessionIdRef.current,
-          meetingId: id,
-          startedAt: new Date(startedAtRef.current).toISOString(),
-          endedAt: new Date(endedAt).toISOString(),
-          status: hasText && transcriptComplete ? 'transcribed' : 'recorded',
-          wallDurationMs: endedAt - startedAtRef.current,
-          audioDurationMs: health.audioDurationMs,
-          expectedSegments: health.expectedSegments,
-          closedSegments: health.closedSegments,
-          uploadedSegments: 0,
-          transcriptWords: transcriptSummary.wordCount,
-          recognizerRestarts: restartCountRef.current,
-          recognizerDowntimeMs: health.recognizerDowntimeMs,
-            measuredGapMs: health.measuredGapMs,
-            payload: {
-              language: langRef.current,
-              allowedLanguages: ACTIVE_LANGUAGES,
-              failedSegments: health.failedSegments,
-              largestGapMs: health.largestGapMs,
-              pausedDurationMs: health.pausedDurationMs,
-              activeDurationMs: Math.max(0, endedAt - startedAtRef.current - health.pausedDurationMs),
-              nativeTranscription,
-              asrQuality: quality.confidenceSamples > 0
-                ? { ...quality, averageConfidence: quality.confidenceTotal / quality.confidenceSamples }
-                : quality,
-              uploadedSegmentsMeasuredAt: 'run-finalization-before-background-worker',
-              captureOwner: CAPTURE_ENGINE,
-              foregroundServiceRole: 'process-priority-and-microphone-disclosure',
-            },
+      if (CAPTURE_ENGINE === 'native-qwen' && dirRef.current) {
+        const metrics = await getNativeCaptureMetrics(dirRef.current, true).catch((cause) => {
+          log.warn('record', 'native capture metrics unavailable during save', { err: String(cause) });
+          return null;
         });
-      } catch (cause) {
-        log.warn('remote', 'meeting artifacts remained local for later diagnostics retry', { err: String(cause) });
+        if (metrics) {
+          await updateMeeting(id, {
+            durationMs: metrics.wallDurationMs,
+            audioDurationMs: metrics.audioDurationMs,
+            captureEndedAt: metrics.stoppedAt ?? Date.now(),
+            segmentCount: metrics.finalizedUris.length,
+            restartCount: metrics.routeRestartCount,
+            status: metrics.finalizedUris.length > 0 ? 'transcribing' : 'interrupted',
+            lastError: metrics.captureGapMs > 0 ? `Capture gap detected: ${metrics.captureGapMs}ms` : null,
+          });
+        }
       }
+      await artifactQueueRef.current.catch(() => {});
       await flushDiagnostics().catch((cause) => {
         log.warn('remote', 'diagnostics flush failed after save', { err: String(cause) });
       });
@@ -976,17 +954,8 @@ export default function RecordScreen() {
         });
       }
       await refresh();
-      if (hasText) {
-        await maybeQueueMeetingPacket(id).catch((cause) => {
-          log.warn('summary', 'automatic packet queue failed', { meetingId: id, err: String(cause) });
-        });
-        void maybeQueueMainaKnowledgeCloudSync(id).catch((cause) => {
-          log.warn('maina-cloud', 'automatic cloud sync queue failed', { meetingId: id, err: String(cause) });
-        });
-      }
       log.info('record', 'meeting saved', {
         durationMs: Date.now() - startedAtRef.current,
-        words: transcriptSummary.wordCount,
         files: sessionRef.current + 1,
         restarts: restartCountRef.current,
       });
@@ -1030,7 +999,11 @@ export default function RecordScreen() {
     pausedRef.current = false;
     if (restartTimerRef.current) clearTimeout(restartTimerRef.current);
     if (CAPTURE_ENGINE === 'native-qwen') {
-      await stopNativeCapture().catch(() => {});
+      await abortNativeCapture()
+        .then(() => waitForNativeCaptureState(getNativeCaptureStatus, 'idle', { timeoutMs: 20_000 }))
+        .catch((cause) => {
+          log.warn('record', 'native discard finalization was not acknowledged', { err: String(cause) });
+        });
     } else if (!savingRef.current && !pausedRef.current && listeningRef.current) {
       const audioEndPromise = waitForAudioEnd();
       abortSession();

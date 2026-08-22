@@ -14,7 +14,26 @@ import { countActionableNotifications } from '@/services/notifications';
 import { useMeetings } from '@/state/meetingsStore';
 import { formatDate, formatDuration, formatTime } from '@/utils/format';
 
-function describeState(item: Meeting): { label: string; tone: 'primary' | 'warn' | 'live' | 'muted'; detail?: string; working?: boolean } {
+function describeTranscriptionProgress(item: Meeting): { detail?: string; progress?: number } {
+  if (item.transcriptionWindowCount > 0) {
+    const completed = item.transcriptionCompletedWindows + item.transcriptionFailedWindows;
+    const progress = Math.max(0, Math.min(1, completed / item.transcriptionWindowCount));
+    return {
+      detail: `${Math.round(progress * 100)}% complete`,
+      progress,
+    };
+  }
+  if (item.transcribedSegments > 0 && item.segmentCount > 0) {
+    const progress = Math.max(0, Math.min(1, item.transcribedSegments / item.segmentCount));
+    return {
+      detail: `${item.transcribedSegments} of ${item.segmentCount} audio files complete`,
+      progress,
+    };
+  }
+  return {};
+}
+
+function describeState(item: Meeting): { label: string; tone: 'primary' | 'warn' | 'live' | 'muted'; detail?: string; working?: boolean; progress?: number } {
   if (item.status === 'recording') return { label: 'Recording now', tone: 'live', working: true };
   if (item.status === 'interrupted') return { label: 'Recording was cut short', tone: 'warn', detail: 'We saved what we could. Tap to fix.' };
   if (item.summaryStatus === 'failed') return { label: "Notes didn't come through", tone: 'warn', detail: 'Your transcript is safe.' };
@@ -23,11 +42,13 @@ function describeState(item: Meeting): { label: string; tone: 'primary' | 'warn'
     return { label: 'Writing your notes', tone: 'primary', working: true };
   }
   if (item.status === 'transcribing') {
+    const progress = describeTranscriptionProgress(item);
     return {
       label: 'Getting the text ready',
       tone: 'primary',
-      detail: item.transcribedSegments > 0 && item.segmentCount > 0 ? `${item.transcribedSegments} parts complete` : undefined,
+      detail: progress.detail,
       working: true,
+      progress: progress.progress,
     };
   }
   if (item.status === 'recorded') return { label: 'Saved', tone: 'muted', detail: 'Not written up yet.' };
@@ -79,7 +100,7 @@ function MeetingRow({ item }: { item: Meeting }) {
 
           {state.working ? (
             <View style={{ height: 6, borderRadius: radius.pill, backgroundColor: theme.mutedSoft, overflow: 'hidden' }}>
-              <View style={{ width: '26%', height: '100%', borderRadius: radius.pill, backgroundColor: theme.primary }} />
+              <View style={{ width: `${Math.max(0.08, state.progress ?? 0.26) * 100}%`, height: '100%', borderRadius: radius.pill, backgroundColor: theme.primary }} />
             </View>
           ) : null}
         </Card>
@@ -97,6 +118,10 @@ export default function MeetingsScreen() {
   useFocusEffect(
     useCallback(() => {
       void refresh();
+      const timer = setInterval(() => {
+        void refresh();
+      }, 3_000);
+      return () => clearInterval(timer);
     }, [refresh]),
   );
 

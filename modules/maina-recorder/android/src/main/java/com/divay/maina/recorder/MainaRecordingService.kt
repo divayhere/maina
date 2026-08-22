@@ -42,6 +42,9 @@ class MainaRecordingService : Service() {
     private val captureOperationSequence = AtomicLong(0L)
     @Volatile private var latestCaptureOperation = 0L
     private lateinit var nativeCapture: MainaNativeAudioCapture
+    @Volatile private var lastCaptureMeetingId: String? = null
+    @Volatile private var lastCaptureDirectory: String? = null
+    @Volatile private var postProcessingHandledMeetingId: String? = null
     private val serviceStartedAtMs = SystemClock.elapsedRealtime()
     private val heartbeatRunnable = object : Runnable {
         override fun run() {
@@ -99,6 +102,7 @@ class MainaRecordingService : Service() {
         const val ACTION_PAUSE_NATIVE_CAPTURE = "com.divay.maina.recorder.PAUSE_NATIVE_CAPTURE"
         const val ACTION_RESUME_NATIVE_CAPTURE = "com.divay.maina.recorder.RESUME_NATIVE_CAPTURE"
         const val ACTION_STOP_NATIVE_CAPTURE = "com.divay.maina.recorder.STOP_NATIVE_CAPTURE"
+        const val ACTION_ABORT_NATIVE_CAPTURE = "com.divay.maina.recorder.ABORT_NATIVE_CAPTURE"
         const val EXTRA_CAPTURE_STATE = "captureState"
         const val EXTRA_MEETING_ID = "meetingId"
         const val EXTRA_CAPTURE_DIRECTORY = "captureDirectory"
@@ -225,6 +229,9 @@ class MainaRecordingService : Service() {
                 val chunkDurationMs = intent.getStringExtra(EXTRA_CHUNK_DURATION_MS)?.toLongOrNull()
                     ?: intent.getLongExtra(EXTRA_CHUNK_DURATION_MS, 5 * 60_000L)
                 val operationId = captureOperationSequence.incrementAndGet().also { latestCaptureOperation = it }
+                lastCaptureMeetingId = meetingId
+                lastCaptureDirectory = directory
+                postProcessingHandledMeetingId = null
                 nativeCaptureStatus = mapOf(
                     "state" to "starting",
                     "meetingId" to meetingId,
@@ -278,14 +285,88 @@ class MainaRecordingService : Service() {
                 }
             }
             ACTION_PAUSE_NATIVE_CAPTURE -> {
-                submitCaptureCommand("pausing", "paused") { nativeCapture.pause() }
+                submitCaptureCommand(
+                    pendingState = "pausing",
+                    successfulCaptureState = "paused",
+                    operation = { nativeCapture.pause() },
+                )
             }
             ACTION_RESUME_NATIVE_CAPTURE -> {
-                submitCaptureCommand("resuming", "recording") { nativeCapture.resume() }
+                submitCaptureCommand(
+                    pendingState = "resuming",
+                    successfulCaptureState = "recording",
+                    operation = { nativeCapture.resume() },
+                )
             }
             ACTION_STOP_NATIVE_CAPTURE -> {
                 setCaptureState("finalizing")
-                submitCaptureCommand("finalizing", "idle") { nativeCapture.stop() }
+                submitCaptureCommand(
+                    pendingState = "finalizing",
+                    successfulCaptureState = "idle",
+                    operation = { nativeCapture.stop() },
+                    onSuccess = { snapshot ->
+                        val meetingId = snapshot.meetingId ?: lastCaptureMeetingId ?: return@submitCaptureCommand
+                        val directory = lastCaptureDirectory ?: return@submitCaptureCommand
+                        // Stop commands can arrive more than once (notification,
+                        // clicker, JS cleanup). A meeting must enter native ASR
+                        // only once or a late duplicate would erase and rebuild
+                        // an already completed transcript.
+                        if (postProcessingHandledMeetingId == meetingId) return@submitCaptureCommand
+                        postProcessingHandledMeetingId = meetingId
+                        val intent = Intent(this, MainaPostProcessingService::class.java).apply {
+                            action = MainaPostProcessingService.ACTION_START
+                            putExtra(MainaPostProcessingService.EXTRA_MEETING_ID, meetingId)
+                            putExtra(MainaPostProcessingService.EXTRA_DIRECTORY, directory)
+                            putExtra(MainaPostProcessingService.EXTRA_CAPTURE_ENDED_AT, System.currentTimeMillis())
+                            putExtra(
+                                MainaPostProcessingService.EXTRA_ROUTE_RESTART_COUNT,
+                                snapshot.routeRestartCount,
+                            )
+                            putExtra(
+                                MainaPostProcessingService.EXTRA_CAPTURE_GAP_MS,
+                                snapshot.captureGapMs,
+                            )
+                        }
+                        runCatching {
+                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                                startForegroundService(intent)
+                            } else {
+                                startService(intent)
+                            }
+                        }.onFailure { cause ->
+                            val message = cause.message ?: cause.javaClass.simpleName
+                            runCatching {
+                                MainaAppDatabase(applicationContext).markTranscriptionDeferred(
+                                    meetingId,
+                                    "Saved audio is waiting for local transcription: $message",
+                                )
+                            }
+                            recordNativeEvent(
+                                level = "warn",
+                                category = "native-post-processing",
+                                eventName = "post-processing-start-deferred",
+                                message = "Saved audio will resume transcription when Maina is foregrounded",
+                                payload = mapOf("meetingId" to meetingId, "error" to message),
+                            )
+                        }
+                    },
+                )
+            }
+            ACTION_ABORT_NATIVE_CAPTURE -> {
+                setCaptureState("finalizing")
+                submitCaptureCommand(
+                    pendingState = "finalizing",
+                    successfulCaptureState = "idle",
+                    operation = { nativeCapture.stop() },
+                    onSuccess = { snapshot ->
+                        // Discard is intentionally terminal and must never
+                        // enqueue ASR. Mark the meeting handled before React
+                        // deletes its row/audio so unmount cleanup is idempotent.
+                        postProcessingHandledMeetingId = snapshot.meetingId ?: lastCaptureMeetingId
+                        lastCaptureMeetingId = null
+                        lastCaptureDirectory = null
+                    },
+                )
             }
         }
         val notification = buildNotification()
@@ -356,6 +437,7 @@ class MainaRecordingService : Service() {
         pendingState: String,
         successfulCaptureState: String,
         operation: () -> MainaNativeAudioCapture.Snapshot,
+        onSuccess: (MainaNativeAudioCapture.Snapshot) -> Unit = {},
     ) {
         val operationId = captureOperationSequence.incrementAndGet().also { latestCaptureOperation = it }
         nativeCaptureStatus = nativeCapture.snapshot().asMap() + mapOf(
@@ -372,6 +454,19 @@ class MainaRecordingService : Service() {
                                 setCaptureState(successfulCaptureState)
                                 refreshForegroundUi()
                             }
+                        }
+                        runCatching { onSuccess(snapshot) }.onFailure { cause ->
+                            recordNativeEvent(
+                                level = "error",
+                                category = "native-post-processing",
+                                eventName = "capture-success-follow-up-failed",
+                                message = "Capture completed but its follow-up action failed",
+                                payload = mapOf(
+                                    "successfulCaptureState" to successfulCaptureState,
+                                    "error" to (cause.message ?: cause.javaClass.simpleName),
+                                    "operationId" to operationId,
+                                ),
+                            )
                         }
                     }
                 }

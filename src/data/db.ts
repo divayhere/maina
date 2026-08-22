@@ -164,6 +164,14 @@ const MIGRATIONS: Migration[] = [
     CREATE INDEX IF NOT EXISTS idx_knowledge_cloud_corrections_meeting_field
       ON knowledge_cloud_corrections(meeting_id, field_path, version_number DESC);`);
   },
+  // v9 — durable capture timing + honest transcription progress.
+  async (db) => {
+    await addColumnIfMissing(db, 'meetings', 'audio_duration_ms', 'INTEGER NOT NULL DEFAULT 0');
+    await addColumnIfMissing(db, 'meetings', 'capture_ended_at', 'INTEGER');
+    await addColumnIfMissing(db, 'meetings', 'transcription_window_count', 'INTEGER NOT NULL DEFAULT 0');
+    await addColumnIfMissing(db, 'meetings', 'transcription_completed_windows', 'INTEGER NOT NULL DEFAULT 0');
+    await addColumnIfMissing(db, 'meetings', 'transcription_failed_windows', 'INTEGER NOT NULL DEFAULT 0');
+  },
 ];
 
 export async function initDb(): Promise<void> {

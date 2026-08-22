@@ -198,6 +198,22 @@ export async function reconcilePendingMeetingPackets(): Promise<void> {
   }
 }
 
+export async function reconcileAutoSummaryEligibility(): Promise<number> {
+  const config = await getAppConfig();
+  if (!config.autoSummarize) return 0;
+  const meetings = (await listMeetingsEligibleForSummaryQueue()).filter(
+    (meeting) => meeting.status === 'transcribed' && meeting.summaryStatus === 'idle',
+  );
+  for (const meeting of meetings) {
+    await setMeetingSummaryState(meeting.id, 'queued').catch(() => {});
+    void runMeetingPacketGeneration(meeting.id);
+  }
+  if (meetings.length > 0) {
+    log.info('summary', 'newly transcribed meeting packets queued', { count: meetings.length });
+  }
+  return meetings.length;
+}
+
 export async function queueEligibleMeetingPackets(): Promise<number> {
   const config = await getAppConfig();
   if (!config.autoSummarize) return 0;

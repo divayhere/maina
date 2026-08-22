@@ -13,7 +13,6 @@ import {
   listMeetings,
   listInterruptedRecordingSegments,
   markMeetingsAudioDeleted,
-  recoverInterruptedMeetings,
   startRecordingSegment,
   finishRecordingSegment,
   updateMeeting,
@@ -31,6 +30,7 @@ import {
 import { installHardwareTriggerListener } from '@/hardware/trigger/hardwareTrigger';
 import { resolveRemoteAction } from '@/hardware/trigger/remoteControl';
 import { log } from '@/services/logger';
+import { reconcilePendingNativeMeetingWork } from '@/services/meetingCaptureLifecycle';
 import { enforceAudioRetentionPolicy } from '@/services/audioRetention';
 import {
   finalizeDiagnosticRun,
@@ -42,7 +42,7 @@ import {
 } from '@/services/remoteLog';
 import { reconcilePendingMainaKnowledgeCloudSyncs } from '@/services/mainaKnowledgeCloud';
 import { reconcilePendingMainaKnowledgeCloudCorrections } from '@/services/mainaKnowledgeCloudCorrections';
-import { reconcilePendingMeetingPackets } from '@/services/meetingPacket';
+import { reconcileAutoSummaryEligibility, reconcilePendingMeetingPackets } from '@/services/meetingPacket';
 import { initSentry, Sentry } from '@/services/sentry';
 import { installWatchdog } from '@/services/watchdog';
 
@@ -83,8 +83,7 @@ function RootLayout() {
         await initDb();
 
         // A process death can leave the active native WAV as *.partial. Finalize
-        // it before converting the meeting row to "interrupted", then register
-        // every recovered chunk so the ordinary recovery screen can re-run ASR.
+        // it before trying to resume native post-processing from durable audio.
         const activeMeetings = (await listMeetings()).filter(
           (meeting) => meeting.status === 'recording' && !!meeting.audioUri,
         );
@@ -134,7 +133,6 @@ function RootLayout() {
           interruptedSegments.map((segment) => segment.audioUri),
         );
         const interruptedMeetingIds = [...new Set(interruptedSegments.map((segment) => segment.meetingId))];
-        const recovered = await recoverInterruptedMeetings(liveMeetingIds);
 
         for (const segment of interruptedSegments) {
           await queueAudioArtifact({
@@ -184,6 +182,7 @@ function RootLayout() {
             },
           });
         }
+        const resumedNativeMeetings = await reconcilePendingNativeMeetingWork();
 
         const deletedAudioMeetingIds = await getMeetingsWithDeletedAudio();
         await markMeetingsAudioDeleted(deletedAudioMeetingIds);
@@ -201,9 +200,17 @@ function RootLayout() {
         } else {
           log.warn('trigger', 'remote control not armed because microphone permission is missing');
         }
-        if (recovered > 0) log.warn('recovery', 'interrupted recording recovered', { recovered, repaired });
+        if (resumedNativeMeetings > 0) {
+          log.warn('recovery', 'native post-processing resumed from startup reconciliation', {
+            resumedNativeMeetings,
+            repaired,
+          });
+        }
         void provisionCoreLanguages().catch((cause) => {
           log.warn('native-speech', 'background language provisioning failed', { err: String(cause) });
+        });
+        void reconcileAutoSummaryEligibility().catch((cause) => {
+          log.warn('summary', 'auto-summary eligibility reconciliation failed', { err: String(cause) });
         });
         void reconcilePendingMeetingPackets().catch((cause) => {
           log.warn('summary', 'pending packet reconciliation failed', { err: String(cause) });
@@ -229,6 +236,8 @@ function RootLayout() {
       const meetingIds = await getMeetingsWithDeletedAudio();
       await markMeetingsAudioDeleted(meetingIds);
       await enforceAudioRetentionPolicy();
+      await reconcilePendingNativeMeetingWork();
+      await reconcileAutoSummaryEligibility();
       await reconcilePendingMeetingPackets();
       await reconcilePendingMainaKnowledgeCloudSyncs();
       await reconcilePendingMainaKnowledgeCloudCorrections();
@@ -243,7 +252,18 @@ function RootLayout() {
         log.warn('meetings', 'audio cleanup state sync failed', { err: String(cause) });
       });
     });
-    return () => subscription.remove();
+    const packetTimer = setInterval(() => {
+      if (AppState.currentState !== 'active') return;
+      void reconcileAutoSummaryEligibility()
+        .then(() => reconcilePendingMeetingPackets())
+        .catch((cause) => {
+          log.warn('summary', 'foreground packet polling failed', { err: String(cause) });
+        });
+    }, 15_000);
+    return () => {
+      subscription.remove();
+      clearInterval(packetTimer);
+    };
   }, [ready]);
 
   useEffect(() => {

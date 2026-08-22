@@ -73,6 +73,9 @@ async function runLocalAsrPipelineNow(input: LocalAsrPipelineInput): Promise<Loc
     status: chunks.length > 0 ? 'transcribing' : 'recorded',
     segmentCount: chunks.length,
     transcribedSegments: 0,
+    transcriptionWindowCount: 0,
+    transcriptionCompletedWindows: 0,
+    transcriptionFailedWindows: 0,
   });
   if (chunks.length === 0) {
     const lastError = inspection.partialUris.length > 0
@@ -120,10 +123,17 @@ async function runLocalAsrPipelineNow(input: LocalAsrPipelineInput): Promise<Loc
   }
 
   const durations = await getPcmWavDurationsMs(chunks).catch(() => ({} as Record<string, number | null>));
+  const totalWindows = chunks.reduce((sum, uri) => sum + planAsrWindows(durations[uri] ?? 0).length, 0);
+  await updateMeeting(input.meetingId, {
+    transcriptionWindowCount: totalWindows,
+    transcriptionCompletedWindows: 0,
+    transcriptionFailedWindows: 0,
+  });
   let chunkCursorAt = input.meetingStartedAt;
   let windowCount = 0;
   let completedWindows = 0;
   let failedWindows = 0;
+  let processedChunks = 0;
   let previousText = '';
   let lastError: string | null = null;
 
@@ -178,7 +188,10 @@ async function runLocalAsrPipelineNow(input: LocalAsrPipelineInput): Promise<Loc
           }
 
           await updateMeeting(input.meetingId, {
-            transcribedSegments: completedWindows,
+            transcribedSegments: processedChunks,
+            transcriptionWindowCount: totalWindows,
+            transcriptionCompletedWindows: completedWindows,
+            transcriptionFailedWindows: failedWindows,
             lastError,
           });
           log[suspicious ? 'warn' : 'info']('asr', 'qwen window processed', {
@@ -199,7 +212,12 @@ async function runLocalAsrPipelineNow(input: LocalAsrPipelineInput): Promise<Loc
           const message = cause instanceof Error ? cause.message : String(cause);
           failedWindows += 1;
           lastError = message;
-          await updateMeeting(input.meetingId, { lastError: message });
+          await updateMeeting(input.meetingId, {
+            lastError: message,
+            transcriptionWindowCount: totalWindows,
+            transcriptionCompletedWindows: completedWindows,
+            transcriptionFailedWindows: failedWindows,
+          });
           log.error('asr', 'qwen window transcription failed', {
             meetingId: input.meetingId,
             chunkIndex,
@@ -210,6 +228,14 @@ async function runLocalAsrPipelineNow(input: LocalAsrPipelineInput): Promise<Loc
           });
         }
       }
+      processedChunks = chunkIndex + 1;
+      await updateMeeting(input.meetingId, {
+        transcribedSegments: processedChunks,
+        transcriptionWindowCount: totalWindows,
+        transcriptionCompletedWindows: completedWindows,
+        transcriptionFailedWindows: failedWindows,
+        lastError,
+      });
       chunkCursorAt += durationMs;
     }
   } finally {
@@ -222,7 +248,10 @@ async function runLocalAsrPipelineNow(input: LocalAsrPipelineInput): Promise<Loc
   await updateMeeting(input.meetingId, {
     status: summary.hasText ? 'transcribed' : 'recorded',
     language: 'auto',
-    transcribedSegments: completedWindows,
+    transcribedSegments: processedChunks,
+    transcriptionWindowCount: totalWindows,
+    transcriptionCompletedWindows: completedWindows,
+    transcriptionFailedWindows: failedWindows,
     lastError: finalError,
   });
   return {

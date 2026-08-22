@@ -277,7 +277,17 @@ export default function MeetingDetail() {
 
   const load = useCallback(() => {
     if (!id) return;
-    getMeeting(id).then(async (m) => {
+    getMeeting(id).then(async (initialMeeting) => {
+      let m = initialMeeting;
+      if (m?.status === 'transcribed' && m.summaryStatus === 'idle') {
+        await maybeQueueMeetingPacket(m.id).catch((cause) => {
+          log.warn('summary', 'meeting detail auto-summary handoff failed', {
+            meetingId: m?.id,
+            err: String(cause),
+          });
+        });
+        m = await getMeeting(id);
+      }
       setMeeting(m);
       meetingRef.current = m;
       if (!m) return;
@@ -307,7 +317,9 @@ export default function MeetingDetail() {
 
   useEffect(() => {
     if (!meeting) return;
-    const packetPending = meeting.summaryStatus === 'queued' || meeting.summaryStatus === 'running';
+    const packetPending = meeting.status === 'transcribing'
+      || meeting.summaryStatus === 'queued'
+      || meeting.summaryStatus === 'running';
     const sourceSyncPending = meeting.knowledgeCloudSyncStatus === 'sync_queued'
       || meeting.knowledgeCloudSyncStatus === 'syncing';
     const correctionSyncPending = cloudCorrections.some(

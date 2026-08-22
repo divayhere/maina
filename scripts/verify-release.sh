@@ -43,11 +43,14 @@ if [[ -z "$DEBUG_MANIFEST" || ! -f "$DEBUG_MANIFEST" ]]; then
 fi
 
 rg -q 'MainaRecordingService' "$DEBUG_MANIFEST"
+rg -q 'MainaPostProcessingService' "$DEBUG_MANIFEST"
 rg -q 'MainaCommandReceiver' "$DEBUG_MANIFEST"
 rg -q 'MainaKeyAccessibilityService' "$DEBUG_MANIFEST"
 rg -q 'android:process=":remote_control"' "$DEBUG_MANIFEST"
 rg -q 'android.permission.BIND_ACCESSIBILITY_SERVICE' "$DEBUG_MANIFEST"
 rg -q 'FOREGROUND_SERVICE_MICROPHONE' "$DEBUG_MANIFEST"
+rg -q 'FOREGROUND_SERVICE_MEDIA_PROCESSING' "$DEBUG_MANIFEST"
+rg -q 'android:foregroundServiceType="mediaProcessing"' "$DEBUG_MANIFEST"
 
 RELEASE_MANIFEST="$(find "$PROJECT_DIR/android/app/build/intermediates" \
   -path '*/merged_manifest/release/processReleaseMainManifest/AndroidManifest.xml' \

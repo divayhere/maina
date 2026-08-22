@@ -7,6 +7,7 @@ import {
   type CaptureState,
   type NativeCaptureSourceMode,
   type NativeCaptureDirectoryInspection,
+  type NativePostProcessingRequest,
   type NativeCaptureStatus,
   type QwenAsrResult,
   type QwenAsrStatus,
@@ -67,6 +68,14 @@ export async function resumeNativeCapture(): Promise<void> {
 
 export async function stopNativeCapture(): Promise<void> {
   await requireAndroidModule().stopNativeCapture();
+}
+
+export async function abortNativeCapture(): Promise<void> {
+  await requireAndroidModule().abortNativeCapture();
+}
+
+export async function startNativePostProcessing(request: NativePostProcessingRequest): Promise<void> {
+  await requireAndroidModule().startNativePostProcessing(request);
 }
 
 export function getNativeCaptureStatus(): NativeCaptureStatus | null {

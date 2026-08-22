@@ -134,6 +134,44 @@ class MainaRecorderModule : Module() {
             mapOf("requested" to true)
         }
 
+        AsyncFunction("abortNativeCapture") {
+            startControlService(requireContext(), MainaRecordingService.ACTION_ABORT_NATIVE_CAPTURE)
+            mapOf("requested" to true)
+        }
+
+        AsyncFunction("startNativePostProcessing") { request: Map<String, Any?> ->
+            val meetingId = request["meetingId"]?.toString().orEmpty()
+            val directory = request["directory"]?.toString().orEmpty()
+            require(meetingId.isNotBlank()) { "meetingId is required" }
+            require(directory.isNotBlank()) { "directory is required" }
+            val intent = Intent(requireContext(), MainaPostProcessingService::class.java).apply {
+                action = MainaPostProcessingService.ACTION_START
+                putExtra(MainaPostProcessingService.EXTRA_MEETING_ID, meetingId)
+                putExtra(MainaPostProcessingService.EXTRA_DIRECTORY, directory)
+                request["captureEndedAt"]?.toString()?.toLongOrNull()?.let {
+                    putExtra(MainaPostProcessingService.EXTRA_CAPTURE_ENDED_AT, it)
+                }
+                request["wallDurationMs"]?.toString()?.toLongOrNull()?.let {
+                    putExtra(MainaPostProcessingService.EXTRA_WALL_DURATION_MS, it)
+                }
+                request["audioDurationMs"]?.toString()?.toLongOrNull()?.let {
+                    putExtra(MainaPostProcessingService.EXTRA_AUDIO_DURATION_MS, it)
+                }
+                request["routeRestartCount"]?.toString()?.toIntOrNull()?.let {
+                    putExtra(MainaPostProcessingService.EXTRA_ROUTE_RESTART_COUNT, it)
+                }
+                request["captureGapMs"]?.toString()?.toLongOrNull()?.let {
+                    putExtra(MainaPostProcessingService.EXTRA_CAPTURE_GAP_MS, it)
+                }
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                requireContext().startForegroundService(intent)
+            } else {
+                requireContext().startService(intent)
+            }
+            mapOf("requested" to true)
+        }
+
         Function("getNativeCaptureStatus") {
             MainaRecordingService.nativeCaptureStatus
         }

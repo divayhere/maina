@@ -89,6 +89,8 @@ export interface Meeting {
   title: string;
   startedAt: number;
   durationMs: number;
+  audioDurationMs: number;
+  captureEndedAt?: number | null;
   audioUri?: string | null; // recording folder (segments) or null after cleanup
   transcript?: string | null;
   summary?: string | null;
@@ -102,6 +104,9 @@ export interface Meeting {
   summarizedAt?: number | null;
   segmentCount: number;
   transcribedSegments: number;
+  transcriptionWindowCount: number;
+  transcriptionCompletedWindows: number;
+  transcriptionFailedWindows: number;
   openTodoCount: number;
   totalTodoCount: number;
   updatedAt: number;
@@ -121,6 +126,8 @@ interface Row {
   title: string;
   started_at: number;
   duration_ms: number;
+  audio_duration_ms: number;
+  capture_ended_at: number | null;
   audio_uri: string | null;
   transcript: string | null;
   summary: string | null;
@@ -134,6 +141,9 @@ interface Row {
   summarized_at: number | null;
   segment_count: number;
   transcribed_segments: number;
+  transcription_window_count: number;
+  transcription_completed_windows: number;
+  transcription_failed_windows: number;
   open_todo_count?: number | null;
   total_todo_count?: number | null;
   updated_at: number;
@@ -175,6 +185,8 @@ const toMeeting = (r: Row): Meeting => ({
   title: r.title,
   startedAt: r.started_at,
   durationMs: r.duration_ms,
+  audioDurationMs: r.audio_duration_ms ?? 0,
+  captureEndedAt: r.capture_ended_at,
   audioUri: r.audio_uri,
   transcript: r.transcript,
   summary: r.summary,
@@ -188,6 +200,9 @@ const toMeeting = (r: Row): Meeting => ({
   summarizedAt: r.summarized_at,
   segmentCount: r.segment_count ?? 0,
   transcribedSegments: r.transcribed_segments ?? 0,
+  transcriptionWindowCount: r.transcription_window_count ?? 0,
+  transcriptionCompletedWindows: r.transcription_completed_windows ?? 0,
+  transcriptionFailedWindows: r.transcription_failed_windows ?? 0,
   openTodoCount: r.open_todo_count ?? 0,
   totalTodoCount: r.total_todo_count ?? 0,
   updatedAt: r.updated_at || r.started_at,
@@ -366,6 +381,8 @@ export async function createMeeting(m: {
   title: string;
   startedAt: number;
   durationMs: number;
+  audioDurationMs?: number;
+  captureEndedAt?: number | null;
   audioUri?: string | null;
   segmentCount?: number;
   status?: MeetingStatus;
@@ -639,6 +656,8 @@ export async function updateMeeting(id: string, patch: Partial<Meeting>): Promis
   const map: Record<string, string> = {
     title: 'title',
     durationMs: 'duration_ms',
+    audioDurationMs: 'audio_duration_ms',
+    captureEndedAt: 'capture_ended_at',
     audioUri: 'audio_uri',
     transcript: 'transcript',
     summary: 'summary',
@@ -652,6 +671,9 @@ export async function updateMeeting(id: string, patch: Partial<Meeting>): Promis
     summarizedAt: 'summarized_at',
     segmentCount: 'segment_count',
     transcribedSegments: 'transcribed_segments',
+    transcriptionWindowCount: 'transcription_window_count',
+    transcriptionCompletedWindows: 'transcription_completed_windows',
+    transcriptionFailedWindows: 'transcription_failed_windows',
     updatedAt: 'updated_at',
     lastError: 'last_error',
     restartCount: 'restart_count',
