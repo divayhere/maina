@@ -47,6 +47,7 @@ internal class MainaNativeAudioCapture(
         val chunkIndex: Int,
         val bytesWritten: Long,
         val startedElapsedMs: Long?,
+        val lastProgressAtMs: Long?,
         val lastError: String?,
         val routeRestartCount: Int,
         val routeRecoveryActive: Boolean,
@@ -64,6 +65,7 @@ internal class MainaNativeAudioCapture(
             "chunkIndex" to chunkIndex,
             "bytesWritten" to bytesWritten,
             "startedElapsedMs" to startedElapsedMs,
+            "lastProgressAtMs" to lastProgressAtMs,
             "lastError" to lastError,
             "routeRestartCount" to routeRestartCount,
             "routeRecoveryActive" to routeRecoveryActive,
@@ -105,6 +107,7 @@ internal class MainaNativeAudioCapture(
     @Volatile private var currentChunkIndex = 0
     @Volatile private var currentBytesWritten = 0L
     @Volatile private var startedElapsedMs: Long? = null
+    @Volatile private var lastProgressAtMs: Long? = null
     @Volatile private var lastError: String? = null
     @Volatile private var bufferBytes = 0
     @Volatile private var routeRefreshReason = "initial"
@@ -133,6 +136,7 @@ internal class MainaNativeAudioCapture(
         chunkIndex = currentChunkIndex,
         bytesWritten = currentBytesWritten,
         startedElapsedMs = startedElapsedMs,
+        lastProgressAtMs = lastProgressAtMs,
         lastError = lastError,
         routeRestartCount = routeRestartCount,
         routeRecoveryActive = routeRecoveryActive,
@@ -155,6 +159,7 @@ internal class MainaNativeAudioCapture(
         currentChunkIndex = nextChunkIndex(directory)
         currentBytesWritten = 0L
         startedElapsedMs = SystemClock.elapsedRealtime()
+        lastProgressAtMs = System.currentTimeMillis()
         currentSource = resolveAudioSource(options.sourceMode)
         routeRestartCount = 0
         routeRecoveryActive = false
@@ -242,8 +247,14 @@ internal class MainaNativeAudioCapture(
         try {
             while (running.get()) {
                 if (paused.get()) {
+                    currentChunkIndex = MainaChunkBoundaryPolicy.nextChunkIndex(
+                        currentChunkIndex,
+                        hadActiveChunk = activeChunk != null,
+                        reason = MainaChunkBoundaryPolicy.BoundaryReason.PAUSE,
+                    )
                     closeChunk(activeChunk, directory, "pause")
                     activeChunk = null
+                    currentBytesWritten = 0L
                     Thread.sleep(50)
                     continue
                 }
@@ -251,7 +262,11 @@ internal class MainaNativeAudioCapture(
                     val hadActiveChunk = activeChunk != null
                     closeChunk(activeChunk, directory, "route-change")
                     activeChunk = null
-                    if (hadActiveChunk) currentChunkIndex += 1
+                    currentChunkIndex = MainaChunkBoundaryPolicy.nextChunkIndex(
+                        currentChunkIndex,
+                        hadActiveChunk,
+                        MainaChunkBoundaryPolicy.BoundaryReason.ROUTE_CHANGE,
+                    )
                     currentBytesWritten = 0L
                     recoverRecorder(directory, routeRefreshReason)
                     continue
@@ -263,6 +278,7 @@ internal class MainaNativeAudioCapture(
                         activeChunk.output.write(buffer, 0, read)
                         activeChunk.bytes += read
                         currentBytesWritten = activeChunk.bytes
+                        lastProgressAtMs = System.currentTimeMillis()
                         val now = SystemClock.elapsedRealtime()
                         if (now - activeChunk.lastSyncElapsedMs >= SYNC_INTERVAL_MS) {
                             activeChunk.output.fd.sync()
@@ -271,7 +287,11 @@ internal class MainaNativeAudioCapture(
                         if (activeChunk.bytes >= activeChunk.maxBytes) {
                             closeChunk(activeChunk, directory, "rotation")
                             activeChunk = null
-                            currentChunkIndex += 1
+                            currentChunkIndex = MainaChunkBoundaryPolicy.nextChunkIndex(
+                                currentChunkIndex,
+                                hadActiveChunk = true,
+                                reason = MainaChunkBoundaryPolicy.BoundaryReason.ROTATION,
+                            )
                             currentBytesWritten = 0L
                         }
                     }
@@ -280,7 +300,11 @@ internal class MainaNativeAudioCapture(
                     read < 0 && MainaAudioCaptureRecoveryPolicy.shouldRecover(read, routeRefreshRequested.get()) -> {
                         closeChunk(activeChunk, directory, "read-recovery")
                         activeChunk = null
-                        currentChunkIndex += 1
+                        currentChunkIndex = MainaChunkBoundaryPolicy.nextChunkIndex(
+                            currentChunkIndex,
+                            hadActiveChunk = true,
+                            reason = MainaChunkBoundaryPolicy.BoundaryReason.READ_RECOVERY,
+                        )
                         currentBytesWritten = 0L
                         routeRefreshRequested.set(false)
                         recoverRecorder(directory, "read-error:$read")
@@ -310,6 +334,7 @@ internal class MainaNativeAudioCapture(
                 routeRecoveryActive = false
                 val gap = SystemClock.elapsedRealtime() - recoveryStarted
                 captureGapMs += gap
+                lastProgressAtMs = System.currentTimeMillis()
                 lastError = null
                 updateRoutedDevice(recovered.getOrThrow())
                 appendJournal(directory, "route-recovered", mapOf(

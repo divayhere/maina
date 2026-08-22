@@ -135,10 +135,10 @@ internal class MainaPostProcessingService : Service() {
         captureGapMs: Long,
     ) {
         val store = MainaAppDatabase(applicationContext)
-        val meeting = store.getMeeting(meetingId)
-        if (meeting == null) return
+        val meeting = waitForMeetingRow(store, meetingId)
+            ?: throw IllegalStateException("Meeting row unavailable for post-processing: $meetingId")
 
-        val inspection = MainaNativeAudioCapture.inspectDirectory(directory, true)
+        val inspection = waitForFinalizedChunks(directory)
         val chunkUris = inspection.finalizedUris
         if (chunkUris.isEmpty()) {
             store.markInterrupted(
@@ -267,6 +267,30 @@ internal class MainaPostProcessingService : Service() {
             completedWindows + failedWindows,
             totalWindows,
         )
+    }
+
+    private fun waitForMeetingRow(store: MainaAppDatabase, meetingId: String): MainaAppDatabase.MeetingRow? {
+        repeat(MainaPostProcessingStartPolicy.meetingLookupAttempts()) { attempt ->
+            store.getMeeting(meetingId)?.let { return it }
+            if (attempt + 1 < MainaPostProcessingStartPolicy.meetingLookupAttempts()) {
+                updateProgress("Preparing saved audio", attempt + 1, MainaPostProcessingStartPolicy.meetingLookupAttempts())
+                Thread.sleep(MainaPostProcessingStartPolicy.meetingLookupDelayMs(attempt))
+            }
+        }
+        return null
+    }
+
+    private fun waitForFinalizedChunks(directory: String): MainaNativeAudioCapture.DirectoryInspection {
+        repeat(MainaPostProcessingStartPolicy.finalizedChunkAttempts()) { attempt ->
+            val inspection = MainaNativeAudioCapture.inspectDirectory(directory, true)
+            if (inspection.finalizedUris.isNotEmpty()) return inspection
+            if (inspection.partialUris.isEmpty()) return inspection
+            if (attempt + 1 < MainaPostProcessingStartPolicy.finalizedChunkAttempts()) {
+                updateProgress("Preparing saved audio", attempt + 1, MainaPostProcessingStartPolicy.finalizedChunkAttempts())
+                Thread.sleep(MainaPostProcessingStartPolicy.finalizedChunkDelayMs(attempt))
+            }
+        }
+        return MainaNativeAudioCapture.inspectDirectory(directory, true)
     }
 
     private fun buildNotification(title: String, detail: String, progress: Int? = null, max: Int? = null): Notification {

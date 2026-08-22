@@ -49,6 +49,7 @@ import {
   subscribeAudioRouteChanges,
 } from '@/hardware/recording/foreground';
 import { CaptureHealthTracker } from '@/hardware/recording/health';
+import { isNativeCaptureStalled } from '@/hardware/recording/nativeCaptureHealth';
 import { waitForNativeCaptureState } from '@/hardware/recording/nativeCaptureLifecycle';
 import { recordingDir, segmentIndexFromUri, segmentPath } from '@/hardware/recording/paths';
 import { registerActiveTriggerHandler } from '@/hardware/trigger/hardwareTrigger';
@@ -178,6 +179,7 @@ export default function RecordScreen() {
   const controlBusyRef = useRef(false);
   const detectedLanguageRef = useRef('en-IN');
   const captureNoteTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const nativeStallReportedRef = useRef(false);
 
   const [recentBlocks, setRecentBlocks] = useState<TranscriptBlock[]>([]);
   const [interim, setInterim] = useState('');
@@ -200,6 +202,23 @@ export default function RecordScreen() {
         setCaptureNote(null);
       }, durationMs);
     }
+  }, []);
+
+  const reportNativeCaptureStall = useCallback((status: ReturnType<typeof getNativeCaptureStatus>) => {
+    if (nativeStallReportedRef.current) return;
+    nativeStallReportedRef.current = true;
+    activeRef.current = false;
+    pausedRef.current = false;
+    listeningRef.current = false;
+    setPaused(false);
+    setListening(false);
+    const message = 'Native audio capture stopped making progress. Maina kept the audio it had already saved.';
+    log.error('record', 'native capture progress stalled', { nativeStatus: status });
+    void updateMeeting(idRef.current, {
+      status: 'interrupted',
+      lastError: message,
+    }).catch(() => {});
+    setError(`Recording problem: ${message}`);
   }, []);
 
   const pushRecentBlocks = (blocks: TranscriptBlock[]) => {
@@ -586,6 +605,7 @@ export default function RecordScreen() {
         });
         activeRef.current = true;
         if (CAPTURE_ENGINE === 'native-qwen') {
+          nativeStallReportedRef.current = false;
           const qwenStatus = await getQwenAsrStatus().catch((cause) => {
             log.warn('asr', 'qwen status check failed before capture', { err: String(cause) });
             return null;
@@ -696,9 +716,13 @@ export default function RecordScreen() {
         void persist();
 
         if (!pausedRef.current) {
+          const nativeStatus = CAPTURE_ENGINE === 'native-qwen' ? getNativeCaptureStatus() : null;
+          if (isNativeCaptureStalled(nativeStatus, now)) {
+            reportNativeCaptureStall(nativeStatus);
+            return;
+          }
           if (now - lastHealthRef.current >= 60000) {
             lastHealthRef.current = now;
-            const nativeStatus = CAPTURE_ENGINE === 'native-qwen' ? getNativeCaptureStatus() : null;
             log.info('record-health', 'capture heartbeat', {
               elapsedMs: now - startedAtRef.current,
               draftWords: transcriptWordCount(draftBlockRef.current?.text ?? ''),
@@ -749,6 +773,10 @@ export default function RecordScreen() {
         // after a locked-screen command. The service is the source of truth;
         // JS may have been paused while a clicker command completed.
         const status = getNativeCaptureStatus();
+        if (isNativeCaptureStalled(status, Date.now())) {
+          reportNativeCaptureStall(status);
+          return;
+        }
         if (status?.state === 'idle' && meetingCreatedRef.current) {
           void (async () => {
             const metrics = dirRef.current
@@ -797,7 +825,7 @@ export default function RecordScreen() {
     // Persist is intentionally read from the latest closure while the app-state
     // subscription itself remains mounted once for the recording session.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [reportNativeCaptureStall]);
 
   const waitForRecognizerEnd = (): Promise<void> =>
     new Promise((resolve) => {
@@ -1107,7 +1135,7 @@ export default function RecordScreen() {
       ) : (
         <Banner tone="info" style={{ marginBottom: space.md }}>
           <AppText variant="body" muted style={styles.center}>
-            Live words appear here once speech is detected.
+            Maina keeps the audio locally. Transcript appears after you stop.
           </AppText>
         </Banner>
       )}

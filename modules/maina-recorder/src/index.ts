@@ -61,6 +61,7 @@ export interface NativeCaptureStatus {
   chunkIndex?: number;
   bytesWritten?: number;
   startedElapsedMs?: number | null;
+  lastProgressAtMs?: number | null;
   lastError?: string | null;
   operationId?: number | null;
   routeRestartCount?: number;
