@@ -86,6 +86,12 @@ export async function readNativePostProcessingResult(meetingId: string): Promise
   return MainaRecorder.readNativePostProcessingResult(meetingId);
 }
 
+export async function acknowledgeNativePostProcessingResult(meetingId: string, runId: string): Promise<boolean> {
+  if (Platform.OS !== 'android' || !MainaRecorder) return false;
+  const result = await MainaRecorder.acknowledgeNativePostProcessingResult(meetingId, runId);
+  return result.acknowledged;
+}
+
 export function getNativeCaptureStatus(): NativeCaptureStatus | null {
   if (Platform.OS !== 'android' || !MainaRecorder) return null;
   return MainaRecorder.getNativeCaptureStatus();

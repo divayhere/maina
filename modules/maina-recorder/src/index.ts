@@ -251,6 +251,7 @@ interface MainaRecorderNativeModule {
   abortNativeCapture(): Promise<{ requested: boolean }>;
   startNativePostProcessing(request: NativePostProcessingRequest): Promise<{ requested: boolean }>;
   readNativePostProcessingResult(meetingId: string): Promise<NativePostProcessingResult | null>;
+  acknowledgeNativePostProcessingResult(meetingId: string, runId: string): Promise<{ acknowledged: boolean }>;
   getNativeCaptureStatus(): NativeCaptureStatus;
   inspectNativeCaptureDirectory(directory: string, recoverPartials: boolean): Promise<NativeCaptureDirectoryInspection>;
   getQwenAsrStatus(): Promise<QwenAsrStatus>;

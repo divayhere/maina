@@ -199,6 +199,34 @@ internal class MainaPostProcessingOutbox(context: Context) :
         )
     }
 
+    /**
+     * The Expo runtime calls this only after its own SQLite transaction has
+     * committed the immutable result. Keeping the native row until then makes
+     * an app/process crash recoverable; removing it afterwards prevents a
+     * foreground reconciliation poll from repeatedly importing the same run.
+     */
+    fun acknowledge(meetingId: String, runId: String): Boolean {
+        writableDatabase.beginTransaction()
+        try {
+            val deleted = writableDatabase.delete(
+                "runs",
+                "meeting_id = ? AND run_id = ? AND state = ?",
+                arrayOf(meetingId, runId, STATE_COMPLETE),
+            )
+            if (deleted > 0) {
+                writableDatabase.delete(
+                    "blocks",
+                    "meeting_id = ? AND run_id = ?",
+                    arrayOf(meetingId, runId),
+                )
+            }
+            writableDatabase.setTransactionSuccessful()
+            return deleted > 0
+        } finally {
+            writableDatabase.endTransaction()
+        }
+    }
+
     override fun onConfigure(db: SQLiteDatabase) {
         db.enableWriteAheadLogging()
     }

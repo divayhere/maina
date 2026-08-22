@@ -7,6 +7,7 @@ import {
 } from '@/data/meetings';
 import { completedCaptureDurationRepair } from '@/core/recording/checkpoint';
 import {
+  acknowledgeNativePostProcessingResult,
   getNativeCaptureStatus,
   readNativePostProcessingResult,
   startNativePostProcessing,
@@ -103,10 +104,25 @@ async function reconcilePendingNativeMeetingWorkInternal(): Promise<number> {
         lastError: nativeResult.lastError,
         blocks: nativeResult.blocks,
       });
+      const acknowledged = await acknowledgeNativePostProcessingResult(
+        nativeResult.meetingId,
+        nativeResult.runId,
+      ).catch((cause) => {
+        // The Expo transaction has committed. Leaving the native result intact
+        // is safe: a later retry is idempotent and will attempt acknowledgement
+        // again rather than ever losing the recording's transcription.
+        log.warn('recovery', 'native post-processing outbox acknowledgement failed', {
+          meetingId: meeting.id,
+          runId: nativeResult.runId,
+          err: String(cause),
+        });
+        return false;
+      });
       log.info('recovery', 'native post-processing outbox reconciled', {
         meetingId: meeting.id,
         runId: nativeResult.runId,
         imported,
+        acknowledged,
         blocks: nativeResult.blocks.length,
       });
       continue;

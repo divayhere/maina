@@ -183,6 +183,13 @@ class MainaRecorderModule : Module() {
             )
         }
 
+        AsyncFunction("acknowledgeNativePostProcessingResult") { meetingId: String, runId: String ->
+            mapOf(
+                "acknowledged" to MainaPostProcessingOutbox.shared(requireContext())
+                    .acknowledge(meetingId, runId),
+            )
+        }
+
         Function("getNativeCaptureStatus") {
             MainaRecordingService.nativeCaptureStatus
         }
