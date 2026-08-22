@@ -695,7 +695,9 @@ export default function MeetingDetail() {
                     ? 'Getting the text ready'
                     : meeting.status === 'interrupted'
                       ? 'Recording was cut short'
-                      : 'Transcript saved'
+                      : transcriptSummary?.hasText
+                        ? 'Transcript saved'
+                        : 'Audio saved'
             }
             tone={
               meeting.summaryStatus === 'failed' || meeting.status === 'interrupted'
@@ -858,16 +860,20 @@ export default function MeetingDetail() {
                   <AppText variant="body">{meeting.summary}</AppText>
                 ) : (
                   <Banner tone="info" style={{ gap: space.md }}>
-                    <AppText variant="title">Transcript saved</AppText>
+                    <AppText variant="title">{transcriptSummary?.hasText ? 'Transcript saved' : 'Audio saved'}</AppText>
                     <AppText variant="body" muted>
-                      {providerLabel === 'No AI provider'
+                      {!transcriptSummary?.hasText
+                        ? 'No words were saved yet. You can retry from the Transcript tab while the audio is still on this phone.'
+                        : providerLabel === 'No AI provider'
                         ? 'Connect an AI account to write notes.'
                         : "You haven't asked for notes on this one yet."}
                     </AppText>
-                    <PrimaryButton
-                      label={providerLabel === 'No AI provider' ? 'Connect an AI account' : 'Write my notes'}
-                      onPress={() => (providerLabel === 'No AI provider' ? router.push('/settings') : void generatePacket())}
-                    />
+                    {transcriptSummary?.hasText ? (
+                      <PrimaryButton
+                        label={providerLabel === 'No AI provider' ? 'Connect an AI account' : 'Write my notes'}
+                        onPress={() => (providerLabel === 'No AI provider' ? router.push('/settings') : void generatePacket())}
+                      />
+                    ) : null}
                   </Banner>
                 )}
               </Card>

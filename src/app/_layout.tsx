@@ -254,12 +254,16 @@ function RootLayout() {
     });
     const packetTimer = setInterval(() => {
       if (AppState.currentState !== 'active') return;
-      void reconcileAutoSummaryEligibility()
+      // Native ASR deliberately owns a separate SQLite outbox. Poll only while
+      // Maina is foregrounded so a completed run becomes visible promptly;
+      // Android keeps capture/ASR durable when the UI is not present.
+      void reconcilePendingNativeMeetingWork()
+        .then(() => reconcileAutoSummaryEligibility())
         .then(() => reconcilePendingMeetingPackets())
         .catch((cause) => {
-          log.warn('summary', 'foreground packet polling failed', { err: String(cause) });
+          log.warn('summary', 'foreground native-to-packet reconciliation failed', { err: String(cause) });
         });
-    }, 15_000);
+    }, 8_000);
     return () => {
       subscription.remove();
       clearInterval(packetTimer);

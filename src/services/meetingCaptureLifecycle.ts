@@ -14,6 +14,11 @@ import {
 import { log } from '@/services/logger';
 import { getNativeCaptureMetrics } from '@/services/nativeCaptureMetrics';
 
+// Multiple foreground triggers (launch, resume, the meeting screen, and the
+// short foreground poll) can arrive together. Serialize them so only one
+// Expo-SQLite import ever observes a completed native outbox run at a time.
+let nativeReconciliationInFlight: Promise<number> | null = null;
+
 async function launchNativePostProcessing(meeting: Meeting) {
   if (!meeting.audioUri) return false;
   const metrics = await getNativeCaptureMetrics(meeting.audioUri, true);
@@ -69,7 +74,7 @@ async function launchNativePostProcessing(meeting: Meeting) {
   return true;
 }
 
-export async function reconcilePendingNativeMeetingWork(): Promise<number> {
+async function reconcilePendingNativeMeetingWorkInternal(): Promise<number> {
   const nativeStatus = getNativeCaptureStatus();
   const meetings = await listMeetings();
   let resumed = 0;
@@ -140,6 +145,16 @@ export async function reconcilePendingNativeMeetingWork(): Promise<number> {
   }
 
   return resumed;
+}
+
+export function reconcilePendingNativeMeetingWork(): Promise<number> {
+  if (nativeReconciliationInFlight) return nativeReconciliationInFlight;
+  let work: Promise<number>;
+  work = reconcilePendingNativeMeetingWorkInternal().finally(() => {
+    if (nativeReconciliationInFlight === work) nativeReconciliationInFlight = null;
+  });
+  nativeReconciliationInFlight = work;
+  return work;
 }
 
 export async function hydrateMeetingFromDurableCapture(meetingId: string): Promise<Meeting | null> {
