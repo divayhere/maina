@@ -990,14 +990,14 @@ export async function importNativePostProcessingResult(input: {
   failedWindows: number;
   routeRestartCount: number;
   lastError?: string | null;
-  blocks: Array<{
+  blocks: {
     sequence: number;
     segmentIndex?: number | null;
     startedAt?: number | null;
     endedAt?: number | null;
     language?: string | null;
     text: string;
-  }>;
+  }[];
 }): Promise<'imported' | 'already_imported'> {
   const db = await getDb();
   const current = await db.getFirstAsync<{ native_postprocess_run_id: string | null }>(
