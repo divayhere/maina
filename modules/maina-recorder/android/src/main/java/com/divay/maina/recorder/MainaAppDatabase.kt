@@ -3,6 +3,21 @@ package com.divay.maina.recorder
 import android.content.ContentValues
 import android.content.Context
 import android.database.sqlite.SQLiteDatabase
+import java.io.File
+
+internal object MainaDatabasePathResolver {
+    fun resolve(filesDir: File, legacyDatabasePath: File): File {
+        // expo-sqlite's Android defaultDatabaseDirectory is
+        // <filesDir>/SQLite. Keep the conventional Android databases path as
+        // a compatibility fallback for any older/custom build.
+        val expoDatabasePath = File(File(filesDir, "SQLite"), "maina.db")
+        return when {
+            expoDatabasePath.isFile -> expoDatabasePath
+            legacyDatabasePath.isFile -> legacyDatabasePath
+            else -> expoDatabasePath
+        }
+    }
+}
 
 internal class MainaAppDatabase(private val context: Context) {
     data class MeetingRow(
@@ -240,7 +255,10 @@ internal class MainaAppDatabase(private val context: Context) {
     }
 
     private fun open(): SQLiteDatabase {
-        val path = context.getDatabasePath("maina.db")
+        val path = MainaDatabasePathResolver.resolve(
+            filesDir = context.filesDir,
+            legacyDatabasePath = context.getDatabasePath("maina.db"),
+        )
         require(path.isFile) { "Maina database is not initialized yet" }
         return SQLiteDatabase.openDatabase(path.path, null, SQLiteDatabase.OPEN_READWRITE).apply {
             execSQL("PRAGMA foreign_keys = ON")
