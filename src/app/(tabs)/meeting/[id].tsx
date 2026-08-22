@@ -909,10 +909,13 @@ export default function MeetingDetail() {
           }
 
           if (item === 'cloud') {
-            const canRetryCloud =
+            const hasTranscriptForCloud = transcriptSummary?.hasText === true;
+            const canRetryMeetingCloud = hasTranscriptForCloud && (
               meeting?.knowledgeCloudSyncStatus === 'local_only'
               || meeting?.knowledgeCloudSyncStatus === 'sync_failed_retryable'
               || meeting?.knowledgeCloudSyncStatus === 'sync_blocked_budget'
+            );
+            const canRetryCloud = canRetryMeetingCloud
               || cloudCorrectionState?.canRetry === true;
             const needsCloudSettings = meeting?.knowledgeCloudSyncStatus === 'sync_failed_auth'
               || cloudCorrections.some((correction) => correction.syncStatus === 'sync_failed_auth');
@@ -933,7 +936,11 @@ export default function MeetingDetail() {
                     }
                   />
                 </View>
-                <AppText variant="body" muted>{visibleCloudState.detail}</AppText>
+                <AppText variant="body" muted>
+                  {hasTranscriptForCloud || cloudCorrectionState
+                    ? visibleCloudState.detail
+                    : 'Cloud sync becomes available after Maina has saved transcript text.'}
+                </AppText>
                 {canRetryCloud ? (
                   <View style={{ gap: space.md }}>
                     <PrimaryButton
