@@ -17,6 +17,7 @@ import {
   supportsOnDevice,
 } from '@/core/transcription/nativeSpeech';
 import { appendWithoutOverlap, transcriptWordCount } from '@/core/transcription/transcript';
+import { buildRecordingCheckpoint } from '@/core/recording/checkpoint';
 import {
   commitTranscriptFinalBlocks,
   createMeeting,
@@ -253,12 +254,15 @@ export default function RecordScreen() {
     if (!force && now - lastSaveRef.current < SAVE_EVERY_MS) return persistChainRef.current;
     lastSaveRef.current = now;
     const health = healthRef.current.snapshot(now);
-    const snapshot = {
-      durationMs: Math.max(0, now - startedAtRef.current - health.pausedDurationMs),
+    const snapshot = buildRecordingCheckpoint({
+      captureEngine: CAPTURE_ENGINE,
+      now,
+      startedAt: startedAtRef.current,
+      pausedDurationMs: health.pausedDurationMs,
       segmentCount: sessionRef.current + 1,
       language: langRef.current,
       restartCount: restartCountRef.current,
-    };
+    });
     persistChainRef.current = persistChainRef.current
       .catch(() => {})
       .then(async () => {

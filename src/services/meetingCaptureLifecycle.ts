@@ -1,4 +1,5 @@
 import { getMeeting, listMeetings, updateMeeting, type Meeting } from '@/data/meetings';
+import { completedCaptureDurationRepair } from '@/core/recording/checkpoint';
 import { getNativeCaptureStatus, startNativePostProcessing } from '@/hardware/recording/foreground';
 import { log } from '@/services/logger';
 import { getNativeCaptureMetrics } from '@/services/nativeCaptureMetrics';
@@ -63,6 +64,16 @@ export async function reconcilePendingNativeMeetingWork(): Promise<number> {
   let resumed = 0;
 
   for (const meeting of meetings) {
+    const repairedDurationMs = completedCaptureDurationRepair(meeting);
+    if (repairedDurationMs != null) {
+      await updateMeeting(meeting.id, { durationMs: repairedDurationMs });
+      log.warn('recovery', 'repaired duration from durable capture boundary', {
+        meetingId: meeting.id,
+        previousDurationMs: meeting.durationMs,
+        repairedDurationMs,
+      });
+    }
+
     const isLiveNativeMeeting = nativeStatus?.meetingId === meeting.id
       && nativeStatus.state !== 'idle'
       && nativeStatus.state !== 'error';
