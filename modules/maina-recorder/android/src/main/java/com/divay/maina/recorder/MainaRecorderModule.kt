@@ -45,13 +45,21 @@ class MainaRecorderModule : Module() {
                         "occurredAt" to intent.getLongExtra(MainaAudioRouteBridge.EXTRA_OCCURRED_AT, System.currentTimeMillis()),
                     ),
                 )
+                MainaPostProcessingService.ACTION_RESULT_CHANGED -> sendEvent(
+                    "onNativePostProcessingChanged",
+                    mapOf(
+                        "meetingId" to intent.getStringExtra(MainaPostProcessingService.EXTRA_MEETING_ID).orEmpty(),
+                        "state" to intent.getStringExtra("state").orEmpty(),
+                        "occurredAt" to System.currentTimeMillis(),
+                    ),
+                )
             }
         }
     }
 
     override fun definition() = ModuleDefinition {
         Name("MainaRecorder")
-        Events("onHardwareTrigger", "onAudioRouteChanged")
+        Events("onHardwareTrigger", "onAudioRouteChanged", "onNativePostProcessingChanged")
 
         OnCreate {
             registerTriggerReceiver()
@@ -177,10 +185,7 @@ class MainaRecorderModule : Module() {
         }
 
         AsyncFunction("readNativePostProcessingResult") { meetingId: String ->
-            MainaPostProcessingOutbox.shared(requireContext()).read(
-                meetingId,
-                MainaPostProcessingService.isProcessing(meetingId),
-            )
+            MainaPostProcessingOutbox.shared(requireContext()).read(meetingId)
         }
 
         AsyncFunction("acknowledgeNativePostProcessingResult") { meetingId: String, runId: String ->
@@ -342,6 +347,7 @@ class MainaRecorderModule : Module() {
         val filter = IntentFilter().apply {
             addAction(MainaHardwareTrigger.ACTION_TRIGGER)
             addAction(MainaAudioRouteBridge.ACTION_ROUTE_CHANGED)
+            addAction(MainaPostProcessingService.ACTION_RESULT_CHANGED)
         }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             context.registerReceiver(triggerReceiver, filter, Context.RECEIVER_NOT_EXPORTED)

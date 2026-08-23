@@ -3,6 +3,7 @@ import * as FileSystem from 'expo-file-system/legacy';
 import { listMeetings, updateMeeting } from '@/data/meetings';
 import { getAppConfig } from '@/services/config';
 import { log } from '@/services/logger';
+import { planAudioRetention } from '@/services/audioRetentionCore';
 
 async function measurePathBytes(uri: string): Promise<number> {
   const info = await FileSystem.getInfoAsync(uri).catch(() => ({ exists: false } as const));
@@ -21,9 +22,8 @@ async function measurePathBytes(uri: string): Promise<number> {
 
 export async function enforceAudioRetentionPolicy(): Promise<void> {
   const config = await getAppConfig();
-  const cutoff = Date.now() - (config.audioRetentionDays * 24 * 60 * 60 * 1000);
   const meetings = (await listMeetings())
-    .filter((meeting) => !!meeting.audioUri && (meeting.status === 'transcribed' || meeting.status === 'summarized'))
+    .filter((meeting) => !!meeting.audioUri)
     .sort((a, b) => a.startedAt - b.startedAt);
 
   const measured = await Promise.all(
@@ -33,29 +33,37 @@ export async function enforceAudioRetentionPolicy(): Promise<void> {
     })),
   );
 
-  let remainingBytes = measured.reduce((sum, item) => sum + item.bytes, 0);
-  const deletions = measured.filter((item) => item.meeting.startedAt <= cutoff);
-
-  for (const item of deletions) {
-    if (!item.meeting.audioUri) continue;
+  const decision = planAudioRetention({
+    now: Date.now(),
+    retentionDays: config.audioRetentionDays,
+    maxBytes: config.audioRetentionMaxBytes,
+    items: measured.map(({ meeting, bytes }) => ({
+      id: meeting.id,
+      startedAt: meeting.startedAt,
+      status: meeting.status,
+      bytes,
+    })),
+  });
+  const expired = new Set(decision.expiredIncompleteIds);
+  for (const item of measured) {
+    if (!decision.deleteIds.includes(item.meeting.id) || !item.meeting.audioUri) continue;
     await FileSystem.deleteAsync(item.meeting.audioUri, { idempotent: true }).catch(() => {});
-    await updateMeeting(item.meeting.id, { audioUri: null });
-    remainingBytes -= item.bytes;
-  }
-
-  if (remainingBytes <= config.audioRetentionMaxBytes) return;
-
-  const remaining = measured.filter((item) => item.meeting.startedAt > cutoff && item.meeting.audioUri);
-  for (const item of remaining) {
-    if (remainingBytes <= config.audioRetentionMaxBytes || !item.meeting.audioUri) break;
-    await FileSystem.deleteAsync(item.meeting.audioUri, { idempotent: true }).catch(() => {});
-    await updateMeeting(item.meeting.id, { audioUri: null });
-    remainingBytes -= item.bytes;
+    await updateMeeting(item.meeting.id, {
+      audioUri: null,
+      ...(expired.has(item.meeting.id)
+        ? {
+            status: 'audio_expired_incomplete',
+            lastError: 'Recovery audio reached the seven-day or 1 GB retention limit. Saved transcript text was kept.',
+          }
+        : {}),
+    });
   }
 
   log.info('audio-retention', 'policy enforced', {
     retentionDays: config.audioRetentionDays,
     maxBytes: config.audioRetentionMaxBytes,
-    remainingBytes: Math.max(0, remainingBytes),
+    deletedMeetings: decision.deleteIds.length,
+    expiredIncompleteMeetings: decision.expiredIncompleteIds.length,
+    remainingBytes: decision.projectedBytes,
   });
 }

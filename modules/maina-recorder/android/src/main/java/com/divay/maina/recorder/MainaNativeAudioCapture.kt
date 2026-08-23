@@ -19,7 +19,10 @@ import java.nio.file.StandardCopyOption
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.concurrent.thread
+import kotlin.math.abs
+import kotlin.math.log10
 import kotlin.math.max
+import kotlin.math.sqrt
 
 /**
  * Service-owned, crash-safe PCM capture.
@@ -56,6 +59,8 @@ internal class MainaNativeAudioCapture(
         val routedDeviceName: String?,
         val lastRouteChangeElapsedMs: Long?,
         val captureGapMs: Long,
+        val rmsDbfs: Double,
+        val peakDbfs: Double,
     ) {
         fun asMap(): Map<String, Any?> = mapOf(
             "state" to state,
@@ -74,6 +79,8 @@ internal class MainaNativeAudioCapture(
             "routedDeviceName" to routedDeviceName,
             "lastRouteChangeElapsedMs" to lastRouteChangeElapsedMs,
             "captureGapMs" to captureGapMs,
+            "rmsDbfs" to rmsDbfs,
+            "peakDbfs" to peakDbfs,
         )
     }
 
@@ -118,6 +125,8 @@ internal class MainaNativeAudioCapture(
     @Volatile private var routedDeviceName: String? = null
     @Volatile private var lastRouteChangeElapsedMs: Long? = null
     @Volatile private var captureGapMs = 0L
+    @Volatile private var rmsDbfs = -90.0
+    @Volatile private var peakDbfs = -90.0
 
     private val routingListener = AudioRouting.OnRoutingChangedListener { routing ->
         val activeRecorder = routing as? AudioRecord ?: return@OnRoutingChangedListener
@@ -145,6 +154,8 @@ internal class MainaNativeAudioCapture(
         routedDeviceName = routedDeviceName,
         lastRouteChangeElapsedMs = lastRouteChangeElapsedMs,
         captureGapMs = captureGapMs,
+        rmsDbfs = rmsDbfs,
+        peakDbfs = peakDbfs,
     )
 
     fun start(options: Options): Snapshot = synchronized(lock) {
@@ -168,6 +179,8 @@ internal class MainaNativeAudioCapture(
         routedDeviceName = null
         lastRouteChangeElapsedMs = null
         captureGapMs = 0L
+        rmsDbfs = -90.0
+        peakDbfs = -90.0
         routeRefreshRequested.set(false)
         routeRefreshReason = "initial"
 
@@ -278,6 +291,7 @@ internal class MainaNativeAudioCapture(
                         activeChunk.output.write(buffer, 0, read)
                         activeChunk.bytes += read
                         currentBytesWritten = activeChunk.bytes
+                        updateLevels(buffer, read)
                         lastProgressAtMs = System.currentTimeMillis()
                         val now = SystemClock.elapsedRealtime()
                         if (now - activeChunk.lastSyncElapsedMs >= SYNC_INTERVAL_MS) {
@@ -317,6 +331,26 @@ internal class MainaNativeAudioCapture(
         } finally {
             closeChunk(activeChunk, directory, "stop")
         }
+    }
+
+    private fun updateLevels(buffer: ByteArray, length: Int) {
+        var sumSquares = 0.0
+        var peak = 0.0
+        var samples = 0
+        var offset = 0
+        while (offset + 1 < length) {
+            val low = buffer[offset].toInt() and 0xff
+            val high = buffer[offset + 1].toInt()
+            val value = ((high shl 8) or low).toShort().toDouble() / 32768.0
+            sumSquares += value * value
+            peak = max(peak, abs(value))
+            samples += 1
+            offset += BYTES_PER_FRAME * 4
+        }
+        if (samples == 0) return
+        val rms = sqrt(sumSquares / samples)
+        rmsDbfs = 20.0 * log10(rms.coerceAtLeast(1e-9))
+        peakDbfs = 20.0 * log10(peak.coerceAtLeast(1e-9))
     }
 
     private fun recoverRecorder(directory: File, reason: String) {

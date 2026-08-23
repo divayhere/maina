@@ -26,6 +26,7 @@ import {
   armRemoteControl,
   inspectNativeCaptureDirectory,
   repairWavFiles,
+  subscribeNativePostProcessingChanges,
 } from '@/hardware/recording/foreground';
 import { installHardwareTriggerListener } from '@/hardware/trigger/hardwareTrigger';
 import { resolveRemoteAction } from '@/hardware/trigger/remoteControl';
@@ -232,40 +233,59 @@ function RootLayout() {
 
   useEffect(() => {
     if (!ready) return;
+    let pipelineInFlight: Promise<void> | null = null;
     const syncAudioCleanup = async () => {
       const meetingIds = await getMeetingsWithDeletedAudio();
       await markMeetingsAudioDeleted(meetingIds);
-      await enforceAudioRetentionPolicy();
       await reconcilePendingNativeMeetingWork();
+      // Completed audio is disposable only after native result import and
+      // acknowledgement have committed. Incomplete/active audio remains under
+      // the seven-day/1 GB recovery policy.
+      await enforceAudioRetentionPolicy();
       await reconcileAutoSummaryEligibility();
       await reconcilePendingMeetingPackets();
       await reconcilePendingMainaKnowledgeCloudSyncs();
       await reconcilePendingMainaKnowledgeCloudCorrections();
       await flushDiagnostics().catch(() => {});
     };
-    void syncAudioCleanup().catch((cause) => {
+    const schedulePipelineSync = () => {
+      if (pipelineInFlight) return pipelineInFlight;
+      let work: Promise<void>;
+      work = syncAudioCleanup().finally(() => {
+        if (pipelineInFlight === work) pipelineInFlight = null;
+      });
+      pipelineInFlight = work;
+      return work;
+    };
+    void schedulePipelineSync().catch((cause) => {
       log.warn('meetings', 'audio cleanup state sync failed', { err: String(cause) });
     });
     const subscription = AppState.addEventListener('change', (state) => {
       if (state !== 'active') return;
-      void syncAudioCleanup().catch((cause) => {
+      void schedulePipelineSync().catch((cause) => {
         log.warn('meetings', 'audio cleanup state sync failed', { err: String(cause) });
       });
     });
+    const unsubscribeNative = subscribeNativePostProcessingChanges((event) => {
+      log.info('recovery', 'native post-processing state changed', {
+        meetingId: event.meetingId,
+        state: event.state,
+      });
+      void schedulePipelineSync().catch((cause) => {
+        log.warn('recovery', 'native event reconciliation failed', { err: String(cause) });
+      });
+    });
     const packetTimer = setInterval(() => {
-      if (AppState.currentState !== 'active') return;
-      // Native ASR deliberately owns a separate SQLite outbox. Poll only while
-      // Maina is foregrounded so a completed run becomes visible promptly;
-      // Android keeps capture/ASR durable when the UI is not present.
-      void reconcilePendingNativeMeetingWork()
-        .then(() => reconcileAutoSummaryEligibility())
-        .then(() => reconcilePendingMeetingPackets())
-        .catch((cause) => {
-          log.warn('summary', 'foreground native-to-packet reconciliation failed', { err: String(cause) });
-        });
+      // Android may throttle this timer in the background; the native broadcast
+      // above is the immediate path and this poll is a cheap safety net while
+      // the React runtime remains alive.
+      void schedulePipelineSync().catch((cause) => {
+        log.warn('summary', 'native-to-packet reconciliation failed', { err: String(cause) });
+      });
     }, 8_000);
     return () => {
       subscription.remove();
+      unsubscribeNative();
       clearInterval(packetTimer);
     };
   }, [ready]);

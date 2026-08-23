@@ -3,7 +3,7 @@ import * as FileSystem from 'expo-file-system/legacy';
 import { router, useFocusEffect } from 'expo-router';
 import { useSpeechRecognitionEvent } from 'expo-speech-recognition';
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Alert, AppState, Pressable, ScrollView, StyleSheet, View } from 'react-native';
+import { Alert, Animated, AppState, Pressable, ScrollView, StyleSheet, View } from 'react-native';
 
 import {
   ACTIVE_LANGUAGES,
@@ -189,6 +189,25 @@ export default function RecordScreen() {
   const [meetingCreated, setMeetingCreated] = useState(false);
   const [paused, setPaused] = useState(false);
   const [captureNote, setCaptureNote] = useState<string | null>(null);
+  const audioPulse = useRef(new Animated.Value(0)).current;
+
+  useEffect(() => {
+    if (CAPTURE_ENGINE !== 'native-qwen') return;
+    const updatePulse = () => {
+      const status = getNativeCaptureStatus();
+      const normalized = !pausedRef.current && status?.state === 'recording'
+        ? Math.max(0, Math.min(1, ((status.rmsDbfs ?? -60) + 60) / 48))
+        : 0;
+      Animated.timing(audioPulse, {
+        toValue: normalized,
+        duration: 180,
+        useNativeDriver: true,
+      }).start();
+    };
+    const timer = setInterval(updatePulse, 250);
+    updatePulse();
+    return () => clearInterval(timer);
+  }, [audioPulse]);
 
   const showCaptureNote = useCallback((message: string | null, durationMs = 8000) => {
     if (captureNoteTimerRef.current) {
@@ -1094,13 +1113,24 @@ export default function RecordScreen() {
       </Pressable>
 
       <View style={styles.heroWrap}>
-        <View style={[styles.haloOuter, { backgroundColor: theme.mutedSoft }]}>
+        <Animated.View
+          style={[
+            styles.haloOuter,
+            {
+              backgroundColor: theme.mutedSoft,
+              transform: [{
+                scale: audioPulse.interpolate({ inputRange: [0, 1], outputRange: [0.96, 1.08] }),
+              }],
+              opacity: audioPulse.interpolate({ inputRange: [0, 1], outputRange: [0.45, 0.82] }),
+            },
+          ]}
+        >
           <View style={[styles.haloInner, { backgroundColor: theme.mint }]}>
             <View style={[styles.haloDotWrap, { backgroundColor: theme.accent }]}>
               <View style={[styles.haloDot, { backgroundColor: theme.primary }]} />
             </View>
           </View>
-        </View>
+        </Animated.View>
         <AppText variant="timer" style={styles.center}>{formatDuration(elapsed)}</AppText>
         <AppText variant="title" muted style={styles.center}>
           {paused ? 'Paused' : 'Listening'}

@@ -45,4 +45,34 @@ class MainaPostProcessingSupportTest {
             ),
         )
     }
+
+    @Test
+    fun `suspicious window splits into two bounded overlapping retries`() {
+        assertEquals(
+            listOf(
+                AsrWindow(startMs = 1_000L, endMs = 9_000L),
+                AsrWindow(startMs = 8_000L, endMs = 16_000L),
+            ),
+            MainaPostProcessingSupport.splitForRetry(
+                AsrWindow(startMs = 1_000L, endMs = 16_000L),
+            ),
+        )
+    }
+
+    @Test
+    fun `short suspicious window is not recursively split`() {
+        assertEquals(
+            emptyList<AsrWindow>(),
+            MainaPostProcessingSupport.splitForRetry(
+                AsrWindow(startMs = 0L, endMs = 5_999L),
+            ),
+        )
+    }
+
+    @Test
+    fun `coverage requires every window and no failures`() {
+        assertEquals(true, MainaPostProcessingSupport.coverageComplete(216, 216, 0))
+        assertEquals(false, MainaPostProcessingSupport.coverageComplete(216, 190, 26))
+        assertEquals(false, MainaPostProcessingSupport.coverageComplete(0, 0, 0))
+    }
 }

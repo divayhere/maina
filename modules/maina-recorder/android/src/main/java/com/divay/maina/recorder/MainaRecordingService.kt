@@ -225,6 +225,21 @@ class MainaRecordingService : Service() {
         }
         when (intent?.action) {
             ACTION_START_NATIVE_CAPTURE -> {
+                // Recording always wins the phone's CPU/memory budget. Stopping
+                // the private ASR service interrupts its executor; the worker
+                // checkpoints/defer at the next native decode boundary and the
+                // durable outbox resumes it later without losing completed work.
+                val postProcessingStopped = stopService(
+                    Intent(this, MainaPostProcessingService::class.java),
+                )
+                if (postProcessingStopped) {
+                    recordNativeEvent(
+                        level = "info",
+                        category = "native-asr",
+                        eventName = "native-asr-preempted-for-capture",
+                        message = "Recording preempted local transcription at a durable boundary",
+                    )
+                }
                 val meetingId = intent.getStringExtra(EXTRA_MEETING_ID).orEmpty()
                 val directory = intent.getStringExtra(EXTRA_CAPTURE_DIRECTORY).orEmpty()
                 val sourceMode = intent.getStringExtra(EXTRA_SOURCE_MODE) ?: "voice_recognition"

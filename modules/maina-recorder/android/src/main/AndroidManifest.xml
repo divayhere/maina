@@ -16,6 +16,7 @@
       android:name="com.divay.maina.recorder.MainaPostProcessingService"
       android:exported="false"
       android:foregroundServiceType="mediaProcessing"
+      android:process=":asr"
       android:stopWithTask="false" />
     <service
       android:name="com.divay.maina.recorder.MainaKeyAccessibilityService"

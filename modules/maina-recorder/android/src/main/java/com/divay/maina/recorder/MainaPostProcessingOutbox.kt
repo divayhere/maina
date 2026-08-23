@@ -17,7 +17,12 @@ import java.util.UUID
 internal class MainaPostProcessingOutbox(context: Context) :
     SQLiteOpenHelper(context.applicationContext, DB_NAME, null, DB_VERSION) {
 
-    data class StartResult(val runId: String, val alreadyComplete: Boolean)
+    data class StartResult(
+        val runId: String,
+        val alreadyTerminal: Boolean,
+        val resumed: Boolean,
+        val completedWindowKeys: Set<String>,
+    )
 
     fun begin(
         meetingId: String,
@@ -32,16 +37,58 @@ internal class MainaPostProcessingOutbox(context: Context) :
     ): StartResult {
         writableDatabase.beginTransaction()
         try {
+            var existingRunId: String? = null
+            var existingState: String? = null
+            var existingWindowCount = 0
             writableDatabase.rawQuery(
-                "SELECT run_id, state FROM runs WHERE meeting_id = ?",
+                "SELECT run_id, state, window_count FROM runs WHERE meeting_id = ?",
                 arrayOf(meetingId),
             ).use { cursor ->
-                if (cursor.moveToFirst() && cursor.getString(1) == STATE_COMPLETE) {
-                    return StartResult(cursor.getString(0), true)
+                if (cursor.moveToFirst()) {
+                    existingRunId = cursor.getString(0)
+                    existingState = cursor.getString(1)
+                    existingWindowCount = cursor.getInt(2)
                 }
+            }
+            if (existingRunId != null && existingState in TERMINAL_STATES) {
+                writableDatabase.setTransactionSuccessful()
+                return StartResult(existingRunId!!, true, false, emptySet())
+            }
+            if (existingRunId != null && existingWindowCount == windowCount) {
+                // A killed/deferred private ASR process resumes the same run.
+                // Completed windows and blocks stay intact; only unfinished or
+                // previously failed windows are decoded again.
+                writableDatabase.delete(
+                    "window_results",
+                    "meeting_id = ? AND run_id = ? AND state = ?",
+                    arrayOf(meetingId, existingRunId, WINDOW_FAILED),
+                )
+                val completed = completedWindowKeys(writableDatabase, meetingId, existingRunId!!)
+                writableDatabase.update(
+                    "runs",
+                    ContentValues().apply {
+                        put("state", STATE_RUNNING)
+                        put("meeting_started_at", meetingStartedAt)
+                        if (captureEndedAt == null) putNull("capture_ended_at") else put("capture_ended_at", captureEndedAt)
+                        put("duration_ms", durationMs)
+                        put("audio_duration_ms", audioDurationMs)
+                        put("segment_count", segmentCount)
+                        put("completed_windows", completed.size)
+                        put("failed_windows", 0)
+                        put("route_restart_count", routeRestartCount)
+                        put("capture_gap_ms", captureGapMs)
+                        putNull("last_error")
+                        put("updated_at", System.currentTimeMillis())
+                    },
+                    "meeting_id = ?",
+                    arrayOf(meetingId),
+                )
+                writableDatabase.setTransactionSuccessful()
+                return StartResult(existingRunId!!, false, true, completed)
             }
             val runId = UUID.randomUUID().toString()
             writableDatabase.delete("blocks", "meeting_id = ?", arrayOf(meetingId))
+            writableDatabase.delete("window_results", "meeting_id = ?", arrayOf(meetingId))
             writableDatabase.insertWithOnConflict(
                 "runs",
                 null,
@@ -66,7 +113,7 @@ internal class MainaPostProcessingOutbox(context: Context) :
                 SQLiteDatabase.CONFLICT_REPLACE,
             )
             writableDatabase.setTransactionSuccessful()
-            return StartResult(runId, false)
+            return StartResult(runId, false, false, emptySet())
         } finally {
             writableDatabase.endTransaction()
         }
@@ -100,6 +147,42 @@ internal class MainaPostProcessingOutbox(context: Context) :
         )
     }
 
+    fun clearWindowBlocks(meetingId: String, runId: String, baseSequence: Int) =
+        writableDatabase.delete(
+            "blocks",
+            "meeting_id = ? AND run_id = ? AND sequence >= ? AND sequence <= ?",
+            arrayOf(meetingId, runId, baseSequence.toString(), (baseSequence + 1).toString()),
+        )
+
+    fun markWindow(
+        meetingId: String,
+        runId: String,
+        segmentIndex: Int,
+        windowIndex: Int,
+        completed: Boolean,
+        error: String?,
+    ) = writableDatabase.insertWithOnConflict(
+        "window_results",
+        null,
+        ContentValues().apply {
+            put("meeting_id", meetingId)
+            put("run_id", runId)
+            put("segment_index", segmentIndex)
+            put("window_index", windowIndex)
+            put("state", if (completed) WINDOW_COMPLETE else WINDOW_FAILED)
+            if (error == null) putNull("last_error") else put("last_error", error)
+            put("updated_at", System.currentTimeMillis())
+        },
+        SQLiteDatabase.CONFLICT_REPLACE,
+    )
+
+    fun lastBlockTextBefore(meetingId: String, runId: String, sequence: Int): String = readableDatabase.rawQuery(
+        """SELECT text FROM blocks
+           WHERE meeting_id = ? AND run_id = ? AND sequence < ?
+           ORDER BY sequence DESC LIMIT 1""",
+        arrayOf(meetingId, runId, sequence.toString()),
+    ).use { cursor -> if (cursor.moveToFirst()) cursor.getString(0).orEmpty() else "" }
+
     fun updateProgress(
         meetingId: String,
         processedSegments: Int,
@@ -119,7 +202,7 @@ internal class MainaPostProcessingOutbox(context: Context) :
         arrayOf(meetingId),
     )
 
-    fun complete(
+    fun finish(
         meetingId: String,
         processedSegments: Int,
         completedWindows: Int,
@@ -128,7 +211,7 @@ internal class MainaPostProcessingOutbox(context: Context) :
     ) = writableDatabase.update(
         "runs",
         ContentValues().apply {
-            put("state", STATE_COMPLETE)
+            put("state", if (failedWindows == 0) STATE_COMPLETE else STATE_PARTIAL)
             put("processed_segments", processedSegments)
             put("completed_windows", completedWindows)
             put("failed_windows", failedWindows)
@@ -150,7 +233,7 @@ internal class MainaPostProcessingOutbox(context: Context) :
         arrayOf(meetingId),
     )
 
-    fun read(meetingId: String, active: Boolean): Map<String, Any?>? = readableDatabase.rawQuery(
+    fun read(meetingId: String): Map<String, Any?>? = readableDatabase.rawQuery(
         """SELECT run_id, state, meeting_started_at, capture_ended_at, duration_ms,
                   audio_duration_ms, segment_count, processed_segments, window_count,
                   completed_windows, failed_windows, route_restart_count, capture_gap_ms,
@@ -177,11 +260,17 @@ internal class MainaPostProcessingOutbox(context: Context) :
                 )
             }
         }
+        val state = run.getString(1)
         mapOf(
             "meetingId" to meetingId,
             "runId" to runId,
-            "state" to run.getString(1),
-            "active" to active,
+            "state" to state,
+            // This survives process isolation; a static field in :asr cannot
+            // truthfully describe activity to the main React Native process.
+            "active" to (
+                state == STATE_RUNNING
+                    && System.currentTimeMillis() - run.getLong(14) <= ACTIVE_HEARTBEAT_MAX_AGE_MS
+            ),
             "meetingStartedAt" to run.getLong(2),
             "captureEndedAt" to if (run.isNull(3)) null else run.getLong(3),
             "durationMs" to run.getLong(4),
@@ -210,12 +299,17 @@ internal class MainaPostProcessingOutbox(context: Context) :
         try {
             val deleted = writableDatabase.delete(
                 "runs",
-                "meeting_id = ? AND run_id = ? AND state = ?",
-                arrayOf(meetingId, runId, STATE_COMPLETE),
+                "meeting_id = ? AND run_id = ? AND state IN (?, ?)",
+                arrayOf(meetingId, runId, STATE_COMPLETE, STATE_PARTIAL),
             )
             if (deleted > 0) {
                 writableDatabase.delete(
                     "blocks",
+                    "meeting_id = ? AND run_id = ?",
+                    arrayOf(meetingId, runId),
+                )
+                writableDatabase.delete(
+                    "window_results",
                     "meeting_id = ? AND run_id = ?",
                     arrayOf(meetingId, runId),
                 )
@@ -265,16 +359,55 @@ internal class MainaPostProcessingOutbox(context: Context) :
                 PRIMARY KEY (meeting_id, run_id, sequence)
             )""",
         )
+        createWindowResultsTable(db)
     }
 
-    override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) = Unit
+    override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
+        if (oldVersion < 2) createWindowResultsTable(db)
+    }
+
+    private fun createWindowResultsTable(db: SQLiteDatabase) {
+        db.execSQL(
+            """CREATE TABLE IF NOT EXISTS window_results (
+                meeting_id TEXT NOT NULL,
+                run_id TEXT NOT NULL,
+                segment_index INTEGER NOT NULL,
+                window_index INTEGER NOT NULL,
+                state TEXT NOT NULL,
+                last_error TEXT,
+                updated_at INTEGER NOT NULL,
+                PRIMARY KEY (meeting_id, run_id, segment_index, window_index)
+            )""",
+        )
+    }
+
+    private fun completedWindowKeys(
+        db: SQLiteDatabase,
+        meetingId: String,
+        runId: String,
+    ): Set<String> = db.rawQuery(
+        """SELECT segment_index, window_index FROM window_results
+           WHERE meeting_id = ? AND run_id = ? AND state = ?""",
+        arrayOf(meetingId, runId, WINDOW_COMPLETE),
+    ).use { cursor ->
+        buildSet {
+            while (cursor.moveToNext()) add(windowKey(cursor.getInt(0), cursor.getInt(1)))
+        }
+    }
 
     companion object {
         private const val DB_NAME = "maina-native-postprocess.db"
-        private const val DB_VERSION = 1
+        private const val DB_VERSION = 2
         const val STATE_RUNNING = "running"
         const val STATE_COMPLETE = "complete"
+        const val STATE_PARTIAL = "partial"
         const val STATE_DEFERRED = "deferred"
+        const val WINDOW_COMPLETE = "complete"
+        const val WINDOW_FAILED = "failed"
+        val TERMINAL_STATES = setOf(STATE_COMPLETE, STATE_PARTIAL)
+        private const val ACTIVE_HEARTBEAT_MAX_AGE_MS = 120_000L
+
+        fun windowKey(segmentIndex: Int, windowIndex: Int) = "$segmentIndex:$windowIndex"
 
         @Volatile private var shared: MainaPostProcessingOutbox? = null
         fun shared(context: Context): MainaPostProcessingOutbox = shared

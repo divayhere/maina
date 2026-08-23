@@ -129,7 +129,11 @@ internal class MainaQwenAsr(private val context: Context) {
         val modelConfig = OfflineModelConfig().apply {
             qwen3Asr = qwen
             tokens = ""
-            numThreads = 4
+            // Match sherpa-onnx's documented Qwen example. More threads made
+            // the Pixel hotter and increased contention with durable capture;
+            // this release optimizes predictable background work over peak
+            // benchmark throughput.
+            numThreads = INFERENCE_THREADS
             debug = false
             provider = "cpu"
         }
@@ -227,8 +231,12 @@ internal class MainaQwenAsr(private val context: Context) {
     private companion object {
         const val ENGINE_ID = "qwen3-0.6b-int8"
         const val ENGINE_VERSION = "sherpa-onnx-1.13.6"
-        const val MAX_TOTAL_LEN = 1536
-        const val MAX_NEW_TOKENS = 512
+        // Upstream sherpa-onnx Java/C++ defaults for Qwen3-ASR. The previous
+        // 1536/512 configuration allowed short pathological windows to build
+        // a very large KV cache and decode for tens of seconds.
+        const val MAX_TOTAL_LEN = 512
+        const val MAX_NEW_TOKENS = 128
+        const val INFERENCE_THREADS = 2
         const val TOKEN_TRUNCATION_MARGIN = 4
         const val SPEECH_EXPECTED_RMS_DBFS = -55.0
         val REQUIRED_FILES = linkedMapOf(

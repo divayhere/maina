@@ -9,6 +9,7 @@ import {
   type NativeCaptureDirectoryInspection,
   type NativePostProcessingRequest,
   type NativePostProcessingResult,
+  type NativePostProcessingChangedEvent,
   type NativeCaptureStatus,
   type QwenAsrResult,
   type QwenAsrStatus,
@@ -150,5 +151,13 @@ export function subscribeAudioRouteChanges(
 ): () => void {
   if (Platform.OS !== 'android' || !MainaRecorder) return () => {};
   const subscription = MainaRecorder.addListener('onAudioRouteChanged', listener);
+  return () => subscription.remove();
+}
+
+export function subscribeNativePostProcessingChanges(
+  listener: (event: NativePostProcessingChangedEvent) => void,
+): () => void {
+  if (Platform.OS !== 'android' || !MainaRecorder) return () => {};
+  const subscription = MainaRecorder.addListener('onNativePostProcessingChanged', listener);
   return () => subscription.remove();
 }

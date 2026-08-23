@@ -71,6 +71,8 @@ export interface NativeCaptureStatus {
   routedDeviceName?: string | null;
   lastRouteChangeElapsedMs?: number | null;
   captureGapMs?: number;
+  rmsDbfs?: number;
+  peakDbfs?: number;
 }
 
 export interface NativeCaptureDirectoryInspection {
@@ -111,6 +113,12 @@ export interface NativePostProcessingResult {
   lastError?: string | null;
   updatedAt: number;
   blocks: Array<{ sequence: number; segmentIndex: number; startedAt: number; endedAt: number; language: string; text: string }>;
+}
+
+export interface NativePostProcessingChangedEvent {
+  meetingId: string;
+  state: 'running' | 'complete' | 'partial' | 'deferred' | string;
+  occurredAt: number;
 }
 
 export interface QwenAsrStatus {
@@ -232,6 +240,10 @@ interface MainaRecorderNativeModule {
   addListener(
     eventName: 'onAudioRouteChanged',
     listener: (event: AudioRouteChangedEvent) => void,
+  ): NativeEventSubscription;
+  addListener(
+    eventName: 'onNativePostProcessingChanged',
+    listener: (event: NativePostProcessingChangedEvent) => void,
   ): NativeEventSubscription;
   startForegroundSession(): Promise<boolean>;
   stopForegroundSession(): Promise<void>;

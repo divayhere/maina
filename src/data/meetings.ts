@@ -5,12 +5,15 @@
 import { getDb } from './db';
 import { log } from '../services/logger';
 import { splitTranscriptChunks, transcriptWordCount } from '../core/transcription/transcript';
+import { deriveNativeTranscriptOutcome } from '../services/nativePostProcessingCore';
 
 export type MeetingStatus =
   | 'recording'
   | 'interrupted'
   | 'recorded'
   | 'transcribing'
+  | 'transcript_partial'
+  | 'audio_expired_incomplete'
   | 'transcribed'
   | 'summarizing'
   | 'summarized';
@@ -1013,9 +1016,13 @@ export async function importNativePostProcessingResult(input: {
     .sort((left, right) => left.sequence - right.sequence);
   const now = Date.now();
   const hasText = blocks.length > 0;
-  const finalError = input.lastError?.trim() || (
-    hasText || input.windowCount === 0 ? null : 'Local transcription produced no text.'
-  );
+  const outcome = deriveNativeTranscriptOutcome({
+    hasText,
+    windowCount: input.windowCount,
+    completedWindows: input.completedWindows,
+    failedWindows: input.failedWindows,
+    lastError: input.lastError,
+  });
 
   let didImport = false;
   await db.withExclusiveTransactionAsync(async (transaction) => {
@@ -1075,8 +1082,8 @@ export async function importNativePostProcessingResult(input: {
         Math.max(0, input.completedWindows),
         Math.max(0, input.failedWindows),
         Math.max(0, input.routeRestartCount),
-        hasText ? 'transcribed' : 'recorded',
-        finalError,
+        outcome.status,
+        outcome.error,
         input.runId,
         now,
         now,
@@ -1094,6 +1101,37 @@ export async function importNativePostProcessingResult(input: {
     failedWindows: input.failedWindows,
   });
   return 'imported';
+}
+
+export async function updateNativePostProcessingProgress(input: {
+  meetingId: string;
+  windowCount: number;
+  completedWindows: number;
+  failedWindows: number;
+  processedSegments: number;
+  lastError?: string | null;
+}): Promise<void> {
+  const db = await getDb();
+  await db.runAsync(
+    `UPDATE meetings
+     SET status = CASE
+           WHEN status IN ('recording', 'interrupted', 'recorded', 'transcribing') THEN 'transcribing'
+           ELSE status
+         END,
+         transcription_window_count = ?, transcription_completed_windows = ?,
+         transcription_failed_windows = ?, transcribed_segments = ?,
+         last_error = ?, updated_at = ?
+     WHERE id = ?`,
+    [
+      Math.max(0, input.windowCount),
+      Math.max(0, input.completedWindows),
+      Math.max(0, input.failedWindows),
+      Math.max(0, input.processedSegments),
+      input.lastError?.trim() || null,
+      Date.now(),
+      input.meetingId,
+    ],
+  );
 }
 
 export async function getTranscriptPage(

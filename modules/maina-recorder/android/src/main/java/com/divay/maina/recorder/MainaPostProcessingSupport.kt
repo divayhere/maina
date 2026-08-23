@@ -15,6 +15,8 @@ internal object MainaPostProcessingSupport {
     private const val DEFAULT_WINDOW_MS = 15_000L
     private const val DEFAULT_OVERLAP_MS = 2_000L
     private const val MIN_TAIL_MS = 5_000L
+    private const val RETRY_MIN_WINDOW_MS = 6_000L
+    private const val RETRY_OVERLAP_MS = 1_000L
 
     fun planWindows(durationMs: Long): List<AsrWindow> {
         if (durationMs <= 0L) return emptyList()
@@ -44,6 +46,25 @@ internal object MainaPostProcessingSupport {
         }
         return current.trim()
     }
+
+    /**
+     * A token-capped or speech-like empty window gets one bounded recovery
+     * pass as two shorter overlapping windows. We never respond by increasing
+     * Qwen's token/KV-cache limits.
+     */
+    fun splitForRetry(window: AsrWindow): List<AsrWindow> {
+        val duration = window.endMs - window.startMs
+        if (duration < RETRY_MIN_WINDOW_MS) return emptyList()
+        val midpoint = window.startMs + duration / 2L
+        val halfOverlap = RETRY_OVERLAP_MS / 2L
+        return listOf(
+            AsrWindow(window.startMs, min(window.endMs, midpoint + halfOverlap)),
+            AsrWindow(max(window.startMs, midpoint - halfOverlap), window.endMs),
+        ).filter { it.endMs > it.startMs }
+    }
+
+    fun coverageComplete(totalWindows: Int, completedWindows: Int, failedWindows: Int): Boolean =
+        totalWindows > 0 && failedWindows == 0 && completedWindows == totalWindows
 
     fun durationMs(uriOrPath: String): Long {
         val file = if (uriOrPath.startsWith("file:")) File(java.net.URI(uriOrPath)) else File(uriOrPath)

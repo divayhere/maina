@@ -1,7 +1,7 @@
 import { Ionicons } from '@expo/vector-icons';
 import { router, useFocusEffect } from 'expo-router';
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { AppState, FlatList, Pressable, TextInput, View } from 'react-native';
+import { ActivityIndicator, AppState, FlatList, Pressable, TextInput, View } from 'react-native';
 
 import { AppText, Banner, Card, Chip, EmptyState, SectionLabel } from '@/design/components';
 import { DrawerMenu } from '@/design/shell';
@@ -19,7 +19,7 @@ function describeTranscriptionProgress(item: Meeting): { detail?: string; progre
     const completed = item.transcriptionCompletedWindows + item.transcriptionFailedWindows;
     const progress = Math.max(0, Math.min(1, completed / item.transcriptionWindowCount));
     return {
-      detail: `${Math.round(progress * 100)}% complete`,
+      detail: `${completed} of ${item.transcriptionWindowCount} audio windows · ${Math.round(progress * 100)}%`,
       progress,
     };
   }
@@ -36,6 +36,8 @@ function describeTranscriptionProgress(item: Meeting): { detail?: string; progre
 function describeState(item: Meeting): { label: string; tone: 'primary' | 'warn' | 'live' | 'muted'; detail?: string; working?: boolean; progress?: number } {
   if (item.status === 'recording') return { label: 'Recording now', tone: 'live', working: true };
   if (item.status === 'interrupted') return { label: 'Recording was cut short', tone: 'warn', detail: 'We saved what we could. Tap to fix.' };
+  if (item.status === 'transcript_partial') return { label: 'Transcript needs recovery', tone: 'warn', detail: 'Some audio is still available for another transcription pass.' };
+  if (item.status === 'audio_expired_incomplete') return { label: 'Partial transcript saved', tone: 'warn', detail: 'Recovery audio reached the storage limit and was removed.' };
   if (item.summaryStatus === 'failed') return { label: "Notes didn't come through", tone: 'warn', detail: 'Your transcript is safe.' };
   if (item.summaryStatus === 'ready') return { label: 'Notes ready', tone: 'primary' };
   if (item.summaryStatus === 'queued' || item.summaryStatus === 'running' || item.status === 'summarizing') {
@@ -99,9 +101,13 @@ function MeetingRow({ item }: { item: Meeting }) {
           ) : null}
 
           {state.working ? (
-            <View style={{ height: 6, borderRadius: radius.pill, backgroundColor: theme.mutedSoft, overflow: 'hidden' }}>
-              <View style={{ width: `${Math.max(0.08, state.progress ?? 0.26) * 100}%`, height: '100%', borderRadius: radius.pill, backgroundColor: theme.primary }} />
-            </View>
+            state.progress == null ? (
+              <ActivityIndicator size="small" color={theme.primary} style={{ alignSelf: 'flex-start' }} />
+            ) : (
+              <View style={{ height: 6, borderRadius: radius.pill, backgroundColor: theme.mutedSoft, overflow: 'hidden' }}>
+                <View style={{ width: `${state.progress * 100}%`, height: '100%', borderRadius: radius.pill, backgroundColor: theme.primary }} />
+              </View>
+            )
           ) : null}
         </Card>
       )}

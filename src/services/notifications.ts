@@ -60,6 +60,30 @@ export function buildMainaNotifications(meetings: Meeting[]): MainaNotification[
       });
     }
 
+    if (meeting.status === 'transcript_partial') {
+      notifications.push({
+        id: `transcript-partial:${meeting.id}`,
+        meetingId: meeting.id,
+        title: 'Some audio needs another pass',
+        body: 'Maina kept the partial transcript and recovery audio. Open the meeting to retry safely.',
+        tone: 'warn',
+        createdAt: meeting.updatedAt ?? meeting.startedAt,
+        href: `/meeting/${meeting.id}`,
+      });
+    }
+
+    if (meeting.status === 'audio_expired_incomplete') {
+      notifications.push({
+        id: `audio-expired:${meeting.id}`,
+        meetingId: meeting.id,
+        title: 'Partial transcript kept',
+        body: 'The oldest recovery audio reached the storage limit and was removed. Saved text remains available.',
+        tone: 'warn',
+        createdAt: meeting.updatedAt ?? meeting.startedAt,
+        href: `/meeting/${meeting.id}`,
+      });
+    }
+
     if (meeting.summaryStatus === 'failed') {
       notifications.push({
         id: `summary-failed:${meeting.id}`,

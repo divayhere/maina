@@ -130,6 +130,9 @@ export function isMeetingEligibleForMainaKnowledgeCloudSync(
   meeting: MainaKnowledgeCloudMeetingShape,
   options?: { includeAuthFailures?: boolean },
 ) {
+  // Never freeze or retry a source from a transcript that Maina itself knows
+  // has missing ASR coverage. Recovery/correction must happen first.
+  if (meeting.status === 'transcript_partial' || meeting.status === 'audio_expired_incomplete') return false;
   if (meeting.knowledgeCloudSyncStatus === 'sync_succeeded') return false;
   if (meeting.knowledgeCloudSyncStatus === 'sync_failed_conflict') return false;
   if (meeting.knowledgeCloudSyncStatus === 'sync_failed_validation') return false;

@@ -3,6 +3,7 @@ import {
   importNativePostProcessingResult,
   listMeetings,
   updateMeeting,
+  updateNativePostProcessingProgress,
   type Meeting,
 } from '@/data/meetings';
 import { completedCaptureDurationRepair } from '@/core/recording/checkpoint';
@@ -88,7 +89,7 @@ async function reconcilePendingNativeMeetingWorkInternal(): Promise<number> {
       });
       return null;
     });
-    if (nativeResult?.state === 'complete') {
+    if (nativeResult?.state === 'complete' || nativeResult?.state === 'partial') {
       const imported = await importNativePostProcessingResult({
         meetingId: nativeResult.meetingId,
         runId: nativeResult.runId,
@@ -126,6 +127,16 @@ async function reconcilePendingNativeMeetingWorkInternal(): Promise<number> {
         blocks: nativeResult.blocks.length,
       });
       continue;
+    }
+    if (nativeResult) {
+      await updateNativePostProcessingProgress({
+        meetingId: nativeResult.meetingId,
+        windowCount: nativeResult.windowCount,
+        completedWindows: nativeResult.completedWindows,
+        failedWindows: nativeResult.failedWindows,
+        processedSegments: nativeResult.processedSegments,
+        lastError: nativeResult.state === 'deferred' ? nativeResult.lastError : null,
+      });
     }
     const repairedDurationMs = completedCaptureDurationRepair(meeting);
     if (repairedDurationMs != null) {
@@ -179,4 +190,10 @@ export async function hydrateMeetingFromDurableCapture(meetingId: string): Promi
   if (meeting.status !== 'recording') return meeting;
   await launchNativePostProcessing(meeting);
   return getMeeting(meetingId);
+}
+
+export async function retryNativeMeetingTranscription(meetingId: string): Promise<boolean> {
+  const meeting = await getMeeting(meetingId);
+  if (!meeting?.audioUri) return false;
+  return launchNativePostProcessing(meeting);
 }

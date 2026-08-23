@@ -47,6 +47,7 @@ import { maybeQueueMeetingPacket, runMeetingPacketGeneration } from '@/services/
 import { log } from '@/services/logger';
 import { ensureStorageBudget } from '@/services/storageBudget';
 import { runLocalAsrPipeline } from '@/services/localAsrPipeline';
+import { retryNativeMeetingTranscription } from '@/services/meetingCaptureLifecycle';
 import { buildMeetingExportText, shareMeetingExport } from '@/services/transcriptExport';
 import { useMeetings } from '@/state/meetingsStore';
 import { formatDate, formatDuration, formatTime } from '@/utils/format';
@@ -483,23 +484,11 @@ export default function MeetingDetail() {
       setRepassIdx(0);
       await updateMeeting(m.id, { transcript: null, status: 'transcribing', transcribedSegments: 0, lastError: null });
       try {
-        const result = await runLocalAsrPipeline({
-          meetingId: m.id,
-          directory: m.audioUri,
-          meetingStartedAt: m.startedAt,
-          recoverPartials: true,
-          resetTranscript: true,
-        });
-        setRepassError(result.coverageComplete
-          ? null
-          : (result.lastError ?? `${result.failedWindows} local-ASR window(s) need another retry.`));
+        const started = await retryNativeMeetingTranscription(m.id);
+        if (!started) throw new Error('Saved audio was not ready for the native transcription service.');
+        setRepassError(null);
         await refresh();
         load();
-        if (result.hasText && result.coverageComplete) {
-          void maybeQueueMeetingPacket(m.id).catch((cause) => {
-            log.warn('summary', 'saved-audio auto packet queue failed', { meetingId: m.id, err: String(cause) });
-          });
-        }
       } catch (cause) {
         const message = cause instanceof Error ? cause.message : String(cause);
         setRepassError(`Local transcription failed safely: ${message}`);
@@ -693,6 +682,10 @@ export default function MeetingDetail() {
                   ? 'Writing your notes'
                   : meeting.status === 'transcribing'
                     ? 'Getting the text ready'
+                    : meeting.status === 'transcript_partial'
+                      ? 'Transcript needs recovery'
+                      : meeting.status === 'audio_expired_incomplete'
+                        ? 'Partial transcript saved'
                     : meeting.status === 'interrupted'
                       ? 'Recording was cut short'
                       : transcriptSummary?.hasText
@@ -700,7 +693,10 @@ export default function MeetingDetail() {
                         : 'Audio saved'
             }
             tone={
-              meeting.summaryStatus === 'failed' || meeting.status === 'interrupted'
+              meeting.summaryStatus === 'failed'
+                || meeting.status === 'interrupted'
+                || meeting.status === 'transcript_partial'
+                || meeting.status === 'audio_expired_incomplete'
                 ? 'warn'
                 : meeting.summaryStatus === 'ready'
                   ? 'primary'
