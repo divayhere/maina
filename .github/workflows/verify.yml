@@ -1,0 +1,43 @@
+name: Verify Maina app
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - 'codex/**'
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out Maina
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Authenticate coordination submodule
+        uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.MAINA_COORDINATION_DEPLOY_KEY }}
+
+      - name: Initialise coordination
+        run: git submodule update --init --recursive
+
+      - name: Set up Node 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Verify coordination data
+        run: npm run verify:coordination
+
+      - name: Enforce coordination update policy
+        run: node coordination/scripts/verify-change.mjs --component app --base "${{ github.event.pull_request.base.sha || github.event.before }}"
+
+      - name: Typecheck, test, and lint
+        run: npm run typecheck && npm test && npm run lint

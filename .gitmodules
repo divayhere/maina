@@ -1,0 +1,3 @@
+[submodule "coordination"]
+	path = coordination
+	url = git@github.com:divayhere/maina-coordination.git

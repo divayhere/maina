@@ -1,5 +1,21 @@
 # Maina Android build hygiene runbook
 
+## Coordination gate
+
+This checkout consumes the private `maina-coordination` repository as the
+`coordination` Git submodule. Initialise it after cloning, before any release
+verification:
+
+```bash
+git submodule update --init --recursive
+npm run verify:coordination
+```
+
+Before changing an integration-affecting app path, add a sanitized central
+state/workplan update first, advance the `coordination` pointer in the same app
+change, and let CI run its policy change gate. Never put credentials or
+meeting/transcript content in the coordination repository.
+
 ## Canonical local workspace
 
 Use `/Users/divay/Developer/MainaV2` for active app work. Do not build from a

@@ -7,6 +7,7 @@ source "$PROJECT_DIR/scripts/maina-env.sh"
 
 cd "$PROJECT_DIR"
 "$PROJECT_DIR/scripts/verify-toolchain.sh"
+npm run verify:coordination
 npm run typecheck
 npm test
 npm run lint

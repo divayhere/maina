@@ -56,6 +56,7 @@
     "test": "vitest run",
     "check": "npm run typecheck && npm run test && npm run lint && npx expo-doctor@latest",
     "verify:toolchain": "bash scripts/verify-toolchain.sh",
+    "verify:coordination": "node coordination/scripts/verify.mjs",
     "android:prepare": "bash scripts/prebuild-android.sh",
     "verify:release": "bash scripts/verify-release.sh",
     "postinstall": "patch-package"
