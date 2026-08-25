@@ -86,6 +86,8 @@ export interface NativeCaptureDirectoryInspection {
 export interface NativePostProcessingRequest {
   meetingId: string;
   directory: string;
+  /** Re-run only failed windows from an otherwise preserved partial result. */
+  forceRetry?: boolean;
   meetingStartedAt?: number;
   captureEndedAt?: number;
   wallDurationMs?: number;

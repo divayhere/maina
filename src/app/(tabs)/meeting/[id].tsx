@@ -311,6 +311,15 @@ export default function MeetingDetail() {
       const uris = rows.length > 0
         ? rows.map((segment) => segment.audioUri)
         : Array.from({ length: m.segmentCount }, (_, index) => segmentPath(m.audioUri!, index));
+      // Native capture files live in Maina's private app storage. Expo's file
+      // API cannot reliably stat those URIs, even though the native recorder
+      // can still read and reprocess them. Prefer the native inspector so a
+      // recoverable transcript always exposes its recovery action.
+      const nativeInspection = await inspectNativeCaptureDirectory(m.audioUri, true).catch(() => null);
+      if (nativeInspection) {
+        setAudioAvailable(nativeInspection.finalizedUris.length > 0);
+        return;
+      }
       const checks = await Promise.all(uris.map((uri) => FileSystem.getInfoAsync(uri).catch(() => ({ exists: false }))));
       setAudioAvailable(checks.length > 0 && checks.every((info) => info.exists));
     });

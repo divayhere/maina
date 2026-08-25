@@ -157,6 +157,10 @@ class MainaRecorderModule : Module() {
                 action = MainaPostProcessingService.ACTION_START
                 putExtra(MainaPostProcessingService.EXTRA_MEETING_ID, meetingId)
                 putExtra(MainaPostProcessingService.EXTRA_DIRECTORY, directory)
+                putExtra(
+                    MainaPostProcessingService.EXTRA_FORCE_RETRY,
+                    request["forceRetry"] as? Boolean ?: false,
+                )
                 request["captureEndedAt"]?.toString()?.toLongOrNull()?.let {
                     putExtra(MainaPostProcessingService.EXTRA_CAPTURE_ENDED_AT, it)
                 }

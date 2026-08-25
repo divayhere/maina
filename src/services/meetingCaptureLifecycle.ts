@@ -22,7 +22,10 @@ import { getNativeCaptureMetrics } from '@/services/nativeCaptureMetrics';
 // Expo-SQLite import ever observes a completed native outbox run at a time.
 let nativeReconciliationInFlight: Promise<number> | null = null;
 
-async function launchNativePostProcessing(meeting: Meeting) {
+async function launchNativePostProcessing(
+  meeting: Meeting,
+  options: { forceRetry?: boolean } = {},
+) {
   if (!meeting.audioUri) return false;
   const metrics = await getNativeCaptureMetrics(meeting.audioUri, true);
   if (metrics.finalizedUris.length === 0) {
@@ -73,6 +76,7 @@ async function launchNativePostProcessing(meeting: Meeting) {
     await startNativePostProcessing({
       meetingId: meeting.id,
       directory: meeting.audioUri,
+      forceRetry: options.forceRetry,
       meetingStartedAt: meeting.startedAt,
       captureEndedAt: metrics.stoppedAt ?? undefined,
       wallDurationMs: metrics.wallDurationMs,
@@ -267,5 +271,5 @@ export async function hydrateMeetingFromDurableCapture(meetingId: string): Promi
 export async function retryNativeMeetingTranscription(meetingId: string): Promise<boolean> {
   const meeting = await getMeeting(meetingId);
   if (!meeting?.audioUri) return false;
-  return launchNativePostProcessing(meeting);
+  return launchNativePostProcessing(meeting, { forceRetry: true });
 }

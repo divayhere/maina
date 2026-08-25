@@ -52,6 +52,7 @@ internal class MainaPostProcessingOutbox(context: Context) :
         windowCount: Int,
         routeRestartCount: Int,
         captureGapMs: Long,
+        forceRetry: Boolean = false,
     ): StartResult {
         writableDatabase.beginTransaction()
         try {
@@ -68,7 +69,8 @@ internal class MainaPostProcessingOutbox(context: Context) :
                     existingWindowCount = cursor.getInt(2)
                 }
             }
-            if (existingRunId != null && existingState in TERMINAL_STATES) {
+            val canRetryPartial = forceRetry && existingState == STATE_PARTIAL && existingWindowCount == windowCount
+            if (existingRunId != null && existingState in TERMINAL_STATES && !canRetryPartial) {
                 writableDatabase.setTransactionSuccessful()
                 return StartResult(existingRunId!!, true, false, emptySet())
             }

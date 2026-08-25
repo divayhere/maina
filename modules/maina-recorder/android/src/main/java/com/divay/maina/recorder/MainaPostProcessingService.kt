@@ -40,6 +40,7 @@ internal class MainaPostProcessingService : Service() {
         const val EXTRA_ROUTE_RESTART_COUNT = "routeRestartCount"
         const val EXTRA_CAPTURE_GAP_MS = "captureGapMs"
         const val EXTRA_MEETING_STARTED_AT = "meetingStartedAt"
+        const val EXTRA_FORCE_RETRY = "forceRetry"
         private const val WAKE_LOCK_TIMEOUT_MS = 6L * 60L * 60L * 1000L
 
         @Volatile private var currentlyProcessingMeetingId: String? = null
@@ -92,6 +93,7 @@ internal class MainaPostProcessingService : Service() {
                     routeRestartCount = intent.getIntExtra(EXTRA_ROUTE_RESTART_COUNT, 0),
                     captureGapMs = intent.getLongExtra(EXTRA_CAPTURE_GAP_MS, 0L),
                     meetingStartedAt = intent.getLongExtra(EXTRA_MEETING_STARTED_AT, 0L),
+                    forceRetry = intent.getBooleanExtra(EXTRA_FORCE_RETRY, false),
                 )
             } catch (error: Throwable) {
                 val message = error.message ?: error.javaClass.simpleName
@@ -144,6 +146,7 @@ internal class MainaPostProcessingService : Service() {
         routeRestartCount: Int,
         captureGapMs: Long,
         meetingStartedAt: Long,
+        forceRetry: Boolean,
     ) {
         val inspection = waitForFinalizedChunks(directory)
         val chunkUris = inspection.finalizedUris
@@ -181,6 +184,7 @@ internal class MainaPostProcessingService : Service() {
             windowCount = totalWindows,
             routeRestartCount = routeRestartCount,
             captureGapMs = captureGapMs,
+            forceRetry = forceRetry,
         )
         if (start.alreadyTerminal) {
             Log.i("MainaPostProcessing", "Terminal outbox run already exists for meetingId=$meetingId")
