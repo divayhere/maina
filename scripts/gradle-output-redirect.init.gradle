@@ -1,0 +1,14 @@
+// Used only by Maina's local verification/release scripts. Generated Gradle,
+// AGP, and CMake outputs stay outside the repository and its sync filesystem.
+def mainaBuildRoot = System.getenv('MAINA_BUILD_ROOT')
+if (mainaBuildRoot != null && !mainaBuildRoot.trim().isEmpty()) {
+  gradle.beforeProject { project ->
+    // Expo's root project owns generated autolinking metadata at android/build.
+    // Redirecting that root directory breaks the autolinker; Android subprojects
+    // (app and native modules) can safely place their heavy outputs externally.
+    if (project.path != ':') {
+      def name = project.path.replaceAll('[^A-Za-z0-9_.-]', '_')
+      project.layout.buildDirectory.set(new File(mainaBuildRoot, "outputs/${name}"))
+    }
+  }
+}
