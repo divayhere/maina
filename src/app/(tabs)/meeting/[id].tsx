@@ -46,7 +46,6 @@ import { chooseSummaryProviderLabel } from '@/services/meetingPacketMeta';
 import { maybeQueueMeetingPacket, runMeetingPacketGeneration } from '@/services/meetingPacket';
 import { log } from '@/services/logger';
 import { ensureStorageBudget } from '@/services/storageBudget';
-import { runLocalAsrPipeline } from '@/services/localAsrPipeline';
 import { retryNativeMeetingTranscription } from '@/services/meetingCaptureLifecycle';
 import { buildMeetingExportText, shareMeetingExport } from '@/services/transcriptExport';
 import { useMeetings } from '@/state/meetingsStore';

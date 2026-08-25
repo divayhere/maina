@@ -35,6 +35,7 @@ yarn-error.*
 
 # local env files
 .env*.local
+/.maina-local.env
 
 # portable local development tools
 .tools/

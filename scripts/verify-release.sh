@@ -2,16 +2,16 @@
 set -euo pipefail
 
 PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-export JAVA_HOME="${MAINA_JAVA_HOME:-$PROJECT_DIR/.tools/jdk17/jdk-17.0.20+8/Contents/Home}"
-export ANDROID_HOME="${ANDROID_HOME:-$PROJECT_DIR/.tools/android-sdk}"
-export NODE_ENV=production
+# shellcheck source=maina-env.sh
+source "$PROJECT_DIR/scripts/maina-env.sh"
 
 cd "$PROJECT_DIR"
+"$PROJECT_DIR/scripts/verify-toolchain.sh"
 npm run typecheck
 npm test
 npm run lint
 npx expo install --check
-npx expo-doctor@latest
+"$PROJECT_DIR/scripts/prebuild-android.sh"
 
 MEETING_DETAIL="$PROJECT_DIR/src/app/(tabs)/meeting/[id].tsx"
 if [[ ! -f "$MEETING_DETAIL" ]]; then
@@ -31,9 +31,14 @@ EXPORT_DIR="$(mktemp -d -t maina-export.XXXXXX)"
 npx expo export --platform android --output-dir "$EXPORT_DIR"
 
 cd "$PROJECT_DIR/android"
-./gradlew :maina-recorder:testDebugUnitTest :maina-recorder:compileDebugKotlin :app:compileDebugKotlin --console=plain
+./gradlew \
+  --gradle-user-home "$GRADLE_USER_HOME" \
+  --project-cache-dir "$MAINA_BUILD_ROOT/gradle-project-cache" \
+  --init-script "$PROJECT_DIR/scripts/gradle-output-redirect.init.gradle" \
+  :maina-recorder:testDebugUnitTest :maina-recorder:compileDebugKotlin :app:compileDebugKotlin \
+  --console=plain --no-daemon
 
-DEBUG_MANIFEST="$(find "$PROJECT_DIR/android/app/build/intermediates" \
+DEBUG_MANIFEST="$(find "$MAINA_BUILD_ROOT/outputs" \
   -path '*/merged_manifest/debug/processDebugMainManifest/AndroidManifest.xml' \
   -o -path '*/merged_manifests/debug/processDebugManifest/AndroidManifest.xml' \
   | head -n 1)"
@@ -52,7 +57,7 @@ rg -q 'FOREGROUND_SERVICE_MICROPHONE' "$DEBUG_MANIFEST"
 rg -q 'FOREGROUND_SERVICE_MEDIA_PROCESSING' "$DEBUG_MANIFEST"
 rg -q 'android:foregroundServiceType="mediaProcessing"' "$DEBUG_MANIFEST"
 
-RELEASE_MANIFEST="$(find "$PROJECT_DIR/android/app/build/intermediates" \
+RELEASE_MANIFEST="$(find "$MAINA_BUILD_ROOT/outputs" \
   -path '*/merged_manifest/release/processReleaseMainManifest/AndroidManifest.xml' \
   -o -path '*/merged_manifests/release/processReleaseManifest/AndroidManifest.xml' \
   | head -n 1)"
