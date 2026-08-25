@@ -17,6 +17,13 @@ import java.util.UUID
 internal class MainaPostProcessingOutbox(context: Context) :
     SQLiteOpenHelper(context.applicationContext, DB_NAME, null, DB_VERSION) {
 
+    init {
+        // The private ASR process writes checkpoints while the foreground Expo
+        // process polls progress. Both helpers must agree on WAL or Android may
+        // attempt a journal-mode change while the other process holds the DB.
+        setWriteAheadLoggingEnabled(true)
+    }
+
     data class StartResult(
         val runId: String,
         val alreadyTerminal: Boolean,

@@ -224,6 +224,9 @@ export default function MeetingDetail() {
   const autoRepassHandledRef = useRef(false);
 
   const providerLabel = useMemo(() => chooseSummaryProviderLabel(meeting), [meeting]);
+  const hasCompleteTranscript = meeting?.status === 'transcribed'
+    || meeting?.status === 'summarizing'
+    || meeting?.status === 'summarized';
   const packetError = useMemo(() => formatPacketError(meeting?.lastError), [meeting?.lastError]);
   const cloudState = useMemo(
     () =>
@@ -864,7 +867,7 @@ export default function MeetingDetail() {
                         ? 'Connect an AI account to write notes.'
                         : "You haven't asked for notes on this one yet."}
                     </AppText>
-                    {transcriptSummary?.hasText ? (
+                    {transcriptSummary?.hasText && hasCompleteTranscript ? (
                       <PrimaryButton
                         label={providerLabel === 'No AI provider' ? 'Connect an AI account' : 'Write my notes'}
                         onPress={() => (providerLabel === 'No AI provider' ? router.push('/settings') : void generatePacket())}
@@ -905,7 +908,7 @@ export default function MeetingDetail() {
           }
 
           if (item === 'cloud') {
-            const hasTranscriptForCloud = transcriptSummary?.hasText === true;
+            const hasTranscriptForCloud = transcriptSummary?.hasText === true && hasCompleteTranscript;
             const canRetryMeetingCloud = hasTranscriptForCloud && (
               meeting?.knowledgeCloudSyncStatus === 'local_only'
               || meeting?.knowledgeCloudSyncStatus === 'sync_failed_retryable'
@@ -935,7 +938,9 @@ export default function MeetingDetail() {
                 <AppText variant="body" muted>
                   {hasTranscriptForCloud || cloudCorrectionState
                     ? visibleCloudState.detail
-                    : 'Cloud sync becomes available after Maina has saved transcript text.'}
+                    : transcriptSummary?.hasText
+                      ? 'Cloud sync waits until every recoverable audio window has been transcribed.'
+                      : 'Cloud sync becomes available after Maina has saved transcript text.'}
                 </AppText>
                 {canRetryCloud ? (
                   <View style={{ gap: space.md }}>

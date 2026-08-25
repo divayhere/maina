@@ -53,6 +53,13 @@ async function maybeRefreshProviderModel(
 async function generateForMeeting(meetingId: string): Promise<void> {
   const meeting = await getMeeting(meetingId);
   if (!meeting) return;
+  if (!(meeting.status === 'transcribed' || meeting.status === 'summarizing' || meeting.status === 'summarized')) {
+    log.warn('summary', 'meeting packet generation blocked until transcript coverage is complete', {
+      meetingId,
+      status: meeting.status,
+    });
+    return;
+  }
   const appConfig = await getAppConfig();
   let providerSettings = await getProviderSettings(appConfig.providerId);
   if (!providerSettings.apiKey.trim()) {

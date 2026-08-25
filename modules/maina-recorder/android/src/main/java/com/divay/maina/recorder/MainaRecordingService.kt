@@ -238,6 +238,7 @@ class MainaRecordingService : Service() {
                         category = "native-asr",
                         eventName = "native-asr-preempted-for-capture",
                         message = "Recording preempted local transcription at a durable boundary",
+                        payload = mapOf("postProcessingStopped" to true),
                     )
                 }
                 val meetingId = intent.getStringExtra(EXTRA_MEETING_ID).orEmpty()

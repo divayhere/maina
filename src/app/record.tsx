@@ -189,7 +189,7 @@ export default function RecordScreen() {
   const [meetingCreated, setMeetingCreated] = useState(false);
   const [paused, setPaused] = useState(false);
   const [captureNote, setCaptureNote] = useState<string | null>(null);
-  const audioPulse = useRef(new Animated.Value(0)).current;
+  const [audioPulse] = useState(() => new Animated.Value(0));
 
   useEffect(() => {
     if (CAPTURE_ENGINE !== 'native-qwen') return;
