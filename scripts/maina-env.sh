@@ -18,6 +18,7 @@ MAINA_JAVA_HOME="${MAINA_JAVA_HOME:-/Users/divay/.cache/maina-build-tools/jdk17/
 MAINA_ANDROID_HOME="${MAINA_ANDROID_HOME:-/Users/divay/Library/Android/sdk}"
 MAINA_BUILD_ROOT="${MAINA_BUILD_ROOT:-/Users/divay/.cache/maina-build-v2}"
 MAINA_ADB_SERIAL="${MAINA_ADB_SERIAL:-47011FDAP000VE}"
+MAINA_ANDROID_ABI="${MAINA_ANDROID_ABI:-arm64-v8a}"
 
 if [[ ! -x "$MAINA_NODE_BIN/node" ]]; then
   echo "Maina requires Node 24. Set MAINA_NODE_BIN to its bin directory." >&2
@@ -39,6 +40,6 @@ export ANDROID_SDK_ROOT="$MAINA_ANDROID_HOME"
 export GRADLE_USER_HOME="$MAINA_BUILD_ROOT/gradle-user-home"
 export NODE_ENV=production
 export MAINA_REPO_ROOT MAINA_NODE_BIN MAINA_JAVA_HOME MAINA_ANDROID_HOME
-export MAINA_BUILD_ROOT MAINA_ADB_SERIAL
+export MAINA_BUILD_ROOT MAINA_ADB_SERIAL MAINA_ANDROID_ABI
 
 mkdir -p "$MAINA_BUILD_ROOT/gradle-project-cache" "$MAINA_BUILD_ROOT/outputs"

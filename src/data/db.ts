@@ -184,6 +184,28 @@ const MIGRATIONS: Migration[] = [
     await addColumnIfMissing(db, 'meetings', 'native_postprocess_run_id', 'TEXT');
     await addColumnIfMissing(db, 'meetings', 'native_postprocess_imported_at', 'INTEGER');
   },
+  // v11 — independent, append-safe pipeline state. `meetings.status` remains
+  // a convenient aggregate for legacy screens; this table is the durable
+  // source for stage-local attempts, errors and honest unit progress.
+  async (db) => {
+    await db.execAsync(`CREATE TABLE IF NOT EXISTS meeting_pipeline_stages (
+      meeting_id TEXT NOT NULL,
+      stage TEXT NOT NULL,
+      state TEXT NOT NULL,
+      attempt_count INTEGER NOT NULL DEFAULT 0,
+      started_at INTEGER,
+      finished_at INTEGER,
+      updated_at INTEGER NOT NULL,
+      last_error TEXT,
+      completed_units INTEGER NOT NULL DEFAULT 0,
+      total_units INTEGER NOT NULL DEFAULT 0,
+      metadata_json TEXT,
+      PRIMARY KEY (meeting_id, stage),
+      FOREIGN KEY (meeting_id) REFERENCES meetings(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_meeting_pipeline_stage_state
+      ON meeting_pipeline_stages(stage, state, updated_at ASC);`);
+  },
 ];
 
 export async function initDb(): Promise<void> {

@@ -3,6 +3,7 @@ import {
   importNativePostProcessingResult,
   listMeetings,
   updateMeeting,
+  updateMeetingPipelineStage,
   updateNativePostProcessingProgress,
   type Meeting,
 } from '@/data/meetings';
@@ -25,12 +26,14 @@ async function launchNativePostProcessing(meeting: Meeting) {
   if (!meeting.audioUri) return false;
   const metrics = await getNativeCaptureMetrics(meeting.audioUri, true);
   if (metrics.finalizedUris.length === 0) {
+    const error = metrics.partialUris.length > 0
+      ? 'Audio finalization is still incomplete; recovery audio was preserved.'
+      : 'Native capture produced no finalized WAV chunks.';
     await updateMeeting(meeting.id, {
       status: 'interrupted',
-      lastError: metrics.partialUris.length > 0
-        ? 'Audio finalization is still incomplete; recovery audio was preserved.'
-        : 'Native capture produced no finalized WAV chunks.',
+      lastError: error,
     });
+    await updateMeetingPipelineStage({ meetingId: meeting.id, stage: 'audio_finalized', state: 'failed', error });
     return false;
   }
   await updateMeeting(meeting.id, {
@@ -44,6 +47,28 @@ async function launchNativePostProcessing(meeting: Meeting) {
     status: 'transcribing',
     lastError: metrics.captureGapMs > 0 ? `Capture gap detected: ${metrics.captureGapMs}ms` : null,
   });
+  await updateMeetingPipelineStage({
+    meetingId: meeting.id,
+    stage: 'recording',
+    state: 'ready',
+    completedUnits: 1,
+    totalUnits: 1,
+    error: null,
+  });
+  await updateMeetingPipelineStage({
+    meetingId: meeting.id,
+    stage: 'audio_finalized',
+    state: 'ready',
+    completedUnits: metrics.finalizedUris.length,
+    totalUnits: metrics.finalizedUris.length,
+    error: null,
+    metadata: {
+      audioDurationMs: metrics.audioDurationMs,
+      captureGapMs: metrics.captureGapMs,
+      routeRestartCount: metrics.routeRestartCount,
+    },
+  });
+  await updateMeetingPipelineStage({ meetingId: meeting.id, stage: 'asr', state: 'queued', error: null });
   try {
     await startNativePostProcessing({
       meetingId: meeting.id,
@@ -55,11 +80,23 @@ async function launchNativePostProcessing(meeting: Meeting) {
       routeRestartCount: metrics.routeRestartCount,
       captureGapMs: metrics.captureGapMs,
     });
+    await updateMeetingPipelineStage({
+      meetingId: meeting.id,
+      stage: 'asr',
+      state: 'running',
+      error: null,
+    });
   } catch (cause) {
     const message = cause instanceof Error ? cause.message : String(cause);
     await updateMeeting(meeting.id, {
       status: 'transcribing',
       lastError: `Native post-processing could not start yet: ${message}`,
+    });
+    await updateMeetingPipelineStage({
+      meetingId: meeting.id,
+      stage: 'asr',
+      state: 'deferred',
+      error: `Native post-processing could not start yet: ${message}`,
     });
     log.error('recovery', 'native post-processing launch failed', {
       meetingId: meeting.id,
@@ -119,6 +156,28 @@ async function reconcilePendingNativeMeetingWorkInternal(): Promise<number> {
         });
         return false;
       });
+      await updateMeetingPipelineStage({
+        meetingId: nativeResult.meetingId,
+        stage: 'asr',
+        state: nativeResult.state === 'complete' ? 'ready' : 'failed',
+        completedUnits: nativeResult.completedWindows + nativeResult.failedWindows,
+        totalUnits: nativeResult.windowCount,
+        error: nativeResult.lastError,
+        metadata: {
+          runId: nativeResult.runId,
+          processedSegments: nativeResult.processedSegments,
+          failedWindows: nativeResult.failedWindows,
+        },
+      });
+      await updateMeetingPipelineStage({
+        meetingId: nativeResult.meetingId,
+        stage: 'transcript_durable',
+        state: nativeResult.state === 'complete' ? 'ready' : 'failed',
+        completedUnits: nativeResult.completedWindows,
+        totalUnits: nativeResult.windowCount,
+        error: nativeResult.lastError,
+        metadata: { runId: nativeResult.runId, blocks: nativeResult.blocks.length },
+      });
       log.info('recovery', 'native post-processing outbox reconciled', {
         meetingId: meeting.id,
         runId: nativeResult.runId,
@@ -136,6 +195,19 @@ async function reconcilePendingNativeMeetingWorkInternal(): Promise<number> {
         failedWindows: nativeResult.failedWindows,
         processedSegments: nativeResult.processedSegments,
         lastError: nativeResult.state === 'deferred' ? nativeResult.lastError : null,
+      });
+      await updateMeetingPipelineStage({
+        meetingId: nativeResult.meetingId,
+        stage: 'asr',
+        state: nativeResult.state === 'deferred' ? 'deferred' : 'running',
+        completedUnits: nativeResult.completedWindows + nativeResult.failedWindows,
+        totalUnits: nativeResult.windowCount,
+        error: nativeResult.state === 'deferred' ? nativeResult.lastError : null,
+        metadata: {
+          runId: nativeResult.runId,
+          processedSegments: nativeResult.processedSegments,
+          failedWindows: nativeResult.failedWindows,
+        },
       });
     }
     const repairedDurationMs = completedCaptureDurationRepair(meeting);

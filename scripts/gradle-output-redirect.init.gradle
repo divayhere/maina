@@ -3,10 +3,16 @@
 def mainaBuildRoot = System.getenv('MAINA_BUILD_ROOT')
 if (mainaBuildRoot != null && !mainaBuildRoot.trim().isEmpty()) {
   gradle.beforeProject { project ->
-    // Expo's root project owns generated autolinking metadata at android/build.
-    // Redirecting that root directory breaks the autolinker; Android subprojects
-    // (app and native modules) can safely place their heavy outputs externally.
-    if (project.path != ':') {
+    // Keep Maina-owned outputs outside the checkout, but leave third-party
+    // node_modules packages on their default build directories. Reanimated,
+    // Worklets, Gesture Handler and some codegen modules deliberately resolve
+    // generated CMake files relative to their package-local `android/build`.
+    // Redirecting every Gradle subproject makes a clean install compile until
+    // CMake, then fail because those generated paths no longer exist.
+    //
+    // Expo's root project likewise owns generated autolinking metadata at
+    // android/build, so it must remain unredirected.
+    if (project.path in [':app', ':maina-recorder']) {
       def name = project.path.replaceAll('[^A-Za-z0-9_.-]', '_')
       project.layout.buildDirectory.set(new File(mainaBuildRoot, "outputs/${name}"))
     }

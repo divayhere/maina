@@ -7,6 +7,7 @@ const {
   mockListMeetingsEligibleForKnowledgeCloudQueueWithOptions,
   mockListMeetingsNeedingKnowledgeCloudSync,
   mockUpdateMeeting,
+  mockUpdateMeetingPipelineStage,
   mockGetMainaKnowledgeCloudSettings,
 } = vi.hoisted(() => ({
   mockGetMeeting: vi.fn(),
@@ -15,6 +16,7 @@ const {
   mockListMeetingsEligibleForKnowledgeCloudQueueWithOptions: vi.fn(),
   mockListMeetingsNeedingKnowledgeCloudSync: vi.fn(),
   mockUpdateMeeting: vi.fn(),
+  mockUpdateMeetingPipelineStage: vi.fn(),
   mockGetMainaKnowledgeCloudSettings: vi.fn(),
 }));
 
@@ -25,6 +27,7 @@ vi.mock('@/data/meetings', () => ({
   listMeetingsEligibleForKnowledgeCloudQueueWithOptions: mockListMeetingsEligibleForKnowledgeCloudQueueWithOptions,
   listMeetingsNeedingKnowledgeCloudSync: mockListMeetingsNeedingKnowledgeCloudSync,
   updateMeeting: mockUpdateMeeting,
+  updateMeetingPipelineStage: mockUpdateMeetingPipelineStage,
 }));
 
 vi.mock('@/services/config', () => ({
@@ -102,6 +105,7 @@ describe('mainaKnowledgeCloud service', () => {
         ...patch,
       };
     });
+    mockUpdateMeetingPipelineStage.mockResolvedValue(undefined);
   });
 
   it('marks auth failures separately so settings can recover them deliberately', async () => {
@@ -121,6 +125,9 @@ describe('mainaKnowledgeCloud service', () => {
 
     expect(meeting.knowledgeCloudSyncStatus).toBe('sync_failed_auth');
     expect(meeting.knowledgeCloudError).toBe('Invalid bearer token');
+    expect(mockUpdateMeetingPipelineStage).toHaveBeenLastCalledWith(expect.objectContaining({
+      stage: 'mkc', state: 'failed',
+    }));
   });
 
   it('keeps network failures retryable while preserving the frozen payload snapshot', async () => {
@@ -133,6 +140,9 @@ describe('mainaKnowledgeCloud service', () => {
 
     expect(meeting.knowledgeCloudSyncStatus).toBe('sync_failed_retryable');
     expect(meeting.knowledgeCloudPayloadJson).toContain('"source_key":"meeting:maina:meeting-1"');
+    expect(mockUpdateMeetingPipelineStage).toHaveBeenLastCalledWith(expect.objectContaining({
+      stage: 'mkc', state: 'deferred',
+    }));
   });
 
   it('reuses a stored frozen payload on retry instead of rebuilding from newer local state', async () => {
@@ -188,6 +198,9 @@ describe('mainaKnowledgeCloud service', () => {
       }),
     );
     expect(meeting.knowledgeCloudSyncStatus).toBe('sync_succeeded');
+    expect(mockUpdateMeetingPipelineStage).toHaveBeenLastCalledWith(expect.objectContaining({
+      stage: 'mkc', state: 'ready', completedUnits: 1, totalUnits: 1,
+    }));
   });
 
   it('can intentionally requeue auth-blocked meetings after settings change', async () => {

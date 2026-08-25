@@ -1,0 +1,26 @@
+plugins {
+  id 'com.android.library'
+  id 'expo-module-gradle-plugin'
+}
+
+group = 'com.divay.maina'
+version = '0.1.0'
+
+android {
+  namespace 'com.divay.maina.recorder'
+  defaultConfig {
+    versionCode 1
+    versionName '0.1.0'
+  }
+}
+
+dependencies {
+  implementation 'androidx.work:work-runtime-ktx:2.10.5'
+  // Official sherpa-onnx Android runtime. Qwen model data is intentionally
+  // delivered as a separately verified local model pack, never baked into APK.
+  // This must be an `implementation` dependency. `compileOnly` makes Kotlin
+  // compilation look healthy while omitting sherpa's Java/JNI runtime from the
+  // installed APK, which turns the first real Qwen decode into a runtime crash.
+  implementation files('libs/sherpa-onnx-1.13.6.aar')
+  testImplementation 'junit:junit:4.13.2'
+}

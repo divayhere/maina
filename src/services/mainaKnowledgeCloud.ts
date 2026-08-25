@@ -5,6 +5,7 @@ import {
   listMeetingsEligibleForKnowledgeCloudQueueWithOptions,
   listMeetingsNeedingKnowledgeCloudSync,
   updateMeeting,
+  updateMeetingPipelineStage,
   type Meeting,
   type TranscriptBlock,
 } from '@/data/meetings';
@@ -23,6 +24,34 @@ import { reconcileMainaKnowledgeCloudCorrectionsForMeeting } from '@/services/ma
 
 const inflight = new Map<string, Promise<void>>();
 const TRANSCRIPT_PAGE_SIZE = 100;
+
+async function setCloudSyncState(
+  meetingId: string,
+  patch: Parameters<typeof updateMeeting>[1],
+): Promise<void> {
+  await updateMeeting(meetingId, patch);
+  const status = patch.knowledgeCloudSyncStatus;
+  if (!status) return;
+  const state = status === 'sync_queued'
+    ? 'queued'
+    : status === 'syncing'
+      ? 'running'
+      : status === 'sync_succeeded'
+        ? 'ready'
+        : status === 'sync_failed_retryable' || status === 'sync_blocked_budget'
+          ? 'deferred'
+          : status === 'local_only'
+            ? 'pending'
+            : 'failed';
+  await updateMeetingPipelineStage({
+    meetingId,
+    stage: 'mkc',
+    state,
+    completedUnits: state === 'ready' ? 1 : 0,
+    totalUnits: 1,
+    error: patch.knowledgeCloudError,
+  });
+}
 
 function parseStoredPayload(payloadJson: string): MainaKnowledgeCloudSourcePackage | null {
   try {
@@ -117,7 +146,7 @@ async function syncMeetingToMainaKnowledgeCloud(meetingId: string): Promise<void
   if (!frozen) return;
 
   const baseUrl = normalizeMainaKnowledgeCloudBaseUrl(settings.baseUrl);
-  await updateMeeting(meetingId, {
+  await setCloudSyncState(meetingId, {
     knowledgeCloudSyncStatus: 'syncing',
     knowledgeCloudLastAttemptAt: Date.now(),
     knowledgeCloudError: null,
@@ -140,7 +169,7 @@ async function syncMeetingToMainaKnowledgeCloud(meetingId: string): Promise<void
     });
 
     if (result.outcome === 'success') {
-      await updateMeeting(meetingId, {
+      await setCloudSyncState(meetingId, {
         knowledgeCloudSyncStatus: 'sync_succeeded',
         knowledgeCloudSyncedAt: Date.now(),
         knowledgeCloudCanonicalSha256: result.canonicalSha256 ?? null,
@@ -161,7 +190,7 @@ async function syncMeetingToMainaKnowledgeCloud(meetingId: string): Promise<void
     }
 
     if (result.outcome === 'auth_failed') {
-      await updateMeeting(meetingId, {
+      await setCloudSyncState(meetingId, {
         knowledgeCloudSyncStatus: 'sync_failed_auth',
         knowledgeCloudError: result.message,
       });
@@ -169,7 +198,7 @@ async function syncMeetingToMainaKnowledgeCloud(meetingId: string): Promise<void
     }
 
     if (result.outcome === 'conflict') {
-      await updateMeeting(meetingId, {
+      await setCloudSyncState(meetingId, {
         knowledgeCloudSyncStatus: 'sync_failed_conflict',
         knowledgeCloudError: result.message,
       });
@@ -177,7 +206,7 @@ async function syncMeetingToMainaKnowledgeCloud(meetingId: string): Promise<void
     }
 
     if (result.outcome === 'validation') {
-      await updateMeeting(meetingId, {
+      await setCloudSyncState(meetingId, {
         knowledgeCloudSyncStatus: 'sync_failed_validation',
         knowledgeCloudError: result.message,
       });
@@ -185,20 +214,20 @@ async function syncMeetingToMainaKnowledgeCloud(meetingId: string): Promise<void
     }
 
     if (result.outcome === 'blocked_budget') {
-      await updateMeeting(meetingId, {
+      await setCloudSyncState(meetingId, {
         knowledgeCloudSyncStatus: 'sync_blocked_budget',
         knowledgeCloudError: result.message,
       });
       return;
     }
 
-    await updateMeeting(meetingId, {
+    await setCloudSyncState(meetingId, {
       knowledgeCloudSyncStatus: 'sync_failed_retryable',
       knowledgeCloudError: result.message,
     });
   } catch (cause) {
     const message = cause instanceof Error ? cause.message : String(cause);
-    await updateMeeting(meetingId, {
+    await setCloudSyncState(meetingId, {
       knowledgeCloudSyncStatus: 'sync_failed_retryable',
       knowledgeCloudError: message,
     });
@@ -233,7 +262,7 @@ export async function maybeQueueMainaKnowledgeCloudSync(
   const frozen = await freezePayloadSnapshot(meeting);
   if (!frozen) return false;
 
-  await updateMeeting(meetingId, {
+  await setCloudSyncState(meetingId, {
     knowledgeCloudSyncStatus: 'sync_queued',
     knowledgeCloudError: null,
     knowledgeCloudSourceKey: frozen.payload.source_key,

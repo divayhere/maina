@@ -8,6 +8,7 @@ source "$PROJECT_DIR/scripts/maina-env.sh"
 cd "$PROJECT_DIR"
 "$PROJECT_DIR/scripts/verify-toolchain.sh"
 npm run verify:coordination
+npm run verify:native-recorder
 npm run typecheck
 npm test
 npm run lint
@@ -36,8 +37,29 @@ cd "$PROJECT_DIR/android"
   --gradle-user-home "$GRADLE_USER_HOME" \
   --project-cache-dir "$MAINA_BUILD_ROOT/gradle-project-cache" \
   --init-script "$PROJECT_DIR/scripts/gradle-output-redirect.init.gradle" \
-  :maina-recorder:testDebugUnitTest :maina-recorder:compileDebugKotlin :app:compileDebugKotlin \
+  -PreactNativeArchitectures="$MAINA_ANDROID_ABI" \
+  :maina-recorder:testDebugUnitTest :maina-recorder:compileDebugKotlin :app:compileDebugKotlin :app:mergeDebugNativeLibs \
   --console=plain --no-daemon
+
+MERGED_NATIVE_ROOT="$MAINA_BUILD_ROOT/outputs"
+if ! find "$MERGED_NATIVE_ROOT" -type f \( -name 'libonnxruntime.so' -o -name 'libsherpa-onnx-jni.so' \) | grep -q .; then
+  echo "Sherpa JNI runtime was not merged into the Android app output" >&2
+  exit 1
+fi
+
+# Expo autolinking asks native CMake modules for package-local generated code.
+# Keep this explicit: a broad external build-dir redirect can pass Kotlin but
+# move these files away from CMake and make the next clean native build fail.
+for GENERATED_CODEGEN in \
+  "$PROJECT_DIR/node_modules/react-native-reanimated/android/build/generated/source/codegen/jni/CMakeLists.txt" \
+  "$PROJECT_DIR/node_modules/react-native-worklets/android/build/generated/source/codegen/jni/CMakeLists.txt" \
+  "$PROJECT_DIR/node_modules/react-native-gesture-handler/android/build/generated/source/codegen/jni/CMakeLists.txt" \
+  "$PROJECT_DIR/node_modules/@sentry/react-native/android/build/generated/source/codegen/jni/CMakeLists.txt"; do
+  if [[ ! -f "$GENERATED_CODEGEN" ]]; then
+    echo "Required native codegen output was not generated: $GENERATED_CODEGEN" >&2
+    exit 1
+  fi
+done
 
 DEBUG_MANIFEST="$(find "$MAINA_BUILD_ROOT/outputs" \
   -path '*/merged_manifest/debug/processDebugMainManifest/AndroidManifest.xml' \

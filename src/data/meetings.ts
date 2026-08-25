@@ -6,6 +6,7 @@ import { getDb } from './db';
 import { log } from '../services/logger';
 import { splitTranscriptChunks, transcriptWordCount } from '../core/transcription/transcript';
 import { deriveNativeTranscriptOutcome } from '../services/nativePostProcessingCore';
+import { deriveStageTransition } from '../core/pipeline/stageState';
 
 export type MeetingStatus =
   | 'recording'
@@ -19,6 +20,28 @@ export type MeetingStatus =
   | 'summarized';
 
 export type SummaryStatus = 'idle' | 'queued' | 'running' | 'ready' | 'failed';
+export type MeetingPipelineStage =
+  | 'recording'
+  | 'audio_finalized'
+  | 'asr'
+  | 'transcript_durable'
+  | 'summary'
+  | 'mkc';
+export type MeetingPipelineStageState = 'pending' | 'queued' | 'running' | 'ready' | 'failed' | 'deferred';
+
+export interface MeetingPipelineStageStatus {
+  meetingId: string;
+  stage: MeetingPipelineStage;
+  state: MeetingPipelineStageState;
+  attemptCount: number;
+  startedAt?: number | null;
+  finishedAt?: number | null;
+  updatedAt: number;
+  lastError?: string | null;
+  completedUnits: number;
+  totalUnits: number;
+  metadata?: Record<string, unknown> | null;
+}
 export type KnowledgeCloudSyncStatus =
   | 'local_only'
   | 'sync_queued'
@@ -411,6 +434,13 @@ export async function createMeeting(m: {
       Date.now(),
     ],
   );
+  await updateMeetingPipelineStage({
+    meetingId: m.id,
+    stage: 'recording',
+    state: m.status === 'recording' ? 'running' : 'pending',
+    completedUnits: 0,
+    totalUnits: 0,
+  });
   log.info('meetings', 'created', { id: m.id, durationMs: m.durationMs, segments: m.segmentCount ?? 0 });
 }
 
@@ -716,6 +746,142 @@ export async function updateMeeting(id: string, patch: Partial<Meeting>): Promis
   vals.push(id);
   const db = await getDb();
   await db.runAsync(`UPDATE meetings SET ${cols.join(', ')} WHERE id = ?`, vals);
+}
+
+type MeetingPipelineStageRow = {
+  meeting_id: string;
+  stage: MeetingPipelineStage;
+  state: MeetingPipelineStageState;
+  attempt_count: number;
+  started_at: number | null;
+  finished_at: number | null;
+  updated_at: number;
+  last_error: string | null;
+  completed_units: number;
+  total_units: number;
+  metadata_json: string | null;
+};
+
+function parsePipelineMetadata(value: string | null): Record<string, unknown> | null {
+  if (!value) return null;
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? parsed as Record<string, unknown>
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function toMeetingPipelineStage(row: MeetingPipelineStageRow): MeetingPipelineStageStatus {
+  return {
+    meetingId: row.meeting_id,
+    stage: row.stage,
+    state: row.state,
+    attemptCount: Math.max(0, row.attempt_count),
+    startedAt: row.started_at,
+    finishedAt: row.finished_at,
+    updatedAt: row.updated_at,
+    lastError: row.last_error,
+    completedUnits: Math.max(0, row.completed_units),
+    totalUnits: Math.max(0, row.total_units),
+    metadata: parsePipelineMetadata(row.metadata_json),
+  };
+}
+
+/**
+ * Writes one stage without deriving or mutating any other pipeline stage.
+ * This is intentionally separate from `meetings.status`: a cloud failure must
+ * never make a durable transcript look failed, and summary retries must not
+ * erase capture evidence.
+ */
+export async function updateMeetingPipelineStage(input: {
+  meetingId: string;
+  stage: MeetingPipelineStage;
+  state: MeetingPipelineStageState;
+  completedUnits?: number;
+  totalUnits?: number;
+  error?: string | null;
+  metadata?: Record<string, unknown> | null;
+  now?: number;
+}): Promise<MeetingPipelineStageStatus> {
+  const db = await getDb();
+  const now = input.now ?? Date.now();
+  const existing = await db.getFirstAsync<MeetingPipelineStageRow>(
+    `SELECT * FROM meeting_pipeline_stages WHERE meeting_id = ? AND stage = ?`,
+    [input.meetingId, input.stage],
+  );
+  const transition = deriveStageTransition(existing && {
+    state: existing.state,
+    attemptCount: existing.attempt_count,
+    startedAt: existing.started_at,
+    completedUnits: existing.completed_units,
+    totalUnits: existing.total_units,
+  }, {
+    state: input.state,
+    completedUnits: input.completedUnits,
+    totalUnits: input.totalUnits,
+    now,
+  });
+  const metadataJson = input.metadata === undefined
+    ? existing?.metadata_json ?? null
+    : input.metadata == null ? null : JSON.stringify(input.metadata);
+  const error = input.error === undefined
+    ? existing?.last_error ?? null
+    : input.error?.trim() || null;
+
+  await db.runAsync(
+    `INSERT INTO meeting_pipeline_stages (
+       meeting_id, stage, state, attempt_count, started_at, finished_at,
+       updated_at, last_error, completed_units, total_units, metadata_json
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(meeting_id, stage) DO UPDATE SET
+       state = excluded.state,
+       attempt_count = excluded.attempt_count,
+       started_at = excluded.started_at,
+       finished_at = excluded.finished_at,
+       updated_at = excluded.updated_at,
+       last_error = excluded.last_error,
+       completed_units = excluded.completed_units,
+       total_units = excluded.total_units,
+       metadata_json = excluded.metadata_json`,
+    [
+      input.meetingId,
+      input.stage,
+      input.state,
+      transition.attemptCount,
+      transition.startedAt,
+      transition.finishedAt,
+      now,
+      error,
+      transition.completedUnits,
+      transition.totalUnits,
+      metadataJson,
+    ],
+  );
+  return {
+    meetingId: input.meetingId,
+    stage: input.stage,
+    state: input.state,
+    attemptCount: transition.attemptCount,
+    startedAt: transition.startedAt,
+    finishedAt: transition.finishedAt,
+    updatedAt: now,
+    lastError: error,
+    completedUnits: transition.completedUnits,
+    totalUnits: transition.totalUnits,
+    metadata: input.metadata === undefined ? parsePipelineMetadata(existing?.metadata_json ?? null) : input.metadata ?? null,
+  };
+}
+
+export async function getMeetingPipelineStages(meetingId: string): Promise<MeetingPipelineStageStatus[]> {
+  const db = await getDb();
+  const rows = await db.getAllAsync<MeetingPipelineStageRow>(
+    `SELECT * FROM meeting_pipeline_stages WHERE meeting_id = ? ORDER BY stage ASC`,
+    [meetingId],
+  );
+  return rows.map(toMeetingPipelineStage);
 }
 
 /**
@@ -1299,6 +1465,18 @@ export async function saveMeetingPacket(input: {
     status: 'summarized',
     lastError: null,
   });
+  await updateMeetingPipelineStage({
+    meetingId: input.meetingId,
+    stage: 'summary',
+    state: 'ready',
+    completedUnits: 1,
+    totalUnits: 1,
+    error: null,
+    metadata: {
+      providerId: input.providerId ?? null,
+      model: input.model ?? null,
+    },
+  });
 }
 
 export async function clearMeetingPacket(meetingId: string): Promise<void> {
@@ -1320,6 +1498,14 @@ export async function clearMeetingPacket(meetingId: string): Promise<void> {
     );
     await db.runAsync(`DELETE FROM todo_items WHERE meeting_id = ?`, [meetingId]);
   });
+  await updateMeetingPipelineStage({
+    meetingId,
+    stage: 'summary',
+    state: 'pending',
+    completedUnits: 0,
+    totalUnits: 0,
+    error: null,
+  });
 }
 
 export async function setMeetingSummaryState(
@@ -1340,6 +1526,27 @@ export async function setMeetingSummaryState(
     lastError: options?.error ?? (status === 'failed' ? 'Summary generation failed' : null),
     status: nextMeetingStatus,
     summarizedAt: status === 'ready' ? Date.now() : undefined,
+  });
+  const stageState: MeetingPipelineStageState = status === 'idle'
+    ? 'pending'
+    : status === 'queued'
+      ? 'queued'
+      : status === 'running'
+        ? 'running'
+        : status === 'ready'
+          ? 'ready'
+          : 'failed';
+  await updateMeetingPipelineStage({
+    meetingId,
+    stage: 'summary',
+    state: stageState,
+    completedUnits: status === 'ready' ? 1 : 0,
+    totalUnits: 1,
+    error: options?.error ?? (status === 'failed' ? 'Summary generation failed' : null),
+    metadata: {
+      providerId: options?.providerId ?? null,
+      model: options?.model ?? null,
+    },
   });
 }
 
