@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest';
 
-import { deriveNativeTranscriptOutcome, nativeProgress } from './nativePostProcessingCore';
+import {
+  deriveNativeTranscriptOutcome,
+  nativeProgress,
+  shouldImportNativePostProcessingResult,
+} from './nativePostProcessingCore';
 
 describe('native transcript truth model', () => {
   it('does not promote a 190 of 216 transcript to complete or cloud-eligible', () => {
@@ -40,5 +44,31 @@ describe('native transcript truth model', () => {
       .toEqual({ completed: 48, total: 216, ratio: 48 / 216 });
     expect(nativeProgress({ windowCount: 0, completedWindows: 0, failedWindows: 0 }).ratio)
       .toBeNull();
+  });
+
+  it('imports a durable retry when the same run advances from partial to complete', () => {
+    expect(shouldImportNativePostProcessingResult({
+      persistedRunId: 'run-1',
+      persistedWindowCount: 13,
+      persistedCompletedWindows: 12,
+      persistedFailedWindows: 1,
+      incomingRunId: 'run-1',
+      incomingWindowCount: 13,
+      incomingCompletedWindows: 13,
+      incomingFailedWindows: 0,
+    })).toBe(true);
+  });
+
+  it('does not continuously re-import an unchanged durable run', () => {
+    expect(shouldImportNativePostProcessingResult({
+      persistedRunId: 'run-1',
+      persistedWindowCount: 13,
+      persistedCompletedWindows: 13,
+      persistedFailedWindows: 0,
+      incomingRunId: 'run-1',
+      incomingWindowCount: 13,
+      incomingCompletedWindows: 13,
+      incomingFailedWindows: 0,
+    })).toBe(false);
   });
 });

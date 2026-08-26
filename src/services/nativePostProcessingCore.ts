@@ -47,3 +47,25 @@ export function nativeProgress(input: {
   );
   return { completed, total, ratio: total > 0 ? completed / total : null };
 }
+
+/**
+ * Native retries deliberately keep the same durable run ID so an interruption
+ * cannot create a second transcript lineage. That ID alone therefore cannot
+ * decide idempotency: import again only when that run has made measurable
+ * progress (for example 12/13 partial windows becoming 13/13 complete).
+ */
+export function shouldImportNativePostProcessingResult(input: {
+  persistedRunId?: string | null;
+  persistedWindowCount: number;
+  persistedCompletedWindows: number;
+  persistedFailedWindows: number;
+  incomingRunId: string;
+  incomingWindowCount: number;
+  incomingCompletedWindows: number;
+  incomingFailedWindows: number;
+}): boolean {
+  if (input.persistedRunId !== input.incomingRunId) return true;
+  return input.persistedWindowCount !== input.incomingWindowCount
+    || input.persistedCompletedWindows !== input.incomingCompletedWindows
+    || input.persistedFailedWindows !== input.incomingFailedWindows;
+}

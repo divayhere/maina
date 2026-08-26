@@ -6,7 +6,7 @@ import { getDb } from './db';
 import { log } from '../services/logger';
 import { splitTranscriptChunks, transcriptWordCount } from '../core/transcription/transcript';
 import { normalizeNativeBlockTimeline } from '../core/transcription/nativeBlockTiming';
-import { deriveNativeTranscriptOutcome } from '../services/nativePostProcessingCore';
+import { deriveNativeTranscriptOutcome, shouldImportNativePostProcessingResult } from '../services/nativePostProcessingCore';
 import { deriveStageTransition } from '../core/pipeline/stageState';
 
 export type MeetingStatus =
@@ -1197,12 +1197,28 @@ export async function importNativePostProcessingResult(input: {
   }[];
 }): Promise<'imported' | 'already_imported'> {
   const db = await getDb();
-  const current = await db.getFirstAsync<{ native_postprocess_run_id: string | null; started_at: number }>(
-    'SELECT native_postprocess_run_id, started_at FROM meetings WHERE id = ?',
+  const current = await db.getFirstAsync<{
+    native_postprocess_run_id: string | null;
+    started_at: number;
+    transcription_window_count: number;
+    transcription_completed_windows: number;
+    transcription_failed_windows: number;
+  }>(
+    `SELECT native_postprocess_run_id, started_at,
+            transcription_window_count, transcription_completed_windows, transcription_failed_windows
+     FROM meetings WHERE id = ?`,
     [input.meetingId],
   );
-  if (!current) return 'already_imported';
-  if (current.native_postprocess_run_id === input.runId) return 'already_imported';
+  if (!current || !shouldImportNativePostProcessingResult({
+    persistedRunId: current.native_postprocess_run_id,
+    persistedWindowCount: current.transcription_window_count,
+    persistedCompletedWindows: current.transcription_completed_windows,
+    persistedFailedWindows: current.transcription_failed_windows,
+    incomingRunId: input.runId,
+    incomingWindowCount: input.windowCount,
+    incomingCompletedWindows: input.completedWindows,
+    incomingFailedWindows: input.failedWindows,
+  })) return 'already_imported';
 
   const blocks = normalizeNativeBlockTimeline(input.blocks
     .map((block) => ({ ...block, text: block.text.trim() }))
@@ -1220,11 +1236,27 @@ export async function importNativePostProcessingResult(input: {
 
   let didImport = false;
   await db.withExclusiveTransactionAsync(async (transaction) => {
-    const inTransaction = await transaction.getFirstAsync<{ native_postprocess_run_id: string | null }>(
-      'SELECT native_postprocess_run_id FROM meetings WHERE id = ?',
+    const inTransaction = await transaction.getFirstAsync<{
+      native_postprocess_run_id: string | null;
+      transcription_window_count: number;
+      transcription_completed_windows: number;
+      transcription_failed_windows: number;
+    }>(
+      `SELECT native_postprocess_run_id,
+              transcription_window_count, transcription_completed_windows, transcription_failed_windows
+       FROM meetings WHERE id = ?`,
       [input.meetingId],
     );
-    if (!inTransaction || inTransaction.native_postprocess_run_id === input.runId) return;
+    if (!inTransaction || !shouldImportNativePostProcessingResult({
+      persistedRunId: inTransaction.native_postprocess_run_id,
+      persistedWindowCount: inTransaction.transcription_window_count,
+      persistedCompletedWindows: inTransaction.transcription_completed_windows,
+      persistedFailedWindows: inTransaction.transcription_failed_windows,
+      incomingRunId: input.runId,
+      incomingWindowCount: input.windowCount,
+      incomingCompletedWindows: input.completedWindows,
+      incomingFailedWindows: input.failedWindows,
+    })) return;
 
     await transaction.runAsync('DELETE FROM transcript_blocks WHERE meeting_id = ?', [input.meetingId]);
     // AI-derived packet content must not pretend it describes a changed raw
