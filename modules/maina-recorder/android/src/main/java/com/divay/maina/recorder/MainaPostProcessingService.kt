@@ -205,6 +205,7 @@ internal class MainaPostProcessingService : Service() {
             "Starting local transcription meetingId=$meetingId chunks=${chunkUris.size} totalWindows=$totalWindows wallDurationMs=$effectiveWallDurationMs audioDurationMs=$effectiveAudioDurationMs routeRestarts=$routeRestartCount captureGapMs=$captureGapMs",
         )
         val asr = MainaQwenAsr(applicationContext)
+        val voiceActivity = MainaVoiceActivity(applicationContext)
         var previousText = ""
         var completedWindows = start.completedWindowKeys.size
         var failedWindows = 0
@@ -243,7 +244,7 @@ internal class MainaPostProcessingService : Service() {
                         previousText = outbox.lastBlockTextBefore(meetingId, start.runId, baseSequence)
                     }
                     try {
-                        val outcome = decodeWindowWithRecovery(asr, uri, window)
+                        val outcome = decodeWindowWithRecovery(asr, voiceActivity, uri, window)
                         if (Thread.currentThread().isInterrupted) {
                             throw InterruptedException("Capture preempted local transcription at a durable window boundary")
                         }
@@ -283,7 +284,7 @@ internal class MainaPostProcessingService : Service() {
                             start.runId,
                             chunkIndex,
                             windowIndex,
-                            outcome.complete,
+                            outcome.windowState,
                             outcome.error,
                             windowEvidence(outcome, outcome.error),
                         )
@@ -296,7 +297,7 @@ internal class MainaPostProcessingService : Service() {
                             start.runId,
                             chunkIndex,
                             windowIndex,
-                            false,
+                            MainaPostProcessingOutbox.WINDOW_RETRY_PENDING,
                             lastError,
                             failureEvidence(lastError),
                         )
@@ -332,6 +333,7 @@ internal class MainaPostProcessingService : Service() {
             }
         } finally {
             asr.release()
+            voiceActivity.release()
         }
 
         val hasTranscript = outbox.lastBlockTextBefore(meetingId, start.runId, Int.MAX_VALUE).isNotBlank()
@@ -351,7 +353,11 @@ internal class MainaPostProcessingService : Service() {
             if (coverageComplete) MainaPostProcessingOutbox.STATE_COMPLETE else MainaPostProcessingOutbox.STATE_PARTIAL,
         )
         updateProgress(
-            if (hasTranscript) "Transcript ready" else "Transcript saved",
+            when {
+                coverageComplete -> "Transcript ready"
+                hasTranscript -> "Recovering saved speech"
+                else -> "Transcript recovery queued"
+            },
             completedWindows + failedWindows,
             totalWindows,
         )
@@ -361,23 +367,60 @@ internal class MainaPostProcessingService : Service() {
         val pieces: List<MainaQwenAsr.Result>,
         val complete: Boolean,
         val error: String?,
+        val windowState: String,
+        val activity: MainaVoiceActivity.Assessment,
     )
 
     private fun decodeWindowWithRecovery(
         asr: MainaQwenAsr,
+        voiceActivity: MainaVoiceActivity,
         uri: String,
         window: AsrWindow,
         depth: Int = 0,
     ): WindowDecodeOutcome {
+        val activity = asr.assessVoice(voiceActivity, uri, window)
+        if (!activity.shouldTranscribe) {
+            Log.i(
+                "MainaPostProcessing",
+                "Skipping verified silence meeting window startMs=${window.startMs} endMs=${window.endMs} vad=${activity.asMap()}",
+            )
+            return WindowDecodeOutcome(
+                pieces = emptyList(),
+                complete = true,
+                error = null,
+                windowState = MainaPostProcessingOutbox.WINDOW_SKIPPED_SILENCE,
+                activity = activity,
+            )
+        }
         val first = asr.transcribe(uri, window.startMs, window.endMs)
-        if (!isSuspicious(first)) return WindowDecodeOutcome(listOf(first), true, null)
+        if (!isSuspicious(first, activity)) {
+            return WindowDecodeOutcome(
+                pieces = listOf(first),
+                complete = true,
+                error = null,
+                windowState = MainaPostProcessingOutbox.WINDOW_COMPLETE,
+                activity = activity,
+            )
+        }
 
         if (depth >= MAX_RECOVERY_DEPTH) {
-            return WindowDecodeOutcome(listOf(first), false, suspiciousReason(first))
+            return WindowDecodeOutcome(
+                pieces = listOf(first),
+                complete = false,
+                error = suspiciousReason(first, activity),
+                windowState = MainaPostProcessingOutbox.WINDOW_RETRY_PENDING,
+                activity = activity,
+            )
         }
         val retries = MainaPostProcessingSupport.splitForRetry(window, asr.lowestEnergySplit(uri, window))
         if (retries.isEmpty()) {
-            return WindowDecodeOutcome(listOf(first), false, suspiciousReason(first))
+            return WindowDecodeOutcome(
+                pieces = listOf(first),
+                complete = false,
+                error = suspiciousReason(first, activity),
+                windowState = MainaPostProcessingOutbox.WINDOW_RETRY_PENDING,
+                activity = activity,
+            )
         }
 
         Log.w(
@@ -388,7 +431,7 @@ internal class MainaPostProcessingService : Service() {
         var error: String? = null
         retries.forEach { retry ->
             try {
-                val recovered = decodeWindowWithRecovery(asr, uri, retry, depth + 1)
+                val recovered = decodeWindowWithRecovery(asr, voiceActivity, uri, retry, depth + 1)
                 pieces += recovered.pieces
                 if (!recovered.complete) error = recovered.error ?: "Local transcription coverage is incomplete."
             } catch (cause: Throwable) {
@@ -398,17 +441,30 @@ internal class MainaPostProcessingService : Service() {
         }
         return WindowDecodeOutcome(
             pieces = pieces,
-            complete = pieces.isNotEmpty() && pieces.size <= MAX_RECOVERY_PIECES && error == null,
+            complete = pieces.size <= MAX_RECOVERY_PIECES && error == null,
             error = error,
+            windowState = if (error == null) {
+                MainaPostProcessingOutbox.WINDOW_COMPLETE
+            } else {
+                MainaPostProcessingOutbox.WINDOW_RETRY_PENDING
+            },
+            activity = activity,
         )
     }
 
-    private fun isSuspicious(result: MainaQwenAsr.Result): Boolean =
-        (result.speechExpected && result.text.isBlank()) || result.truncationSuspected
+    private fun isSuspicious(
+        result: MainaQwenAsr.Result,
+        activity: MainaVoiceActivity.Assessment,
+    ): Boolean =
+        (activity.requiresRecoveryAfterBlank && result.text.isBlank()) || result.truncationSuspected
 
-    private fun suspiciousReason(result: MainaQwenAsr.Result): String = when {
+    private fun suspiciousReason(
+        result: MainaQwenAsr.Result,
+        activity: MainaVoiceActivity.Assessment,
+    ): String = when {
         result.truncationSuspected -> "ASR output limit reached during local transcription."
-        else -> "Speech-like audio returned no text during local transcription."
+        activity.requiresRecoveryAfterBlank -> "Confirmed voice returned no text during local transcription."
+        else -> "Local transcription coverage is incomplete."
     }
 
     private fun windowEvidence(
@@ -425,6 +481,9 @@ internal class MainaPostProcessingService : Service() {
             memoryPssKb = currentProcessPssKb(),
             rmsDbfs = pieces.minOfOrNull { it.rmsDbfs },
             peakDbfs = pieces.maxOfOrNull { it.peakDbfs },
+            vadDecision = outcome.activity.decision.wireValue,
+            vadMaxProbability = outcome.activity.maxProbability.toDouble(),
+            vadSpeechMs = outcome.activity.speechMs,
         )
     }
 
@@ -438,6 +497,9 @@ internal class MainaPostProcessingService : Service() {
             memoryPssKb = currentProcessPssKb(),
             rmsDbfs = null,
             peakDbfs = null,
+            vadDecision = null,
+            vadMaxProbability = null,
+            vadSpeechMs = null,
         )
 
     private fun currentThermalStatus(): Int? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {

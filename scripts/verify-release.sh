@@ -38,12 +38,29 @@ cd "$PROJECT_DIR/android"
   --project-cache-dir "$MAINA_BUILD_ROOT/gradle-project-cache" \
   --init-script "$PROJECT_DIR/scripts/gradle-output-redirect.init.gradle" \
   -PreactNativeArchitectures="$MAINA_ANDROID_ABI" \
-  :maina-recorder:testDebugUnitTest :maina-recorder:compileDebugKotlin :app:compileDebugKotlin :app:mergeDebugNativeLibs \
+  :maina-recorder:testDebugUnitTest :maina-recorder:compileDebugKotlin :app:compileDebugKotlin :app:mergeDebugAssets :app:mergeDebugNativeLibs \
   --console=plain --no-daemon
 
 MERGED_NATIVE_ROOT="$MAINA_BUILD_ROOT/outputs"
 if ! find "$MERGED_NATIVE_ROOT" -type f \( -name 'libonnxruntime.so' -o -name 'libsherpa-onnx-jni.so' \) | grep -q .; then
   echo "Sherpa JNI runtime was not merged into the Android app output" >&2
+  exit 1
+fi
+
+# Maina's native VAD uses a small, checksum-pinned model asset. Verify it at
+# the *app* merge layer, not only inside the Expo module, so a future Gradle or
+# autolinking change cannot compile Kotlin successfully but ship an APK that
+# crashes on its first post-recording transcription.
+VAD_ASSET="$(find "$MAINA_BUILD_ROOT/outputs/_app" \
+  -path '*/intermediates/assets/debug/mergeDebugAssets/silero_vad.int8.onnx' \
+  -type f | head -n 1)"
+if [[ -z "$VAD_ASSET" || ! -f "$VAD_ASSET" ]]; then
+  echo "Silero VAD asset was not merged into the Android app assets" >&2
+  exit 1
+fi
+VAD_SHA256="$(shasum -a 256 "$VAD_ASSET" | awk '{print $1}')"
+if [[ "$VAD_SHA256" != 'c36d490aff5ab924ca6c7aeec4d8f6bd3d22db6fa17611b9c5b17eae58ac3a20' ]]; then
+  echo "Merged Silero VAD asset checksum mismatch: $VAD_SHA256" >&2
   exit 1
 fi
 

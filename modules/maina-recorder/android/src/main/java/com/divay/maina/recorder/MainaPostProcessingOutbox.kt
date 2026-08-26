@@ -40,6 +40,9 @@ internal class MainaPostProcessingOutbox(context: Context) :
         val memoryPssKb: Int?,
         val rmsDbfs: Double?,
         val peakDbfs: Double?,
+        val vadDecision: String?,
+        val vadMaxProbability: Double?,
+        val vadSpeechMs: Long?,
     )
 
     fun begin(
@@ -80,8 +83,8 @@ internal class MainaPostProcessingOutbox(context: Context) :
                 // previously failed windows are decoded again.
                 writableDatabase.delete(
                     "window_results",
-                    "meeting_id = ? AND run_id = ? AND state = ?",
-                    arrayOf(meetingId, existingRunId, WINDOW_FAILED),
+                    "meeting_id = ? AND run_id = ? AND state IN (?, ?)",
+                    arrayOf(meetingId, existingRunId, WINDOW_FAILED, WINDOW_RETRY_PENDING),
                 )
                 val completed = completedWindowKeys(writableDatabase, meetingId, existingRunId!!)
                 writableDatabase.update(
@@ -179,7 +182,7 @@ internal class MainaPostProcessingOutbox(context: Context) :
         runId: String,
         segmentIndex: Int,
         windowIndex: Int,
-        completed: Boolean,
+        state: String,
         error: String?,
         evidence: WindowEvidence? = null,
     ) = writableDatabase.insertWithOnConflict(
@@ -190,7 +193,7 @@ internal class MainaPostProcessingOutbox(context: Context) :
             put("run_id", runId)
             put("segment_index", segmentIndex)
             put("window_index", windowIndex)
-            put("state", if (completed) WINDOW_COMPLETE else WINDOW_FAILED)
+            put("state", state)
             if (error == null) putNull("last_error") else put("last_error", error)
             if (evidence == null) {
                 putNull("processing_ms")
@@ -201,6 +204,9 @@ internal class MainaPostProcessingOutbox(context: Context) :
                 putNull("memory_pss_kb")
                 putNull("rms_dbfs")
                 putNull("peak_dbfs")
+                putNull("vad_decision")
+                putNull("vad_max_probability")
+                putNull("vad_speech_ms")
             } else {
                 put("processing_ms", evidence.processingMs)
                 put("token_count", evidence.tokenCount)
@@ -210,6 +216,9 @@ internal class MainaPostProcessingOutbox(context: Context) :
                 if (evidence.memoryPssKb == null) putNull("memory_pss_kb") else put("memory_pss_kb", evidence.memoryPssKb)
                 if (evidence.rmsDbfs == null) putNull("rms_dbfs") else put("rms_dbfs", evidence.rmsDbfs)
                 if (evidence.peakDbfs == null) putNull("peak_dbfs") else put("peak_dbfs", evidence.peakDbfs)
+                if (evidence.vadDecision == null) putNull("vad_decision") else put("vad_decision", evidence.vadDecision)
+                if (evidence.vadMaxProbability == null) putNull("vad_max_probability") else put("vad_max_probability", evidence.vadMaxProbability)
+                if (evidence.vadSpeechMs == null) putNull("vad_speech_ms") else put("vad_speech_ms", evidence.vadSpeechMs)
             }
             put("updated_at", System.currentTimeMillis())
         },
@@ -405,6 +414,7 @@ internal class MainaPostProcessingOutbox(context: Context) :
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
         if (oldVersion < 2) createWindowResultsTable(db)
         if (oldVersion < 3) addWindowEvidenceColumns(db)
+        if (oldVersion < 4) addVadEvidenceColumns(db)
     }
 
     private fun createWindowResultsTable(db: SQLiteDatabase) {
@@ -424,6 +434,9 @@ internal class MainaPostProcessingOutbox(context: Context) :
                 memory_pss_kb INTEGER,
                 rms_dbfs REAL,
                 peak_dbfs REAL,
+                vad_decision TEXT,
+                vad_max_probability REAL,
+                vad_speech_ms INTEGER,
                 updated_at INTEGER NOT NULL,
                 PRIMARY KEY (meeting_id, run_id, segment_index, window_index)
             )""",
@@ -449,14 +462,28 @@ internal class MainaPostProcessingOutbox(context: Context) :
         }
     }
 
+    private fun addVadEvidenceColumns(db: SQLiteDatabase) {
+        listOf(
+            "vad_decision TEXT",
+            "vad_max_probability REAL",
+            "vad_speech_ms INTEGER",
+        ).forEach { declaration ->
+            val column = declaration.substringBefore(' ')
+            val exists = db.rawQuery("PRAGMA table_info(window_results)", null).use { cursor ->
+                generateSequence { if (cursor.moveToNext()) cursor.getString(1) else null }.any { it == column }
+            }
+            if (!exists) db.execSQL("ALTER TABLE window_results ADD COLUMN $declaration")
+        }
+    }
+
     private fun completedWindowKeys(
         db: SQLiteDatabase,
         meetingId: String,
         runId: String,
     ): Set<String> = db.rawQuery(
         """SELECT segment_index, window_index FROM window_results
-           WHERE meeting_id = ? AND run_id = ? AND state = ?""",
-        arrayOf(meetingId, runId, WINDOW_COMPLETE),
+           WHERE meeting_id = ? AND run_id = ? AND state IN (?, ?)""",
+        arrayOf(meetingId, runId, WINDOW_COMPLETE, WINDOW_SKIPPED_SILENCE),
     ).use { cursor ->
         buildSet {
             while (cursor.moveToNext()) add(windowKey(cursor.getInt(0), cursor.getInt(1)))
@@ -465,13 +492,15 @@ internal class MainaPostProcessingOutbox(context: Context) :
 
     companion object {
         private const val DB_NAME = "maina-native-postprocess.db"
-        private const val DB_VERSION = 3
+        private const val DB_VERSION = 4
         const val STATE_RUNNING = "running"
         const val STATE_COMPLETE = "complete"
         const val STATE_PARTIAL = "partial"
         const val STATE_DEFERRED = "deferred"
         const val WINDOW_COMPLETE = "complete"
+        const val WINDOW_SKIPPED_SILENCE = "skipped_silence"
         const val WINDOW_FAILED = "failed"
+        const val WINDOW_RETRY_PENDING = "retry_pending"
         val TERMINAL_STATES = setOf(STATE_COMPLETE, STATE_PARTIAL)
         private const val ACTIVE_HEARTBEAT_MAX_AGE_MS = 120_000L
 

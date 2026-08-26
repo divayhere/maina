@@ -163,13 +163,17 @@ async function runLocalAsrPipelineNow(input: LocalAsrPipelineInput): Promise<Loc
           const result = await transcribeWithQwen(uri, window.startMs, window.endMs);
           const rawText = result.text.trim();
           const text = removeExactTextOverlap(previousText, rawText);
-          const suspiciousEmpty = result.speechExpected && !rawText;
-          const suspicious = suspiciousEmpty || result.truncationSuspected;
+          // The durable native post-processing service owns production ASR and
+          // supplies a real VAD decision before declaring an empty window a
+          // recovery case. This legacy JS path has only the old RMS flag, so
+          // it must never turn ordinary room noise plus a blank result into a
+          // false failed meeting.
+          const suspicious = result.truncationSuspected;
           if (suspicious) {
             failedWindows += 1;
             lastError = result.truncationSuspected
               ? `ASR output limit reached in window ${ordinal}`
-              : `Speech-like audio returned no text in window ${ordinal}`;
+              : `Local transcription coverage is incomplete in window ${ordinal}`;
           } else {
             completedWindows += 1;
           }

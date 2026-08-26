@@ -2,7 +2,6 @@ import type { AsrResult, AudioWindow } from './types';
 
 export type AsrQualityReason =
   | 'engine-failed'
-  | 'empty-where-speech-expected'
   | 'pathological-repetition'
   | 'truncation-suspected'
   | 'invalid-window-coverage';
@@ -43,7 +42,11 @@ export function assessAsrResult(result: AsrResult): AsrQualityAssessment {
   const text = normalise(result.text);
 
   if (result.outcome === 'failed') reasons.push('engine-failed');
-  if (result.diagnostics.speechExpected && !text) reasons.push('empty-where-speech-expected');
+  // RMS-derived `speechExpected` is telemetry, not evidence that a person
+  // spoke. Room tone and route noise routinely cross its threshold. The native
+  // post-processing service owns blank-output recovery through the Silero VAD
+  // gate; keeping this legacy controller conservative avoids marking an entire
+  // meeting recoverable merely because a quiet/empty window was normal.
   if (result.diagnostics.repetitionSuspected || hasPathologicalRepetition(text)) {
     reasons.push('pathological-repetition');
   }
@@ -70,4 +73,3 @@ export function assessCoverage(windows: AudioWindow[], results: AsrResult[]): Co
   const uncoveredWindows = windows.filter((window) => !terminalChunkIds.has(window.chunkId));
   return { complete: uncoveredWindows.length === 0, uncoveredWindows };
 }
-

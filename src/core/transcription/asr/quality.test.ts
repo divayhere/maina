@@ -45,10 +45,10 @@ describe('ASR quality controller', () => {
     expect(hasPathologicalRepetition('I think the the issue is not with the team')).toBe(false);
   });
 
-  it('requires a retry for an empty result where speech was expected', () => {
+  it('does not treat an RMS-only speech hint as a failed transcript window', () => {
     const assessment = assessAsrResult(result(''));
-    expect(assessment.suspicious).toBe(true);
-    expect(assessment.reasons).toContain('empty-where-speech-expected');
+    expect(assessment.suspicious).toBe(false);
+    expect(assessment.reasons).toEqual([]);
   });
 
   it('flags an adapter-reported truncation', () => {
@@ -73,4 +73,3 @@ describe('ASR quality controller', () => {
     expect(assessCoverage([first, second], [onlyFirst, secondResult]).complete).toBe(true);
   });
 });
-

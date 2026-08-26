@@ -100,6 +100,23 @@ internal class MainaQwenAsr(private val context: Context) {
         return wav.windowStartMs + bestFrame.toLong() * frameSamples * 1000L / wav.sampleRate
     }
 
+    /**
+     * Assess audio without changing it.  VAD is deliberately a gate before
+     * Qwen, never a destructive trim/filter: transcript timestamps and retry
+     * windows must still refer to the original durable WAV.
+     */
+    fun assessVoice(
+        voiceActivity: MainaVoiceActivity,
+        uriOrPath: String,
+        window: AsrWindow,
+    ): MainaVoiceActivity.Assessment {
+        val wav = readWavWindow(fileFor(uriOrPath), window.startMs, window.endMs)
+        require(wav.sampleRate == 16_000 && wav.channels == 1 && wav.bitsPerSample == 16) {
+            "Maina VAD accepts 16 kHz mono PCM WAV chunks only"
+        }
+        return voiceActivity.assess(wav.samples)
+    }
+
     @Synchronized
     fun transcribe(uriOrPath: String, startMs: Long, endMs: Long): Result {
         val model = status()
