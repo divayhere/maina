@@ -15,6 +15,7 @@ vi.mock('@/services/logger', () => ({ log: { info: vi.fn(), warn: vi.fn(), error
 import {
   MainaCloudApiError,
   clearMainaCloudSession,
+  exchangeMainaCloudPairing,
   getMainaCloudSession,
   mainaCloudFetch,
   saveMainaCloudSession,
@@ -51,5 +52,23 @@ describe('mainaCloudSession', () => {
       name: 'MainaCloudApiError', status: 401, code: 'auth_invalid', message: 'expired',
     } satisfies Partial<MainaCloudApiError>));
     expect(await getMainaCloudSession()).toBeNull();
+  });
+
+  it('accepts the canonical mobile exchange user.id response and persists the session', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      access_token: 'new-scoped-token',
+      token_type: 'Bearer',
+      expires_at: '2030-01-01T00:00:00.000Z',
+      user: { id: 'user-1', email: 'owner@maina.local', display_name: 'Divay', role: 'owner' },
+    }), { status: 200 })));
+
+    const session = await exchangeMainaCloudPairing({
+      pairingId: 'mobile_pairing_1',
+      verificationCode: 'mp_one-time-code',
+      expiresAt: '2030-01-01T00:00:00.000Z',
+    });
+
+    expect(session.user.userId).toBe('user-1');
+    expect(await getMainaCloudSession()).toEqual(session);
   });
 });

@@ -1,5 +1,6 @@
 import { Ionicons } from '@expo/vector-icons';
 import Constants from 'expo-constants';
+import * as Device from 'expo-device';
 import { router, useFocusEffect } from 'expo-router';
 import { useCallback, useMemo, useState } from 'react';
 import { KeyboardAvoidingView, Linking, Platform, Pressable, ScrollView, Switch, View } from 'react-native';
@@ -10,9 +11,9 @@ import { DrawerMenu } from '@/design/shell';
 import { useMainaLayout } from '@/design/layout';
 import { useAppTheme } from '@/design/theme';
 import { space } from '@/design/tokens';
-import { getRemoteControlStatus, openRemoteAccessibilitySettings } from '@/hardware/recording/foreground';
+import { getQwenAsrStatus, getRemoteControlStatus, openRemoteAccessibilitySettings } from '@/hardware/recording/foreground';
 import { describeRemoteHealth } from '@/hardware/trigger/remoteHealth';
-import type { RemoteControlStatus } from '../../../modules/maina-recorder/src';
+import type { QwenAsrStatus, RemoteControlStatus } from '../../../modules/maina-recorder/src';
 import { DEFAULT_CONFIG, getAppConfig, saveAppConfig, type AppConfig } from '@/services/config';
 import { createMainaCloudPairing, exchangeMainaCloudPairing, getMainaCloudConnection, signOutMainaCloud, type MainaCloudPairingRequest, type MainaCloudSession } from '@/services/mainaCloudSession';
 import { queueEligibleMainaKnowledgeCloudSyncs } from '@/services/mainaKnowledgeCloud';
@@ -44,6 +45,7 @@ export default function SettingsScreen() {
   const [languages, setLanguages] = useState<LanguageProvisioningState | null>(null);
   const [onDevice, setOnDevice] = useState<boolean | null>(null);
   const [remote, setRemote] = useState<RemoteControlStatus | null>(null);
+  const [qwenStatus, setQwenStatus] = useState<QwenAsrStatus | null>(null);
   const [cloudSession, setCloudSession] = useState<MainaCloudSession | null>(null);
   const [pairing, setPairing] = useState<MainaCloudPairingRequest | null>(null);
   const [cloudBusy, setCloudBusy] = useState(false);
@@ -51,14 +53,21 @@ export default function SettingsScreen() {
   const remoteHealth = useMemo(() => describeRemoteHealth(remote), [remote]);
 
   const load = useCallback(async () => {
-    const [nextConfig, nextLanguages, nextRemote, nextSession] = await Promise.all([
-      getAppConfig(), provisionCoreLanguages(), getRemoteControlStatus(), getMainaCloudConnection(),
-    ]);
+    const [nextConfig, nextSession] = await Promise.all([getAppConfig(), getMainaCloudConnection()]);
     setConfig(nextConfig);
-    setLanguages(nextLanguages);
-    setRemote(nextRemote);
     setCloudSession(nextSession);
-    setOnDevice(supportsOnDevice());
+    if (Platform.OS === 'android') {
+      const [nextLanguages, nextRemote] = await Promise.all([provisionCoreLanguages(), getRemoteControlStatus()]);
+      setLanguages(nextLanguages);
+      setRemote(nextRemote);
+      setOnDevice(supportsOnDevice());
+      setQwenStatus(null);
+    } else {
+      setLanguages(null);
+      setRemote(null);
+      setOnDevice(null);
+      setQwenStatus(await getQwenAsrStatus().catch(() => null));
+    }
   }, []);
 
   useFocusEffect(useCallback(() => { void load(); }, [load]));
@@ -66,7 +75,8 @@ export default function SettingsScreen() {
   const startPairing = async () => {
     setCloudBusy(true); setCloudMessage(null);
     try {
-      const request = await createMainaCloudPairing('Maina Android');
+      const platformLabel = Platform.OS === 'ios' ? 'iPhone' : 'Android';
+      const request = await createMainaCloudPairing(`Maina ${Device.modelName || platformLabel}`);
       setPairing(request);
       setCloudMessage('Approve this phone in Maina Cloud Web, then return here and confirm.');
     } catch (cause) {
@@ -149,13 +159,30 @@ export default function SettingsScreen() {
         <Card style={{ gap: space.lg }}>
           <SectionLabel>Recording</SectionLabel>
           <SettingsRow label="Main language spoken" value="Detect automatically" helper="Maina handles English and Hindi locally." />
-          <SettingsRow label="Speech on this phone" value={languages?.ready ? 'Works offline' : 'Setting up'} helper="Language setup continues in the background." />
-          <SettingsRow label="My clicker" value={remoteHealth.statusLabel} helper="Android may require Maina to be re-armed after a phone restart." />
-          {remoteHealth.ctaAction === 'accessibility' ? <Pressable onPress={() => void openRemoteAccessibilitySettings()}><AppText variant="bodyStrong" color={theme.primary}>{remoteHealth.ctaLabel ?? 'Open phone settings'}</AppText></Pressable> : null}
-          <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.sm }}>
-            <Ionicons name={onDevice ? 'phone-portrait-outline' : 'cloud-outline'} size={16} color={onDevice ? theme.primary : theme.warn} />
-            <AppText variant="meta" muted style={{ flex: 1 }}>{onDevice === null ? 'Checking on-device support…' : onDevice ? languages?.ready ? 'On-device bilingual recognition ready' : 'On-device setup continues automatically.' : 'On-device speech is unavailable on this phone.'}</AppText>
-          </View>
+          {Platform.OS === 'android' ? (
+            <>
+              <SettingsRow label="Speech on this phone" value={languages?.ready ? 'Works offline' : 'Setting up'} helper="Language setup continues in the background." />
+              <SettingsRow label="My clicker" value={remoteHealth.statusLabel} helper="Android may require Maina to be re-armed after a phone restart." />
+              {remoteHealth.ctaAction === 'accessibility' ? <Pressable onPress={() => void openRemoteAccessibilitySettings()}><AppText variant="bodyStrong" color={theme.primary}>{remoteHealth.ctaLabel ?? 'Open phone settings'}</AppText></Pressable> : null}
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.sm }}>
+                <Ionicons name={onDevice ? 'phone-portrait-outline' : 'cloud-outline'} size={16} color={onDevice ? theme.primary : theme.warn} />
+                <AppText variant="meta" muted style={{ flex: 1 }}>{onDevice === null ? 'Checking on-device support…' : onDevice ? languages?.ready ? 'On-device bilingual recognition ready' : 'On-device setup continues automatically.' : 'On-device speech is unavailable on this phone.'}</AppText>
+              </View>
+            </>
+          ) : (
+            <>
+              <SettingsRow
+                label="Local transcription"
+                value={qwenStatus?.ready ? 'Ready' : 'Setup needed'}
+                helper={qwenStatus?.ready ? 'English, Hindi and mixed speech are processed on this iPhone.' : 'The local speech model must finish setup before transcription can run.'}
+              />
+              <SettingsRow label="Recording control" value="In app" helper="Use Maina's record button on this iPhone." />
+              <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.sm }}>
+                <Ionicons name={qwenStatus?.ready ? 'phone-portrait-outline' : 'alert-circle-outline'} size={16} color={qwenStatus?.ready ? theme.primary : theme.warn} />
+                <AppText variant="meta" muted style={{ flex: 1 }}>{qwenStatus?.ready ? 'On-device Qwen transcription ready' : qwenStatus?.reason || 'Checking the local speech model…'}</AppText>
+              </View>
+            </>
+          )}
         </Card>
 
         <Card style={{ gap: space.lg }}>

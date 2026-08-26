@@ -250,7 +250,9 @@ async function runLocalAsrPipelineNow(input: LocalAsrPipelineInput): Promise<Loc
   const coverageComplete = windowCount > 0 && failedWindows === 0 && completedWindows === windowCount;
   const finalError = coverageComplete ? null : (lastError ?? 'Local transcription coverage is incomplete.');
   await updateMeeting(input.meetingId, {
-    status: summary.hasText ? 'transcribed' : 'recorded',
+    status: coverageComplete && summary.hasText
+      ? 'transcribed'
+      : (summary.hasText ? 'transcript_partial' : 'recorded'),
     language: 'auto',
     transcribedSegments: processedChunks,
     transcriptionWindowCount: totalWindows,

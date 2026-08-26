@@ -10,10 +10,10 @@ Shared TypeScript owns meetings, SQLite schema, transcript persistence, packet g
 
 | Capability | Android | iOS feasibility implementation |
 | --- | --- | --- |
-| Durable capture | `AudioRecord` foreground service | `AVAudioEngine` / `AVAudioFile` with audio background mode |
+| Durable capture | `AudioRecord` foreground service | `AVAudioRecorder` with audio background mode and durable WAV chunks |
 | Route changes | `AudioRecord` route bridge | `AVAudioSession` route/interruption observers |
 | Local ASR | Sherpa ONNX Android AAR | Sherpa ONNX iOS XCFramework |
-| Long processing | foreground service plus deferred work | continued-processing task where supported, otherwise scheduled processing fallback |
+| Long processing | foreground service plus deferred work | persisted per-window recovery on foreground/relaunch; extended background processing remains a later gate |
 | Generic shutter control | Accessibility key filter | Unsupported; never emulate it |
 | Interim trigger | Bluetooth shutter | iPhone 15 Back Tap -> Maina Shortcut proof only |
 | iPhone 17 Pro trigger | Bluetooth shutter | Action Button -> Maina App Shortcut proof only |
@@ -30,7 +30,7 @@ The iOS branch is qualified in this order. A later gate cannot hide an earlier f
 2. **Durability:** a `capture-journal.jsonl` records start, closed chunk, pause, route recovery, interruption, and stop boundaries. A completed chunk is atomically renamed from `*.partial.wav` to `*.wav`; malformed partial files are retained, never misrepresented as valid audio.
 3. **Continuity:** input route changes and resumable system interruptions close the active chunk, wait briefly for iOS to settle, then reopen the next chunk within the same meeting ID. The measured gap and recovery count are stored.
 4. **Local ASR:** the Qwen3-ASR 0.6B INT8 model family used by Android is installed in app storage, not embedded in the IPA. The installer needs a manifest, SHA-256 checks, temporary download directory, atomic final move, storage preflight, and resumable download. Sherpa-ONNX remains the runtime boundary, so a later ASR model swap does not change meetings, notes, MKC sync, or UI contracts.
-5. **Post-capture continuation:** ASR persists each window result before moving to the next. A foreground-started continued-processing task may extend a job after Maina backgrounds where iOS grants it; a scheduled processing task or later launch remains the safe fallback.
+5. **Post-capture continuation:** ASR persists each window result before moving to the next. The current iOS build safely resumes unfinished work when Maina returns to the foreground. iOS does not yet have a qualified extended-processing task, so immediate completion after backgrounding is not promised.
 6. **Packet and cloud:** only a durable transcript becomes eligible for the existing cloud-notes and MKC pipeline. Raw audio stays local and follows the existing retention policy.
 
 ## First-device test matrix

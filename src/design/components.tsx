@@ -132,6 +132,7 @@ export function PrimaryButton({
   const isDisabled = !!rest.disabled;
   return (
     <Pressable
+      accessibilityRole="button"
       {...rest}
       style={(state) => [
         styles.primaryBtn,
@@ -163,6 +164,7 @@ export function SecondaryButton({
   const isDisabled = !!rest.disabled;
   return (
     <Pressable
+      accessibilityRole="button"
       {...rest}
       style={(state) => [
         styles.secondaryBtn,

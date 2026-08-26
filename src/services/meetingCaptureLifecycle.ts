@@ -8,6 +8,7 @@ import {
   updateNativePostProcessingProgress,
   type Meeting,
 } from '@/data/meetings';
+import { Platform } from 'react-native';
 import { completedCaptureDurationRepair } from '@/core/recording/checkpoint';
 import { hasCompleteNativeTranscript, terminalNativeMeetingRepair } from '@/core/recording/nativeCaptureReconciliation';
 import {
@@ -18,11 +19,99 @@ import {
 } from '@/hardware/recording/foreground';
 import { log } from '@/services/logger';
 import { getNativeCaptureMetrics } from '@/services/nativeCaptureMetrics';
+import { runLocalAsrPipeline } from '@/services/localAsrPipeline';
+import { maybeQueueMeetingPacket } from '@/services/meetingPacket';
 
 // Multiple foreground triggers (launch, resume, the meeting screen, and the
 // short foreground poll) can arrive together. Serialize them so only one
 // Expo-SQLite import ever observes a completed native outbox run at a time.
 let nativeReconciliationInFlight: Promise<number> | null = null;
+const iosPostProcessingInFlight = new Map<string, Promise<void>>();
+
+async function launchIOSPostProcessing(meeting: Meeting): Promise<boolean> {
+  if (!meeting.audioUri) return false;
+  if (iosPostProcessingInFlight.has(meeting.id)) return true;
+
+  await updateMeetingPipelineStage({
+    meetingId: meeting.id,
+    stage: 'asr',
+    state: 'running',
+    error: null,
+  });
+  const work = runLocalAsrPipeline({
+    meetingId: meeting.id,
+    directory: meeting.audioUri,
+    meetingStartedAt: meeting.startedAt,
+    recoverPartials: true,
+    // Qwen is the canonical transcript. Restarting after an iOS suspension
+    // therefore rebuilds the same deterministic blocks instead of appending a
+    // second copy to any live-preview text.
+    resetTranscript: true,
+  })
+    .then(async (result) => {
+      await updateMeetingPipelineStage({
+        meetingId: meeting.id,
+        stage: 'asr',
+        state: result.coverageComplete ? 'ready' : 'deferred',
+        completedUnits: result.completedWindows,
+        totalUnits: result.windowCount,
+        error: result.lastError,
+        metadata: {
+          completedWindows: result.completedWindows,
+          failedWindows: result.failedWindows,
+          recoveredChunks: result.recoveredChunks,
+          executionOwner: 'ios-js-resumable-fallback',
+        },
+      });
+      await updateMeetingPipelineStage({
+        meetingId: meeting.id,
+        stage: 'transcript_durable',
+        state: result.coverageComplete && result.hasText ? 'ready' : 'deferred',
+        completedUnits: result.completedWindows,
+        totalUnits: result.windowCount,
+        error: result.lastError,
+        metadata: { blocks: result.blockCount, words: result.wordCount },
+      });
+      if (result.coverageComplete && result.hasText) {
+        await maybeQueueMeetingPacket(meeting.id).catch((cause) => {
+          log.warn('summary', 'iOS post-call packet queue deferred', {
+            meetingId: meeting.id,
+            err: String(cause),
+          });
+        });
+      }
+      log.info('recovery', 'iOS local post-processing finished', {
+        meetingId: meeting.id,
+        coverageComplete: result.coverageComplete,
+        completedWindows: result.completedWindows,
+        failedWindows: result.failedWindows,
+        words: result.wordCount,
+      });
+    })
+    .catch(async (cause) => {
+      const message = cause instanceof Error ? cause.message : String(cause);
+      await updateMeeting(meeting.id, {
+        status: 'transcribing',
+        lastError: `Local transcription paused safely: ${message}`,
+      });
+      await updateMeetingPipelineStage({
+        meetingId: meeting.id,
+        stage: 'asr',
+        state: 'deferred',
+        error: `Local transcription paused safely: ${message}`,
+      });
+      log.error('recovery', 'iOS local post-processing deferred', {
+        meetingId: meeting.id,
+        err: message,
+      });
+    })
+    .finally(() => {
+      iosPostProcessingInFlight.delete(meeting.id);
+    });
+  iosPostProcessingInFlight.set(meeting.id, work);
+  void work;
+  return true;
+}
 
 async function launchNativePostProcessing(
   meeting: Meeting,
@@ -74,6 +163,18 @@ async function launchNativePostProcessing(
     },
   });
   await updateMeetingPipelineStage({ meetingId: meeting.id, stage: 'asr', state: 'queued', error: null });
+  if (Platform.OS === 'ios') {
+    const launched = await launchIOSPostProcessing(meeting);
+    if (launched) {
+      log.warn('recovery', 'iOS post-processing resumed from durable audio', {
+        meetingId: meeting.id,
+        chunks: metrics.finalizedUris.length,
+        audioDurationMs: metrics.audioDurationMs,
+        wallDurationMs: metrics.wallDurationMs,
+      });
+    }
+    return launched;
+  }
   try {
     await startNativePostProcessing({
       meetingId: meeting.id,

@@ -195,15 +195,20 @@ function RootLayout() {
         if (Platform.OS === 'android' && Platform.Version >= 33) {
           await PermissionsAndroid.request(PermissionsAndroid.PERMISSIONS.POST_NOTIFICATIONS).catch(() => null);
         }
-        const microphoneReady = await requestSpeechPermissions();
-        if (microphoneReady) {
-          const control = await armRemoteControl();
-          log.info('trigger', 'remote control armed', {
-            notificationsEnabled: control.notificationsEnabled,
-            inputDevices: control.inputDevices,
+        if (Platform.OS === 'android') {
+          const microphoneReady = await requestSpeechPermissions();
+          if (microphoneReady) {
+            const control = await armRemoteControl();
+            log.info('trigger', 'remote control armed', {
+              notificationsEnabled: control.notificationsEnabled,
+              inputDevices: control.inputDevices,
+            });
+          } else {
+            log.warn('trigger', 'remote control not armed because microphone permission is missing');
+          }
+          void provisionCoreLanguages().catch((cause) => {
+            log.warn('native-speech', 'background language provisioning failed', { err: String(cause) });
           });
-        } else {
-          log.warn('trigger', 'remote control not armed because microphone permission is missing');
         }
         if (resumedNativeMeetings > 0) {
           log.warn('recovery', 'native post-processing resumed from startup reconciliation', {
@@ -211,9 +216,6 @@ function RootLayout() {
             repaired,
           });
         }
-        void provisionCoreLanguages().catch((cause) => {
-          log.warn('native-speech', 'background language provisioning failed', { err: String(cause) });
-        });
         void reconcileAutoSummaryEligibility().catch((cause) => {
           log.warn('summary', 'auto-summary eligibility reconciliation failed', { err: String(cause) });
         });

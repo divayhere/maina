@@ -13,6 +13,7 @@ import UIKit
  */
 public final class MainaRecorderModule: Module {
   private let capture = MainaIOSNativeAudioCapture.shared
+  private let qwen = MainaQwenAsr.shared
 
   public func definition() -> ModuleDefinition {
     Name("MainaRecorder")
@@ -68,16 +69,16 @@ public final class MainaRecorderModule: Module {
     Function("getAudioInputs") { self.capture.inputs() }
     Function("repairWavFiles") { (_: [String]) in 0 }
 
-    // The iOS Qwen bridge is installed separately from capture. Returning an
-    // explicit unavailable state keeps the meeting durable and prevents UI
-    // code from pretending that transcript work has completed.
-    Function("getQwenAsrStatus") {
-      ["ready": false, "root": "", "reason": "The iOS local ASR runtime has not been installed yet."]
+    Function("getQwenAsrStatus") { self.qwen.status() }
+    AsyncFunction("transcribeWithQwen") { (uri: String, startMs: Double, endMs: Double, promise: Promise) in
+      self.qwen.transcribe(uri: uri, startMs: startMs, endMs: endMs) { result in
+        switch result {
+        case .success(let payload): promise.resolve(payload)
+        case .failure(let error): promise.reject(error)
+        }
+      }
     }
-    Function("transcribeWithQwen") { (_: String, _: Double, _: Double) in
-      throw NSError(domain: "MainaRecorder", code: 1001, userInfo: [NSLocalizedDescriptionKey: "The iOS local ASR runtime has not been installed yet."])
-    }
-    Function("releaseQwenAsr") { }
+    Function("releaseQwenAsr") { self.qwen.release() }
     Function("startNativePostProcessing") { (_: [String: Any]) in
       throw NSError(domain: "MainaRecorder", code: 1002, userInfo: [NSLocalizedDescriptionKey: "The iOS local ASR runtime has not been installed yet."])
     }
