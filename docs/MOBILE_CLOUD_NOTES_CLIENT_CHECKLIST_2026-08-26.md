@@ -38,9 +38,9 @@ transcript to the server for durable notes generation and MKC sync.
   server-only adapter additions; Android's request and response contract stay
   unchanged.
 - The app does not upload audio.
-- A pairing approval screen in Maina Cloud Web remains required before a real
-  phone can obtain its scoped session.  The deployed API already supports
-  approve/exchange; Web must present the owner-facing interaction.
+- The API is deployed and the owner approval UI is prepared on Maina Cloud
+  Web's `codex/web-mobile-pairing` branch.  A real phone still cannot obtain a
+  session until that normal Web deployment is live.
 - A release APK is not approved until the native verifier and live device
   pairing/job/source-sync qualification are all green.
 
@@ -66,3 +66,7 @@ transcript to the server for durable notes generation and MKC sync.
   `docs/MAINA_INTEGRATION_REGISTRY.md`.
 - No secret, raw token, pairing code, or customer transcript belongs in this
   checklist or the coordination repository.
+- Provider rollout boundary: MKC
+  `docs/MOBILE_NOTES_PROVIDER_ADAPTER_ROLLOUT.md`.  Google is active today;
+  future OpenAI/Anthropic adapters are server-only and do not change Android's
+  request/response contract.
