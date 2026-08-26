@@ -52,3 +52,4 @@ example
 # generated native folders
 /ios
 /android
+modules/maina-recorder/ios/vendor/

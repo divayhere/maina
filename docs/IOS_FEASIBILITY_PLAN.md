@@ -22,6 +22,36 @@ Shared TypeScript owns meetings, SQLite schema, transcript persistence, packet g
 
 iOS may interrupt or terminate background work. Therefore each audio segment and ASR window must be independently durable and represented in a manifest. A later launch/task resumes unfinished windows; it never recomputes stable windows or deletes source audio before verified transcription.
 
+## Build sequence and proof standard
+
+The iOS branch is qualified in this order. A later gate cannot hide an earlier failure.
+
+1. **Native capture:** `AVAudioSession` with the `record` category and an active `audio` background mode owns the microphone. It writes 16 kHz mono PCM WAV chunks into the existing Maina meeting folder.
+2. **Durability:** a `capture-journal.jsonl` records start, closed chunk, pause, route recovery, interruption, and stop boundaries. A completed chunk is atomically renamed from `*.partial.wav` to `*.wav`; malformed partial files are retained, never misrepresented as valid audio.
+3. **Continuity:** input route changes and resumable system interruptions close the active chunk, wait briefly for iOS to settle, then reopen the next chunk within the same meeting ID. The measured gap and recovery count are stored.
+4. **Local ASR:** the Qwen3-ASR 0.6B INT8 model family used by Android is installed in app storage, not embedded in the IPA. The installer needs a manifest, SHA-256 checks, temporary download directory, atomic final move, storage preflight, and resumable download. Sherpa-ONNX remains the runtime boundary, so a later ASR model swap does not change meetings, notes, MKC sync, or UI contracts.
+5. **Post-capture continuation:** ASR persists each window result before moving to the next. A foreground-started continued-processing task may extend a job after Maina backgrounds where iOS grants it; a scheduled processing task or later launch remains the safe fallback.
+6. **Packet and cloud:** only a durable transcript becomes eligible for the existing cloud-notes and MKC pipeline. Raw audio stays local and follows the existing retention policy.
+
+## First-device test matrix
+
+| Test | Pass condition |
+| --- | --- |
+| Start / pause / resume / stop | One meeting, valid WAV chunks, correct terminal state |
+| Locked 30-minute built-in-mic capture | Continuous duration within two seconds of wall clock |
+| Route fallback | USB/Bluetooth removal keeps the same meeting; measured loss at or below three seconds where iOS/hardware permits |
+| Phone call / interruption | Completed chunk retained; auto-resume only when iOS signals it may resume |
+| Force quit/relaunch | Finished chunks discovered; invalid partial stays available for recovery rather than disappearing |
+| English, Hindi, Hinglish decode | Per-window output is persistent and notes/MKC run only after complete coverage |
+| Cloud idempotency | One finalized meeting yields one frozen source; retry does not mutate it |
+
+## Explicit operating limits
+
+- A microphone `audio` background session is the correct way to sustain live recording while locked. iOS does not provide an API that makes a process unkillable.
+- A phone call, media-service reset, or physical input switch can create a short gap. Maina targets a bounded, measured recovery rather than pretending the input never changed.
+- iPhone 15 has no Action Button. Back Tap can run an App Shortcut as a test trigger, but it is not generic lock-screen HID-key interception.
+- Generic Bluetooth shutter remotes and physical volume/power interception are intentionally unsupported on iOS.
+
 ## Required iOS capabilities
 
 - Microphone permission.

@@ -235,6 +235,7 @@ export interface DiagnosticRunSummary {
 }
 
 interface MainaRecorderNativeModule {
+  requestIOSMicrophonePermission?(): Promise<boolean>;
   addListener(
     eventName: 'onHardwareTrigger',
     listener: (event: HardwareTriggerEvent) => void,

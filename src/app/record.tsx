@@ -3,7 +3,7 @@ import * as FileSystem from 'expo-file-system/legacy';
 import { router, useFocusEffect } from 'expo-router';
 import { useSpeechRecognitionEvent } from 'expo-speech-recognition';
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Alert, AppState, Pressable, StyleSheet, View } from 'react-native';
+import { Alert, AppState, Platform, Pressable, StyleSheet, View } from 'react-native';
 import Animated, { Easing, useAnimatedStyle, useSharedValue, withTiming } from 'react-native-reanimated';
 
 import {
@@ -46,6 +46,7 @@ import {
   getQwenAsrStatus,
   listAudioInputs,
   pauseNativeCapture,
+  requestNativeCapturePermission,
   resumeNativeCapture,
   setNativeCaptureState,
   startNativeCapture,
@@ -570,7 +571,9 @@ export default function RecordScreen() {
       try {
         const storageDecision = await ensureStorageBudget('record');
         if (!storageDecision.ok) throw new Error(storageDecision.message);
-        const granted = await requestSpeechPermissions();
+        const granted = Platform.OS === 'ios'
+          ? await requestNativeCapturePermission()
+          : await requestSpeechPermissions();
         if (!granted) throw new Error('Microphone permission was not granted.');
 
         const dir = recordingDir(idRef.current);
