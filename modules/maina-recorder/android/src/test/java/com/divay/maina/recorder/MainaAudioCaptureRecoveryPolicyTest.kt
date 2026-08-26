@@ -9,10 +9,19 @@ import org.junit.Test
 
 class MainaAudioCaptureRecoveryPolicyTest {
     @Test
-    fun retryDelayRisesAndCapsAtTwoSeconds() {
+    fun retryDelayRisesAndCapsAtOneSecond() {
         assertEquals(100L, MainaAudioCaptureRecoveryPolicy.delayMs(0))
         assertEquals(1_000L, MainaAudioCaptureRecoveryPolicy.delayMs(3))
-        assertEquals(2_000L, MainaAudioCaptureRecoveryPolicy.delayMs(99))
+        assertEquals(1_000L, MainaAudioCaptureRecoveryPolicy.delayMs(99))
+    }
+
+    @Test
+    fun externalRouteIsTriedBrieflyBeforeDefaultMicFallback() {
+        assertTrue(MainaAudioCaptureRecoveryPolicy.shouldPreferExternalInput(0))
+        assertTrue(MainaAudioCaptureRecoveryPolicy.shouldPreferExternalInput(1))
+        assertFalse(MainaAudioCaptureRecoveryPolicy.shouldPreferExternalInput(2))
+        assertTrue(MainaAudioCaptureRecoveryPolicy.isWithinRecoveryBudget(2_799))
+        assertFalse(MainaAudioCaptureRecoveryPolicy.isWithinRecoveryBudget(2_800))
     }
 
     @Test

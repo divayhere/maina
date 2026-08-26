@@ -3,7 +3,7 @@ import * as FileSystem from 'expo-file-system/legacy';
 import { router, useFocusEffect } from 'expo-router';
 import { useSpeechRecognitionEvent } from 'expo-speech-recognition';
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Alert, Animated, AppState, Pressable, ScrollView, StyleSheet, View } from 'react-native';
+import { Alert, Animated, AppState, Pressable, StyleSheet, View } from 'react-native';
 
 import {
   ACTIVE_LANGUAGES,
@@ -30,7 +30,7 @@ import {
   upsertTranscriptDraftBlock,
   updateMeeting,
 } from '@/data/meetings';
-import { AppText, Banner, Card, PrimaryButton, SecondaryButton } from '@/design/components';
+import { AppText, Banner, PrimaryButton, SecondaryButton } from '@/design/components';
 import { useMainaLayout } from '@/design/layout';
 import { useAppTheme } from '@/design/theme';
 import { space } from '@/design/tokens';
@@ -181,8 +181,8 @@ export default function RecordScreen() {
   const captureNoteTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const nativeStallReportedRef = useRef(false);
 
-  const [recentBlocks, setRecentBlocks] = useState<TranscriptBlock[]>([]);
-  const [interim, setInterim] = useState('');
+  const [, setRecentBlocks] = useState<TranscriptBlock[]>([]);
+  const [, setInterim] = useState('');
   const [elapsed, setElapsed] = useState(0);
   const [, setListening] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -1133,10 +1133,10 @@ export default function RecordScreen() {
         </Animated.View>
         <AppText variant="timer" style={styles.center}>{formatDuration(elapsed)}</AppText>
         <AppText variant="title" muted style={styles.center}>
-          {paused ? 'Paused' : 'Listening'}
+          {paused ? 'Paused' : 'Recording'}
         </AppText>
         <AppText variant="body" muted style={styles.center}>
-          Keep your phone where it can hear the conversation. Maina keeps the audio safe on this phone and writes the transcript after you stop.
+          {paused ? 'Audio is safely paused.' : 'Saving audio locally.'}
         </AppText>
       </View>
 
@@ -1144,27 +1144,6 @@ export default function RecordScreen() {
         <Banner tone="info" style={{ marginBottom: space.md }}>
           <AppText variant="meta" muted>{captureNote}</AppText>
         </Banner>
-      ) : null}
-
-      {recentBlocks.length > 0 || interim ? (
-        <Card style={styles.transcriptCard}>
-          <ScrollView style={styles.transcriptBox} contentContainerStyle={{ padding: space.lg, gap: space.md, flexGrow: 1 }}>
-            {recentBlocks.map((block) => (
-              <View key={block.blockId} style={styles.blockRow}>
-                <AppText variant="meta" muted>
-                  {block.startedAt ? formatTime(block.startedAt) : 'Live'}
-                </AppText>
-                <AppText variant="body">{block.text}</AppText>
-              </View>
-            ))}
-            {interim ? (
-              <View style={styles.blockRow}>
-                <AppText variant="meta" muted>Live draft</AppText>
-                <AppText variant="body" muted>{interim}</AppText>
-              </View>
-            ) : null}
-          </ScrollView>
-        </Card>
       ) : null}
 
       <View style={{ paddingBottom: insets.bottom + space.lg, gap: space.md }}>
@@ -1175,9 +1154,6 @@ export default function RecordScreen() {
             Discard this recording
           </AppText>
         </Pressable>
-        <AppText variant="body" muted style={styles.center}>
-          Recordings stay on this phone first.
-        </AppText>
       </View>
     </View>
   );
@@ -1216,9 +1192,6 @@ const styles = StyleSheet.create({
     height: 24,
     borderRadius: 12,
   },
-  transcriptCard: { flex: 1, minHeight: 128, padding: 0, overflow: 'hidden', marginBottom: space.md },
-  transcriptBox: { flex: 1 },
-  blockRow: { gap: space.sm },
   emptyTranscript: { flex: 1, justifyContent: 'center' },
   center: { textAlign: 'center' },
 });

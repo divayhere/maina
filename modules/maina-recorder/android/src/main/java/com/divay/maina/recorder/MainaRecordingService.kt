@@ -128,15 +128,44 @@ class MainaRecordingService : Service() {
         super.onCreate()
         createChannel()
         audioManager = getSystemService(AudioManager::class.java)
-        nativeCapture = MainaNativeAudioCapture(this) { level, eventName, payload ->
-            recordNativeEvent(
-                level = level,
-                category = "native-capture",
-                eventName = eventName,
-                message = "Native capture event: $eventName",
-                payload = payload,
-            )
-        }
+        nativeCapture = MainaNativeAudioCapture(
+            context = this,
+            onEvent = { level, eventName, payload ->
+                recordNativeEvent(
+                    level = level,
+                    category = "native-capture",
+                    eventName = eventName,
+                    message = "Native capture event: $eventName",
+                    payload = payload,
+                )
+                if (eventName == "native-capture-route-recovery-exhausted") {
+                    // The capture thread has already finalized the last WAV chunk.
+                    // Queue the normal stop path on the service executor so it starts
+                    // post-processing exactly once; never leave a silent recorder
+                    // shown as live just because a physical input disappeared.
+                    nativeCaptureStatus = payload + mapOf("state" to "error")
+                    heartbeatHandler.post {
+                        if (captureState == "recording") {
+                            setCaptureState("finalizing")
+                            refreshForegroundUi()
+                            onStartCommand(
+                                Intent(this, MainaRecordingService::class.java).setAction(ACTION_STOP_NATIVE_CAPTURE),
+                                0,
+                                0,
+                            )
+                        }
+                    }
+                }
+            },
+            onStatus = { payload ->
+                // This is a tiny volatile snapshot (4 Hz), not an event stream.
+                // It gives the recording screen a truthful audio-level pulse even
+                // while React/JS is busy and avoids persisting per-frame data.
+                nativeCaptureStatus = payload + mapOf(
+                    "operationId" to nativeCaptureStatus["operationId"],
+                )
+            },
+        )
         nativeCaptureStatus = mapOf("state" to "idle")
         knownExternalInputIds += audioManager
             .getDevices(AudioManager.GET_DEVICES_INPUTS)
@@ -632,16 +661,14 @@ class MainaRecordingService : Service() {
 
     private fun vibrateTransition(previous: String, next: String) {
         val vibrator = getSystemService(Vibrator::class.java)
-        val pattern = when {
-            next == "paused" -> longArrayOf(0, 70, 80, 70)
-            previous == "paused" && next == "recording" -> longArrayOf(0, 90)
-            previous == "idle" && next == "recording" -> longArrayOf(0, 160)
-            previous == "finalizing" && next == "idle" -> longArrayOf(0, 55, 65, 55, 65, 55)
-            else -> return
-        }
+        val pattern = MainaCaptureHapticPolicy.waveform(previous, next) ?: return
         runCatching {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                vibrator.vibrate(VibrationEffect.createWaveform(pattern, -1))
+                vibrator.vibrate(VibrationEffect.createWaveform(
+                    pattern,
+                    MainaCaptureHapticPolicy.amplitudes(pattern),
+                    -1,
+                ))
             } else {
                 @Suppress("DEPRECATION")
                 vibrator.vibrate(pattern, -1)

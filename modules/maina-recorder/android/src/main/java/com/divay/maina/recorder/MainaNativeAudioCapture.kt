@@ -34,6 +34,7 @@ import kotlin.math.sqrt
 internal class MainaNativeAudioCapture(
     private val context: Context,
     private val onEvent: (level: String, event: String, payload: Map<String, Any?>) -> Unit,
+    private val onStatus: (payload: Map<String, Any?>) -> Unit = {},
 ) {
     data class Options(
         val meetingId: String,
@@ -127,6 +128,7 @@ internal class MainaNativeAudioCapture(
     @Volatile private var captureGapMs = 0L
     @Volatile private var rmsDbfs = -90.0
     @Volatile private var peakDbfs = -90.0
+    @Volatile private var lastStatusPublishElapsedMs = 0L
 
     private val routingListener = AudioRouting.OnRoutingChangedListener { routing ->
         val activeRecorder = routing as? AudioRecord ?: return@OnRoutingChangedListener
@@ -198,6 +200,7 @@ internal class MainaNativeAudioCapture(
             "chunkDurationMs" to options.chunkDurationMs,
         ))
         onEvent("info", "native-capture-started", snapshot().asMap())
+        publishStatus()
         worker = thread(name = "MainaNativeCapture", isDaemon = true) { recordLoop(directory, bufferBytes) }
         snapshot()
     }
@@ -224,6 +227,7 @@ internal class MainaNativeAudioCapture(
         runCatching { recorder?.stop() }
         currentOptions?.let { appendJournal(directoryFrom(it.directory), "paused", emptyMap()) }
         onEvent("info", "native-capture-paused", snapshot().asMap())
+        publishStatus()
         return snapshot()
     }
 
@@ -234,6 +238,7 @@ internal class MainaNativeAudioCapture(
         routeRefreshRequested.set(true)
         currentOptions?.let { appendJournal(directoryFrom(it.directory), "resumed", emptyMap()) }
         onEvent("info", "native-capture-resumed", snapshot().asMap())
+        publishStatus()
         return snapshot()
     }
 
@@ -251,6 +256,7 @@ internal class MainaNativeAudioCapture(
         releaseRecorder()
         currentOptions?.let { appendJournal(directoryFrom(it.directory), "stopped", snapshot().asMap()) }
         onEvent("info", "native-capture-stopped", snapshot().asMap())
+        publishStatus()
         snapshot()
     }
 
@@ -294,6 +300,7 @@ internal class MainaNativeAudioCapture(
                         updateLevels(buffer, read)
                         lastProgressAtMs = System.currentTimeMillis()
                         val now = SystemClock.elapsedRealtime()
+                        publishStatusIfDue(now)
                         if (now - activeChunk.lastSyncElapsedMs >= SYNC_INTERVAL_MS) {
                             activeChunk.output.fd.sync()
                             activeChunk.lastSyncElapsedMs = now
@@ -361,8 +368,14 @@ internal class MainaNativeAudioCapture(
         onEvent("warn", "native-capture-route-recovery-started", snapshot().asMap() + mapOf("reason" to reason))
         var attempt = 0
         while (running.get() && !paused.get()) {
+            val elapsed = SystemClock.elapsedRealtime() - recoveryStarted
+            if (!MainaAudioCaptureRecoveryPolicy.isWithinRecoveryBudget(elapsed)) break
             if (attempt > 0) Thread.sleep(MainaAudioCaptureRecoveryPolicy.delayMs(attempt - 1))
-            val recovered = runCatching { createAndStartRecorder() }
+            val recovered = runCatching {
+                createAndStartRecorder(
+                    preferExternalInput = MainaAudioCaptureRecoveryPolicy.shouldPreferExternalInput(attempt),
+                )
+            }
             if (recovered.isSuccess) {
                 routeRestartCount += 1
                 routeRecoveryActive = false
@@ -385,6 +398,7 @@ internal class MainaNativeAudioCapture(
                     "attempts" to (attempt + 1),
                     "gapMs" to gap,
                 ))
+                publishStatus()
                 return
             }
             val cause = recovered.exceptionOrNull()
@@ -399,9 +413,40 @@ internal class MainaNativeAudioCapture(
             }
         }
         routeRecoveryActive = false
+        if (running.get() && !paused.get()) {
+            val message = "Audio input could not recover within ${MainaAudioCaptureRecoveryPolicy.MAX_ROUTE_RECOVERY_MS}ms"
+            lastError = message
+            appendJournal(directory, "route-recovery-exhausted", mapOf(
+                "reason" to reason,
+                "attempts" to attempt,
+                "captureGapMs" to (SystemClock.elapsedRealtime() - recoveryStarted),
+                "error" to message,
+            ))
+            onEvent("error", "native-capture-route-recovery-exhausted", snapshot().asMap() + mapOf(
+                "reason" to reason,
+                "attempts" to attempt,
+                "error" to message,
+            ))
+            // Do not let a meeting look live while no PCM is being written. The
+            // active WAV chunks are already durable and app recovery can route
+            // them into post-processing on the next foreground reconciliation.
+            running.set(false)
+            publishStatus()
+        }
     }
 
-    private fun createAndStartRecorder(): AudioRecord {
+    private fun publishStatusIfDue(now: Long) {
+        if (now - lastStatusPublishElapsedMs < STATUS_PUBLISH_INTERVAL_MS) return
+        lastStatusPublishElapsedMs = now
+        onStatus(snapshot().asMap())
+    }
+
+    private fun publishStatus() {
+        lastStatusPublishElapsedMs = SystemClock.elapsedRealtime()
+        onStatus(snapshot().asMap())
+    }
+
+    private fun createAndStartRecorder(preferExternalInput: Boolean = true): AudioRecord {
         val created = AudioRecord.Builder()
             .setAudioSource(currentSource ?: MediaRecorder.AudioSource.VOICE_RECOGNITION)
             .setAudioFormat(
@@ -415,7 +460,7 @@ internal class MainaNativeAudioCapture(
             .build()
         check(created.state == AudioRecord.STATE_INITIALIZED) { "Native AudioRecord could not initialize" }
         created.addOnRoutingChangedListener(routingListener, null)
-        preferredExternalInput()?.let { preferred ->
+        preferredExternalInput()?.takeIf { preferExternalInput }?.let { preferred ->
             if (!created.setPreferredDevice(preferred)) {
                 onEvent("warn", "native-capture-preferred-route-rejected", mapOf(
                     "deviceId" to preferred.id,
@@ -572,6 +617,7 @@ internal class MainaNativeAudioCapture(
         const val BYTES_PER_FRAME = 2
         const val WAV_HEADER_BYTES = 44
         const val SYNC_INTERVAL_MS = 2_000L
+        const val STATUS_PUBLISH_INTERVAL_MS = 250L
         const val STOP_JOIN_TIMEOUT_MS = 15_000L
         const val JOURNAL_NAME = "capture-journal.jsonl"
 

@@ -30,7 +30,7 @@ import {
   updateTodoDone,
   updateMeeting,
 } from '@/data/meetings';
-import { AppText, Banner, Card, Chip, PrimaryButton, SecondaryButton, SectionLabel } from '@/design/components';
+import { AppText, Banner, Card, Chip, PrimaryButton, SectionLabel } from '@/design/components';
 import { TopBar } from '@/design/shell';
 import { useMainaLayout } from '@/design/layout';
 import { useAppTheme } from '@/design/theme';
@@ -54,6 +54,15 @@ import { formatDate, formatDuration, formatTime } from '@/utils/format';
 const PAGE_SIZE = 60;
 
 type MeetingTab = 'overview' | 'transcript';
+
+function formatMeetingLength(meeting: Pick<Meeting, 'durationMs' | 'audioDurationMs'>): string {
+  const elapsedMs = Math.max(0, meeting.durationMs);
+  const recordedMs = Math.max(0, meeting.audioDurationMs ?? 0);
+  if (recordedMs > 0 && Math.abs(elapsedMs - recordedMs) >= 5_000) {
+    return `${formatDuration(recordedMs)} recorded · ${formatDuration(elapsedMs)} elapsed`;
+  }
+  return formatDuration(recordedMs || elapsedMs);
+}
 
 function TranscriptRow({ block }: { block: TranscriptBlock }) {
   const { theme } = useAppTheme();
@@ -682,7 +691,7 @@ export default function MeetingDetail() {
       {meeting ? (
         <View style={{ gap: 8 }}>
           <AppText variant="meta" muted>
-            {formatDate(meeting.startedAt)} · {formatTime(meeting.startedAt)} · {formatDuration(meeting.durationMs)}
+            {formatDate(meeting.startedAt)} · {formatTime(meeting.startedAt)} · {formatMeetingLength(meeting)}
             {meeting.language ? ` · ${meeting.language}` : ''}
           </AppText>
           <Chip
@@ -860,7 +869,6 @@ export default function MeetingDetail() {
                     </AppText>
                     <View style={{ gap: space.md }}>
                       <PrimaryButton label="Try again" onPress={() => void generatePacket()} />
-                      <ActionLink label="Open AI settings" color={theme.primary} onPress={() => router.push('/settings')} />
                     </View>
                   </Banner>
                 ) : meeting?.summary ? (
@@ -872,13 +880,13 @@ export default function MeetingDetail() {
                       {!transcriptSummary?.hasText
                         ? 'No words were saved yet. You can retry from the Transcript tab while the audio is still on this phone.'
                         : providerLabel === 'No AI provider'
-                        ? 'Connect an AI account to write notes.'
+                        ? 'Notes will be ready once an AI account is connected.'
                         : "You haven't asked for notes on this one yet."}
                     </AppText>
-                    {transcriptSummary?.hasText && hasCompleteTranscript ? (
+                    {transcriptSummary?.hasText && hasCompleteTranscript && providerLabel !== 'No AI provider' ? (
                       <PrimaryButton
-                        label={providerLabel === 'No AI provider' ? 'Connect an AI account' : 'Write my notes'}
-                        onPress={() => (providerLabel === 'No AI provider' ? router.push('/settings') : void generatePacket())}
+                        label="Write my notes"
+                        onPress={() => void generatePacket()}
                       />
                     ) : null}
                   </Banner>
@@ -928,6 +936,9 @@ export default function MeetingDetail() {
               || cloudCorrections.some((correction) => correction.syncStatus === 'sync_failed_auth');
             const visibleCloudState = cloudCorrectionState ?? cloudState;
 
+            if (meeting?.knowledgeCloudSyncStatus === 'sync_succeeded' && !cloudCorrectionState) {
+              return null;
+            }
             return (
               <Card style={{ gap: space.md, marginBottom: space.lg }}>
                 <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', gap: space.md }}>
@@ -956,23 +967,9 @@ export default function MeetingDetail() {
                       label={meeting?.knowledgeCloudSyncStatus === 'local_only' ? 'Sync this meeting now' : 'Retry cloud sync'}
                       onPress={() => void queueCloudSync()}
                     />
-                    {meeting?.knowledgeCloudSyncStatus === 'local_only' ? (
-                      <ActionLink label="Open cloud settings" color={theme.primary} onPress={() => router.push('/settings')} />
-                    ) : null}
                   </View>
                 ) : null}
-                {needsCloudSettings ? (
-                  <SecondaryButton
-                    label="Open cloud settings"
-                    onPress={() => router.push('/settings')}
-                  />
-                ) : null}
-                {meeting?.knowledgeCloudSyncStatus === 'sync_succeeded' ? (
-                  <SecondaryButton
-                    label="Open cloud settings"
-                    onPress={() => router.push('/settings')}
-                  />
-                ) : null}
+                {needsCloudSettings ? <AppText variant="meta" color={theme.warn}>Cloud access needs attention in Settings.</AppText> : null}
               </Card>
             );
           }
