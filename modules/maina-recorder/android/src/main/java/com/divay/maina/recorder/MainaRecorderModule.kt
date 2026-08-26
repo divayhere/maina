@@ -17,6 +17,17 @@ class MainaRecorderModule : Module() {
     private var triggerReceiverRegistered = false
     private var qwenAsr: MainaQwenAsr? = null
 
+    // Expo bridge values inside a Map arrive as Number (normally Double), not
+    // necessarily a decimal String. Parsing through toString() made epoch
+    // millisecond values such as meetingStartedAt disappear as 0 on retries.
+    private fun mapLong(value: Any?): Long? = when (value) {
+        is Number -> value.toLong()
+        is String -> value.toLongOrNull() ?: value.toDoubleOrNull()?.toLong()
+        else -> null
+    }
+
+    private fun mapInt(value: Any?): Int? = mapLong(value)?.toInt()
+
     private val triggerReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             when (intent?.action) {
@@ -161,22 +172,22 @@ class MainaRecorderModule : Module() {
                     MainaPostProcessingService.EXTRA_FORCE_RETRY,
                     request["forceRetry"] as? Boolean ?: false,
                 )
-                request["captureEndedAt"]?.toString()?.toLongOrNull()?.let {
+                mapLong(request["captureEndedAt"])?.let {
                     putExtra(MainaPostProcessingService.EXTRA_CAPTURE_ENDED_AT, it)
                 }
-                request["wallDurationMs"]?.toString()?.toLongOrNull()?.let {
+                mapLong(request["wallDurationMs"])?.let {
                     putExtra(MainaPostProcessingService.EXTRA_WALL_DURATION_MS, it)
                 }
-                request["audioDurationMs"]?.toString()?.toLongOrNull()?.let {
+                mapLong(request["audioDurationMs"])?.let {
                     putExtra(MainaPostProcessingService.EXTRA_AUDIO_DURATION_MS, it)
                 }
-                request["routeRestartCount"]?.toString()?.toIntOrNull()?.let {
+                mapInt(request["routeRestartCount"])?.let {
                     putExtra(MainaPostProcessingService.EXTRA_ROUTE_RESTART_COUNT, it)
                 }
-                request["captureGapMs"]?.toString()?.toLongOrNull()?.let {
+                mapLong(request["captureGapMs"])?.let {
                     putExtra(MainaPostProcessingService.EXTRA_CAPTURE_GAP_MS, it)
                 }
-                request["meetingStartedAt"]?.toString()?.toLongOrNull()?.let {
+                mapLong(request["meetingStartedAt"])?.let {
                     putExtra(MainaPostProcessingService.EXTRA_MEETING_STARTED_AT, it)
                 }
             }

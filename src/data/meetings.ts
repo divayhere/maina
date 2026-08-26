@@ -5,6 +5,7 @@
 import { getDb } from './db';
 import { log } from '../services/logger';
 import { splitTranscriptChunks, transcriptWordCount } from '../core/transcription/transcript';
+import { normalizeNativeBlockTimeline } from '../core/transcription/nativeBlockTiming';
 import { deriveNativeTranscriptOutcome } from '../services/nativePostProcessingCore';
 import { deriveStageTransition } from '../core/pipeline/stageState';
 
@@ -1169,17 +1170,17 @@ export async function importNativePostProcessingResult(input: {
   }[];
 }): Promise<'imported' | 'already_imported'> {
   const db = await getDb();
-  const current = await db.getFirstAsync<{ native_postprocess_run_id: string | null }>(
-    'SELECT native_postprocess_run_id FROM meetings WHERE id = ?',
+  const current = await db.getFirstAsync<{ native_postprocess_run_id: string | null; started_at: number }>(
+    'SELECT native_postprocess_run_id, started_at FROM meetings WHERE id = ?',
     [input.meetingId],
   );
   if (!current) return 'already_imported';
   if (current.native_postprocess_run_id === input.runId) return 'already_imported';
 
-  const blocks = input.blocks
+  const blocks = normalizeNativeBlockTimeline(input.blocks
     .map((block) => ({ ...block, text: block.text.trim() }))
     .filter((block) => block.text.length > 0)
-    .sort((left, right) => left.sequence - right.sequence);
+    .sort((left, right) => left.sequence - right.sequence), current.started_at, input.durationMs);
   const now = Date.now();
   const hasText = blocks.length > 0;
   const outcome = deriveNativeTranscriptOutcome({
