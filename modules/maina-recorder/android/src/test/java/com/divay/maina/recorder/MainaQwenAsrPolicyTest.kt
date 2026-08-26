@@ -10,13 +10,22 @@ class MainaQwenAsrPolicyTest {
     fun `uses the bounded Qwen configuration qualified for the Pixel`() {
         assertEquals(512, MainaQwenAsrPolicy.maxTotalLen)
         assertEquals(128, MainaQwenAsrPolicy.maxNewTokens)
+        assertEquals(256, MainaQwenAsrPolicy.recoveryMaxNewTokens)
         assertEquals(2, MainaQwenAsrPolicy.inferenceThreads)
     }
 
     @Test
-    fun `reserves a small token margin to checkpoint and split suspicious windows`() {
-        assertFalse(MainaQwenAsrPolicy.isTruncationSuspected(123))
-        assertTrue(MainaQwenAsrPolicy.isTruncationSuspected(124))
+    fun `only treats an exact output cap as a token truncation`() {
+        assertFalse(MainaQwenAsrPolicy.isTruncationSuspected(127, 128))
+        assertTrue(MainaQwenAsrPolicy.isTruncationSuspected(128, 128))
+        assertFalse(MainaQwenAsrPolicy.isTruncationSuspected(255, 256))
+        assertTrue(MainaQwenAsrPolicy.isTruncationSuspected(256, 256))
+    }
+
+    @Test
+    fun `allows exactly one bounded output expansion`() {
+        assertTrue(MainaQwenAsrPolicy.canUseRecoveryBudget(128))
+        assertFalse(MainaQwenAsrPolicy.canUseRecoveryBudget(256))
     }
 
     @Test

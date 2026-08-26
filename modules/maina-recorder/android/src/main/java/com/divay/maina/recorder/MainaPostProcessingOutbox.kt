@@ -27,6 +27,7 @@ internal class MainaPostProcessingOutbox(context: Context) :
     data class StartResult(
         val runId: String,
         val alreadyTerminal: Boolean,
+        val terminalState: String? = null,
         val resumed: Boolean,
         val completedWindowKeys: Set<String>,
     )
@@ -47,6 +48,7 @@ internal class MainaPostProcessingOutbox(context: Context) :
 
     fun begin(
         meetingId: String,
+        captureDirectory: String,
         meetingStartedAt: Long,
         captureEndedAt: Long?,
         durationMs: Long,
@@ -75,7 +77,7 @@ internal class MainaPostProcessingOutbox(context: Context) :
             val canRetryPartial = forceRetry && existingState == STATE_PARTIAL && existingWindowCount == windowCount
             if (existingRunId != null && existingState in TERMINAL_STATES && !canRetryPartial) {
                 writableDatabase.setTransactionSuccessful()
-                return StartResult(existingRunId!!, true, false, emptySet())
+                return StartResult(existingRunId!!, true, existingState, false, emptySet())
             }
             if (existingRunId != null && existingWindowCount == windowCount) {
                 // A killed/deferred private ASR process resumes the same run.
@@ -91,6 +93,7 @@ internal class MainaPostProcessingOutbox(context: Context) :
                     "runs",
                     ContentValues().apply {
                         put("state", STATE_RUNNING)
+                        put("capture_directory", captureDirectory)
                         put("meeting_started_at", meetingStartedAt)
                         if (captureEndedAt == null) putNull("capture_ended_at") else put("capture_ended_at", captureEndedAt)
                         put("duration_ms", durationMs)
@@ -107,7 +110,7 @@ internal class MainaPostProcessingOutbox(context: Context) :
                     arrayOf(meetingId),
                 )
                 writableDatabase.setTransactionSuccessful()
-                return StartResult(existingRunId!!, false, true, completed)
+                return StartResult(existingRunId!!, false, null, true, completed)
             }
             val runId = UUID.randomUUID().toString()
             writableDatabase.delete("blocks", "meeting_id = ?", arrayOf(meetingId))
@@ -119,6 +122,7 @@ internal class MainaPostProcessingOutbox(context: Context) :
                     put("meeting_id", meetingId)
                     put("run_id", runId)
                     put("state", STATE_RUNNING)
+                    put("capture_directory", captureDirectory)
                     put("meeting_started_at", meetingStartedAt)
                     if (captureEndedAt == null) putNull("capture_ended_at") else put("capture_ended_at", captureEndedAt)
                     put("duration_ms", durationMs)
@@ -136,7 +140,7 @@ internal class MainaPostProcessingOutbox(context: Context) :
                 SQLiteDatabase.CONFLICT_REPLACE,
             )
             writableDatabase.setTransactionSuccessful()
-            return StartResult(runId, false, false, emptySet())
+            return StartResult(runId, false, null, false, emptySet())
         } finally {
             writableDatabase.endTransaction()
         }
@@ -282,11 +286,37 @@ internal class MainaPostProcessingOutbox(context: Context) :
         arrayOf(meetingId),
     )
 
+    /** Counts bounded background recovery rounds independently of WorkManager's
+     * own ephemeral run counter, which is reset when a new unique request is queued. */
+    fun incrementRecoveryRounds(meetingId: String): Int {
+        writableDatabase.beginTransaction()
+        try {
+            val current = writableDatabase.rawQuery(
+                "SELECT recovery_rounds FROM runs WHERE meeting_id = ?",
+                arrayOf(meetingId),
+            ).use { cursor -> if (cursor.moveToFirst()) cursor.getInt(0) else 0 }
+            val next = current + 1
+            writableDatabase.update(
+                "runs",
+                ContentValues().apply {
+                    put("recovery_rounds", next)
+                    put("updated_at", System.currentTimeMillis())
+                },
+                "meeting_id = ?",
+                arrayOf(meetingId),
+            )
+            writableDatabase.setTransactionSuccessful()
+            return next
+        } finally {
+            writableDatabase.endTransaction()
+        }
+    }
+
     fun read(meetingId: String): Map<String, Any?>? = readableDatabase.rawQuery(
-        """SELECT run_id, state, meeting_started_at, capture_ended_at, duration_ms,
+        """SELECT run_id, state, capture_directory, meeting_started_at, capture_ended_at, duration_ms,
                   audio_duration_ms, segment_count, processed_segments, window_count,
                   completed_windows, failed_windows, route_restart_count, capture_gap_ms,
-                  last_error, updated_at
+                  recovery_rounds, last_error, updated_at
            FROM runs WHERE meeting_id = ?""",
         arrayOf(meetingId),
     ).use { run ->
@@ -314,25 +344,27 @@ internal class MainaPostProcessingOutbox(context: Context) :
             "meetingId" to meetingId,
             "runId" to runId,
             "state" to state,
+            "captureDirectory" to run.getString(2),
             // This survives process isolation; a static field in :asr cannot
             // truthfully describe activity to the main React Native process.
             "active" to (
                 state == STATE_RUNNING
-                    && System.currentTimeMillis() - run.getLong(14) <= ACTIVE_HEARTBEAT_MAX_AGE_MS
+                    && System.currentTimeMillis() - run.getLong(16) <= ACTIVE_HEARTBEAT_MAX_AGE_MS
             ),
-            "meetingStartedAt" to run.getLong(2),
-            "captureEndedAt" to if (run.isNull(3)) null else run.getLong(3),
-            "durationMs" to run.getLong(4),
-            "audioDurationMs" to run.getLong(5),
-            "segmentCount" to run.getInt(6),
-            "processedSegments" to run.getInt(7),
-            "windowCount" to run.getInt(8),
-            "completedWindows" to run.getInt(9),
-            "failedWindows" to run.getInt(10),
-            "routeRestartCount" to run.getInt(11),
-            "captureGapMs" to run.getLong(12),
-            "lastError" to if (run.isNull(13)) null else run.getString(13),
-            "updatedAt" to run.getLong(14),
+            "meetingStartedAt" to run.getLong(3),
+            "captureEndedAt" to if (run.isNull(4)) null else run.getLong(4),
+            "durationMs" to run.getLong(5),
+            "audioDurationMs" to run.getLong(6),
+            "segmentCount" to run.getInt(7),
+            "processedSegments" to run.getInt(8),
+            "windowCount" to run.getInt(9),
+            "completedWindows" to run.getInt(10),
+            "failedWindows" to run.getInt(11),
+            "routeRestartCount" to run.getInt(12),
+            "captureGapMs" to run.getLong(13),
+            "recoveryRounds" to run.getInt(14),
+            "lastError" to if (run.isNull(15)) null else run.getString(15),
+            "updatedAt" to run.getLong(16),
             "blocks" to blocks,
         )
     }
@@ -380,6 +412,7 @@ internal class MainaPostProcessingOutbox(context: Context) :
                 meeting_id TEXT PRIMARY KEY NOT NULL,
                 run_id TEXT NOT NULL,
                 state TEXT NOT NULL,
+                capture_directory TEXT NOT NULL,
                 meeting_started_at INTEGER NOT NULL,
                 capture_ended_at INTEGER,
                 duration_ms INTEGER NOT NULL,
@@ -391,6 +424,7 @@ internal class MainaPostProcessingOutbox(context: Context) :
                 failed_windows INTEGER NOT NULL,
                 route_restart_count INTEGER NOT NULL,
                 capture_gap_ms INTEGER NOT NULL,
+                recovery_rounds INTEGER NOT NULL DEFAULT 0,
                 last_error TEXT,
                 updated_at INTEGER NOT NULL
             )""",
@@ -415,6 +449,7 @@ internal class MainaPostProcessingOutbox(context: Context) :
         if (oldVersion < 2) createWindowResultsTable(db)
         if (oldVersion < 3) addWindowEvidenceColumns(db)
         if (oldVersion < 4) addVadEvidenceColumns(db)
+        if (oldVersion < 5) addRunRecoveryColumns(db)
     }
 
     private fun createWindowResultsTable(db: SQLiteDatabase) {
@@ -476,6 +511,20 @@ internal class MainaPostProcessingOutbox(context: Context) :
         }
     }
 
+    private fun addRunRecoveryColumns(db: SQLiteDatabase) {
+        val columns = db.rawQuery("PRAGMA table_info(runs)", null).use { cursor ->
+            buildSet {
+                while (cursor.moveToNext()) add(cursor.getString(1))
+            }
+        }
+        if ("capture_directory" !in columns) {
+            db.execSQL("ALTER TABLE runs ADD COLUMN capture_directory TEXT NOT NULL DEFAULT ''")
+        }
+        if ("recovery_rounds" !in columns) {
+            db.execSQL("ALTER TABLE runs ADD COLUMN recovery_rounds INTEGER NOT NULL DEFAULT 0")
+        }
+    }
+
     private fun completedWindowKeys(
         db: SQLiteDatabase,
         meetingId: String,
@@ -492,7 +541,7 @@ internal class MainaPostProcessingOutbox(context: Context) :
 
     companion object {
         private const val DB_NAME = "maina-native-postprocess.db"
-        private const val DB_VERSION = 4
+        private const val DB_VERSION = 5
         const val STATE_RUNNING = "running"
         const val STATE_COMPLETE = "complete"
         const val STATE_PARTIAL = "partial"

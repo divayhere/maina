@@ -242,13 +242,13 @@ async function reconcilePendingNativeMeetingWorkInternal(): Promise<number> {
     }
 
     if (
-      meeting.status === 'transcribing'
+      (meeting.status === 'transcribing' || meeting.status === 'transcript_partial')
       && (
         meeting.transcriptionWindowCount === 0
         || (meeting.transcriptionCompletedWindows + meeting.transcriptionFailedWindows) < meeting.transcriptionWindowCount
       )
     ) {
-      if (await launchNativePostProcessing(meeting)) resumed += 1;
+      if (await launchNativePostProcessing(meeting, { forceRetry: meeting.status === 'transcript_partial' })) resumed += 1;
     }
   }
 

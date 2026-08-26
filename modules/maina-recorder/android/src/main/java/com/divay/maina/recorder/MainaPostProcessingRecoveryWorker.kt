@@ -6,6 +6,8 @@ import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
 import android.os.Build
+import android.util.Log
+import androidx.core.content.ContextCompat
 import androidx.work.BackoffPolicy
 import androidx.work.CoroutineWorker
 import androidx.work.ExistingWorkPolicy
@@ -18,11 +20,12 @@ import java.util.concurrent.TimeUnit
 /**
  * Durable recovery signalling for a deferred ASR run.
  *
- * A Worker does not restart the media-processing foreground service from the
- * background: Android can reject that start and turn a safe checkpoint into a
- * crash loop. START_REDELIVER_INTENT covers permitted service process death;
- * this worker preserves one named recovery request and provides one actionable
- * foreground-resume notification after a timeout or controlled defer.
+ * A Worker makes one controlled attempt to restart the media-processing
+ * foreground service. Android can reject a background foreground-service start,
+ * so rejection is logged and retried with WorkManager backoff rather than
+ * turning a safe checkpoint into a crash loop. START_REDELIVER_INTENT covers
+ * permitted service process death; the notification remains the final safe
+ * fallback after the bounded recovery budget is exhausted.
  */
 internal object MainaPostProcessingRecoveryScheduler {
     private const val CHANNEL_ID = "maina_asr_recovery"
@@ -82,15 +85,48 @@ internal class MainaPostProcessingRecoveryWorker(
     override suspend fun doWork(): Result {
         val meetingId = inputData.getString(MainaPostProcessingRecoveryScheduler.EXTRA_MEETING_ID).orEmpty()
         if (meetingId.isBlank()) return Result.failure()
+        // A fresh meeting always wins over deferred ASR. The recording service
+        // checkpoints the old ASR at a window boundary; WorkManager will retry
+        // this unique recovery request later instead of competing for CPU/RAM.
+        if (MainaRecordingService.captureState != "idle") return Result.retry()
         val run = MainaPostProcessingOutbox.shared(applicationContext).read(meetingId) ?: return Result.success()
         return when (run["state"] as? String) {
             MainaPostProcessingOutbox.STATE_COMPLETE,
-            MainaPostProcessingOutbox.STATE_PARTIAL,
             -> Result.success()
             MainaPostProcessingOutbox.STATE_RUNNING -> Result.retry()
             else -> {
-                MainaPostProcessingRecoveryScheduler.notifyResume(applicationContext, meetingId)
-                Result.success()
+                val recoveryRounds = run["recoveryRounds"] as? Int ?: 0
+                val directory = run["captureDirectory"] as? String
+                if (directory.isNullOrBlank() || !MainaPostProcessingRecoveryPolicy.shouldScheduleAnotherRound(recoveryRounds)) {
+                    MainaPostProcessingRecoveryScheduler.notifyResume(applicationContext, meetingId)
+                    return Result.success()
+                }
+                val intent = Intent(applicationContext, MainaPostProcessingService::class.java).apply {
+                    action = MainaPostProcessingService.ACTION_START
+                    putExtra(MainaPostProcessingService.EXTRA_MEETING_ID, meetingId)
+                    putExtra(MainaPostProcessingService.EXTRA_DIRECTORY, directory)
+                    putExtra(MainaPostProcessingService.EXTRA_FORCE_RETRY, true)
+                    (run["meetingStartedAt"] as? Long)?.let { putExtra(MainaPostProcessingService.EXTRA_MEETING_STARTED_AT, it) }
+                    (run["captureEndedAt"] as? Long)?.let { putExtra(MainaPostProcessingService.EXTRA_CAPTURE_ENDED_AT, it) }
+                    (run["durationMs"] as? Long)?.let { putExtra(MainaPostProcessingService.EXTRA_WALL_DURATION_MS, it) }
+                    (run["audioDurationMs"] as? Long)?.let { putExtra(MainaPostProcessingService.EXTRA_AUDIO_DURATION_MS, it) }
+                    (run["routeRestartCount"] as? Int)?.let { putExtra(MainaPostProcessingService.EXTRA_ROUTE_RESTART_COUNT, it) }
+                    (run["captureGapMs"] as? Long)?.let { putExtra(MainaPostProcessingService.EXTRA_CAPTURE_GAP_MS, it) }
+                }
+                try {
+                    ContextCompat.startForegroundService(applicationContext, intent)
+                    Result.success()
+                } catch (error: Throwable) {
+                    // Some Android states forbid a foreground-service start from
+                    // background. WorkManager backs off and Maina's foreground
+                    // reconciliation still resumes safely at the next launch.
+                    Log.w(
+                        "MainaPostProcessing",
+                        "Deferred local transcription restart was denied; retrying with WorkManager backoff.",
+                        error,
+                    )
+                    Result.retry()
+                }
             }
         }
     }

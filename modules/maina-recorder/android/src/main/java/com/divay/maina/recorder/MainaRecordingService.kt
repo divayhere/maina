@@ -389,6 +389,7 @@ class MainaRecordingService : Service() {
                             runCatching {
                                 MainaPostProcessingOutbox.shared(applicationContext).begin(
                                     meetingId,
+                                    directory,
                                     lastCaptureStartedAt,
                                     System.currentTimeMillis(),
                                     0L,
@@ -402,6 +403,7 @@ class MainaRecordingService : Service() {
                                     meetingId,
                                     "Saved audio is waiting for local transcription: $message",
                                 )
+                                MainaPostProcessingRecoveryScheduler.enqueue(applicationContext, meetingId)
                             }
                             recordNativeEvent(
                                 level = "warn",

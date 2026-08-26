@@ -37,6 +37,7 @@ internal class MainaQwenAsr(private val context: Context) {
         val speechExpected: Boolean,
         val truncationSuspected: Boolean,
         val tokenCount: Int,
+        val maxNewTokens: Int,
     ) {
         fun asMap() = mapOf(
             "outcome" to if (text.isBlank()) "empty" else "success",
@@ -51,6 +52,7 @@ internal class MainaQwenAsr(private val context: Context) {
             "speechExpected" to speechExpected,
             "truncationSuspected" to truncationSuspected,
             "tokenCount" to tokenCount,
+            "maxNewTokens" to maxNewTokens,
             "engineId" to ENGINE_ID,
             "engineVersion" to ENGINE_VERSION,
         )
@@ -118,7 +120,15 @@ internal class MainaQwenAsr(private val context: Context) {
     }
 
     @Synchronized
-    fun transcribe(uriOrPath: String, startMs: Long, endMs: Long): Result {
+    fun transcribe(
+        uriOrPath: String,
+        startMs: Long,
+        endMs: Long,
+        maxNewTokens: Int = MainaQwenAsrPolicy.maxNewTokens,
+    ): Result {
+        require(maxNewTokens in setOf(MainaQwenAsrPolicy.maxNewTokens, MainaQwenAsrPolicy.recoveryMaxNewTokens)) {
+            "Unsupported Qwen output budget: $maxNewTokens"
+        }
         val model = status()
         check(model.ready) { model.reason ?: "Qwen model pack is unavailable" }
         val wav = readWavWindow(fileFor(uriOrPath), startMs, endMs)
@@ -131,7 +141,7 @@ internal class MainaQwenAsr(private val context: Context) {
         val stream = activeRecognizer.createStream()
         try {
             stream.acceptWaveform(samples, wav.sampleRate)
-            stream.setOption("max_new_tokens", MainaQwenAsrPolicy.maxNewTokens.toString())
+            stream.setOption("max_new_tokens", maxNewTokens.toString())
             val started = System.currentTimeMillis()
             activeRecognizer.decode(stream)
             val result = activeRecognizer.getResult(stream)
@@ -147,8 +157,9 @@ internal class MainaQwenAsr(private val context: Context) {
                 rmsDbfs = levels.first,
                 peakDbfs = levels.second,
                 speechExpected = MainaQwenAsrPolicy.isSpeechExpected(levels.first),
-                truncationSuspected = MainaQwenAsrPolicy.isTruncationSuspected(tokenCount),
+                truncationSuspected = MainaQwenAsrPolicy.isTruncationSuspected(tokenCount, maxNewTokens),
                 tokenCount = tokenCount,
+                maxNewTokens = maxNewTokens,
             )
         } catch (cause: Throwable) {
             release()
@@ -171,7 +182,9 @@ internal class MainaQwenAsr(private val context: Context) {
             decoder = File(modelRoot, "decoder.int8.onnx").absolutePath
             tokenizer = File(modelRoot, "tokenizer").absolutePath
             maxTotalLen = MainaQwenAsrPolicy.maxTotalLen
-            maxNewTokens = MainaQwenAsrPolicy.maxNewTokens
+            // Allocate once for the bounded recovery ceiling. Individual streams
+            // still begin at 128 via setOption above.
+            maxNewTokens = MainaQwenAsrPolicy.recoveryMaxNewTokens
         }
         val modelConfig = OfflineModelConfig().apply {
             qwen3Asr = qwen

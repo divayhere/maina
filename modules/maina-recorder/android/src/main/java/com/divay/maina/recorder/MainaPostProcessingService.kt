@@ -86,7 +86,7 @@ internal class MainaPostProcessingService : Service() {
             activeMeetingId.set(meetingId)
             currentlyProcessingMeetingId = meetingId
             try {
-                runPostProcessing(
+                var completed = runPostProcessing(
                     meetingId = meetingId,
                     directory = directory,
                     captureEndedAt = intent.getLongExtra(EXTRA_CAPTURE_ENDED_AT, 0L).takeIf { it > 0L },
@@ -97,6 +97,35 @@ internal class MainaPostProcessingService : Service() {
                     meetingStartedAt = intent.getLongExtra(EXTRA_MEETING_STARTED_AT, 0L),
                     forceRetry = intent.getBooleanExtra(EXTRA_FORCE_RETRY, false),
                 )
+                var immediatePasses = 0
+                while (
+                    MainaPostProcessingRecoveryPolicy.shouldRunImmediateRetry(completed, immediatePasses)
+                    && !Thread.currentThread().isInterrupted
+                ) {
+                    immediatePasses += 1
+                    updateProgress("Finishing saved speech", 0, 0)
+                    Thread.sleep(MainaPostProcessingRecoveryPolicy.immediateRetryDelayMs())
+                    completed = runPostProcessing(
+                        meetingId = meetingId,
+                        directory = directory,
+                        captureEndedAt = intent.getLongExtra(EXTRA_CAPTURE_ENDED_AT, 0L).takeIf { it > 0L },
+                        wallDurationMs = intent.getLongExtra(EXTRA_WALL_DURATION_MS, 0L),
+                        audioDurationMs = intent.getLongExtra(EXTRA_AUDIO_DURATION_MS, 0L),
+                        routeRestartCount = intent.getIntExtra(EXTRA_ROUTE_RESTART_COUNT, 0),
+                        captureGapMs = intent.getLongExtra(EXTRA_CAPTURE_GAP_MS, 0L),
+                        meetingStartedAt = intent.getLongExtra(EXTRA_MEETING_STARTED_AT, 0L),
+                        forceRetry = true,
+                    )
+                }
+                if (!completed) {
+                    val recoveryRounds = MainaPostProcessingOutbox.shared(applicationContext)
+                        .incrementRecoveryRounds(meetingId)
+                    if (MainaPostProcessingRecoveryPolicy.shouldScheduleAnotherRound(recoveryRounds)) {
+                        MainaPostProcessingRecoveryScheduler.enqueue(applicationContext, meetingId)
+                    } else {
+                        MainaPostProcessingRecoveryScheduler.notifyResume(applicationContext, meetingId)
+                    }
+                }
             } catch (error: Throwable) {
                 val message = error.message ?: error.javaClass.simpleName
                 Log.e("MainaPostProcessing", "Local transcription failed for meetingId=$meetingId", error)
@@ -149,19 +178,19 @@ internal class MainaPostProcessingService : Service() {
         captureGapMs: Long,
         meetingStartedAt: Long,
         forceRetry: Boolean,
-    ) {
+    ): Boolean {
         val inspection = waitForFinalizedChunks(directory)
         val chunkUris = inspection.finalizedUris
         if (chunkUris.isEmpty()) {
             MainaPostProcessingOutbox.shared(applicationContext).begin(
-                meetingId, meetingStartedAt, captureEndedAt, 0L, 0L, 0, 0, routeRestartCount, captureGapMs,
+                meetingId, directory, meetingStartedAt, captureEndedAt, 0L, 0L, 0, 0, routeRestartCount, captureGapMs,
             )
             MainaPostProcessingOutbox.shared(applicationContext).defer(
                 meetingId,
                 if (inspection.partialUris.isNotEmpty()) "Audio finalization is still incomplete; recovery audio was preserved."
                 else "Native capture produced no finalized WAV chunks.",
             )
-            return
+            return false
         }
 
         val durations = chunkUris.map(MainaPostProcessingSupport::durationMs)
@@ -185,6 +214,7 @@ internal class MainaPostProcessingService : Service() {
         }.coerceAtLeast(1L)
         val start = outbox.begin(
             meetingId = meetingId,
+            captureDirectory = directory,
             meetingStartedAt = effectiveMeetingStartedAt,
             captureEndedAt = captureEndedAt,
             durationMs = effectiveWallDurationMs,
@@ -196,9 +226,9 @@ internal class MainaPostProcessingService : Service() {
             forceRetry = forceRetry,
         )
         if (start.alreadyTerminal) {
-            Log.i("MainaPostProcessing", "Terminal outbox run already exists for meetingId=$meetingId")
+            Log.i("MainaPostProcessing", "Terminal outbox run already exists for meetingId=$meetingId state=${start.terminalState}")
             notifyResultChanged(meetingId, "terminal")
-            return
+            return start.terminalState == MainaPostProcessingOutbox.STATE_COMPLETE
         }
         Log.i(
             "MainaPostProcessing",
@@ -361,6 +391,7 @@ internal class MainaPostProcessingService : Service() {
             completedWindows + failedWindows,
             totalWindows,
         )
+        return coverageComplete
     }
 
     private data class WindowDecodeOutcome(
@@ -377,6 +408,7 @@ internal class MainaPostProcessingService : Service() {
         uri: String,
         window: AsrWindow,
         depth: Int = 0,
+        maxNewTokens: Int = MainaQwenAsrPolicy.maxNewTokens,
     ): WindowDecodeOutcome {
         val activity = asr.assessVoice(voiceActivity, uri, window)
         if (!activity.shouldTranscribe) {
@@ -392,7 +424,7 @@ internal class MainaPostProcessingService : Service() {
                 activity = activity,
             )
         }
-        val first = asr.transcribe(uri, window.startMs, window.endMs)
+        val first = asr.transcribe(uri, window.startMs, window.endMs, maxNewTokens)
         if (!isSuspicious(first, activity)) {
             return WindowDecodeOutcome(
                 pieces = listOf(first),
@@ -403,11 +435,36 @@ internal class MainaPostProcessingService : Service() {
             )
         }
 
+        // The observed 12/13 failure was a real 128-token Qwen cap. Retry the
+        // exact same audio once at 256 before changing boundaries; this retains
+        // context and avoids splitting ordinary dense Hindi/Hinglish speech.
+        val expanded = if (
+            first.truncationSuspected && MainaQwenAsrPolicy.canUseRecoveryBudget(maxNewTokens)
+        ) {
+            Log.w(
+                "MainaPostProcessing",
+                "Retrying token-capped ASR window with bounded 256-token budget startMs=${window.startMs} endMs=${window.endMs}",
+            )
+            asr.transcribe(uri, window.startMs, window.endMs, MainaQwenAsrPolicy.recoveryMaxNewTokens)
+        } else {
+            null
+        }
+        val candidate = expanded ?: first
+        if (!isSuspicious(candidate, activity)) {
+            return WindowDecodeOutcome(
+                pieces = listOf(candidate),
+                complete = true,
+                error = null,
+                windowState = MainaPostProcessingOutbox.WINDOW_COMPLETE,
+                activity = activity,
+            )
+        }
+
         if (depth >= MAX_RECOVERY_DEPTH) {
             return WindowDecodeOutcome(
-                pieces = listOf(first),
+                pieces = listOf(candidate),
                 complete = false,
-                error = suspiciousReason(first, activity),
+                error = suspiciousReason(candidate, activity),
                 windowState = MainaPostProcessingOutbox.WINDOW_RETRY_PENDING,
                 activity = activity,
             )
@@ -415,9 +472,9 @@ internal class MainaPostProcessingService : Service() {
         val retries = MainaPostProcessingSupport.splitForRetry(window, asr.lowestEnergySplit(uri, window))
         if (retries.isEmpty()) {
             return WindowDecodeOutcome(
-                pieces = listOf(first),
+                pieces = listOf(candidate),
                 complete = false,
-                error = suspiciousReason(first, activity),
+                error = suspiciousReason(candidate, activity),
                 windowState = MainaPostProcessingOutbox.WINDOW_RETRY_PENDING,
                 activity = activity,
             )
@@ -431,7 +488,14 @@ internal class MainaPostProcessingService : Service() {
         var error: String? = null
         retries.forEach { retry ->
             try {
-                val recovered = decodeWindowWithRecovery(asr, voiceActivity, uri, retry, depth + 1)
+                val recovered = decodeWindowWithRecovery(
+                    asr,
+                    voiceActivity,
+                    uri,
+                    retry,
+                    depth + 1,
+                    if (candidate.truncationSuspected) MainaQwenAsrPolicy.recoveryMaxNewTokens else maxNewTokens,
+                )
                 pieces += recovered.pieces
                 if (!recovered.complete) error = recovered.error ?: "Local transcription coverage is incomplete."
             } catch (cause: Throwable) {
