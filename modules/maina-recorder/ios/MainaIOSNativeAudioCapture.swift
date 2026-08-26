@@ -265,6 +265,12 @@ final class MainaIOSNativeAudioCapture: NSObject, AVAudioRecorderDelegate {
     var options: AVAudioSession.CategoryOptions = []
     options.insert(.allowBluetoothHFP)
     try audioSession.setCategory(.record, mode: .measurement, options: options)
+    // Physical route removal still has to be journaled and recovered below,
+    // but iOS 17+ lets an active capture prefer continuity over an automatic
+    // route-disconnect interruption. This is a preference, not a guarantee.
+    if #available(iOS 17.0, *) {
+      try? audioSession.setPrefersInterruptionOnRouteDisconnect(false)
+    }
     try audioSession.setActive(true, options: .notifyOthersOnDeactivation)
   }
 

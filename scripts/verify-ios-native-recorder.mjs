@@ -29,6 +29,7 @@ for (const token of [
   'partial.wav',
   'chunk-finalization-conflict',
   'allowBluetoothHFP',
+  'setPrefersInterruptionOnRouteDisconnect(false)',
 ]) {
   if (!readFileSync(capture, 'utf8').includes(token)) {
     throw new Error(`iOS recorder reliability invariant missing: ${token}`);
