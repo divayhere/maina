@@ -38,9 +38,8 @@ transcript to the server for durable notes generation and MKC sync.
   server-only adapter additions; Android's request and response contract stay
   unchanged.
 - The app does not upload audio.
-- The API is deployed and the owner approval UI is prepared on Maina Cloud
-  Web's `codex/web-mobile-pairing` branch.  A real phone still cannot obtain a
-  session until that normal Web deployment is live.
+- The API and Maina Cloud Web owner-approval UI are live. A real phone still
+  needs one deliberate owner approval before it can obtain its scoped session.
 - A release APK is not approved until the native verifier and live device
   pairing/job/source-sync qualification are all green.
 
