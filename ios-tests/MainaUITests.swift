@@ -7,13 +7,16 @@ final class MainaUITests: XCTestCase {
     continueAfterFailure = false
     app.launch()
     XCTAssertTrue(app.wait(for: .runningForeground, timeout: 15))
+    XCTAssertTrue(app.buttons["Record a meeting"].waitForExistence(timeout: 15))
   }
 
   func testNavigationAudit() throws {
     tapTab(named: "Home", fallbackX: 0.18)
+    XCTAssertTrue(app.staticTexts["RECENT"].waitForExistence(timeout: 8))
     attach("home")
 
     tapTab(named: "To-dos", fallbackX: 0.82)
+    XCTAssertTrue(app.staticTexts["To-dos"].waitForExistence(timeout: 8))
     attach("todos")
 
     openSettings()
@@ -87,7 +90,11 @@ final class MainaUITests: XCTestCase {
 
   private func tapTab(named name: String, fallbackX: CGFloat) {
     let tab = app.buttons[name]
-    if tab.exists { tab.tap() } else { app.coordinate(withNormalizedOffset: .init(dx: fallbackX, dy: 0.90)).tap() }
+    if tab.waitForExistence(timeout: 5) {
+      tab.tap()
+    } else {
+      app.coordinate(withNormalizedOffset: .init(dx: fallbackX, dy: 0.90)).tap()
+    }
   }
 
   private func attach(_ name: String) {
