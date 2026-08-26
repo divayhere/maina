@@ -149,7 +149,7 @@ function SettingsRow({
 
 export default function SettingsScreen() {
   const { theme } = useAppTheme();
-  const { contentBottomPadding, topPadding } = useMainaLayout();
+  const { contentBottomPadding, topPadding, topBarHeight } = useMainaLayout();
   const version = Constants.expoConfig?.version ?? '1.0.0';
 
   const [config, setConfig] = useState<AppConfig>(DEFAULT_CONFIG);
@@ -332,11 +332,16 @@ export default function SettingsScreen() {
   };
 
   return (
-    <KeyboardAvoidingView style={{ flex: 1, backgroundColor: theme.bg }} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+    <KeyboardAvoidingView
+      style={{ flex: 1, backgroundColor: theme.bg }}
+      behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+      keyboardVerticalOffset={topBarHeight}
+    >
       <DrawerMenu />
       <ScrollView
         keyboardShouldPersistTaps="handled"
         keyboardDismissMode="on-drag"
+        automaticallyAdjustKeyboardInsets
         contentContainerStyle={{
           paddingHorizontal: 16,
           paddingTop: topPadding,

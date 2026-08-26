@@ -3,7 +3,8 @@ import * as FileSystem from 'expo-file-system/legacy';
 import { router, useFocusEffect } from 'expo-router';
 import { useSpeechRecognitionEvent } from 'expo-speech-recognition';
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Alert, Animated, AppState, Pressable, StyleSheet, View } from 'react-native';
+import { Alert, AppState, Pressable, StyleSheet, View } from 'react-native';
+import Animated, { Easing, useAnimatedStyle, useSharedValue, withTiming } from 'react-native-reanimated';
 
 import {
   ACTIVE_LANGUAGES,
@@ -19,11 +20,16 @@ import {
 import { appendWithoutOverlap, transcriptWordCount } from '@/core/transcription/transcript';
 import { buildRecordingCheckpoint } from '@/core/recording/checkpoint';
 import {
+  canApplyIdleCaptureMetrics,
+  shouldPreserveTerminalNativeMeeting,
+} from '@/core/recording/nativeCaptureReconciliation';
+import {
   commitTranscriptFinalBlocks,
   createMeeting,
   deleteMeeting,
   discardTranscriptDraftBlock,
   finishRecordingSegment,
+  getMeeting,
   newId,
   startRecordingSegment,
   type TranscriptBlock,
@@ -189,7 +195,14 @@ export default function RecordScreen() {
   const [meetingCreated, setMeetingCreated] = useState(false);
   const [paused, setPaused] = useState(false);
   const [captureNote, setCaptureNote] = useState<string | null>(null);
-  const [audioPulse] = useState(() => new Animated.Value(0));
+  const audioPulse = useSharedValue(0);
+  const audioPulseStyle = useAnimatedStyle(() => {
+    const intensity = audioPulse.get();
+    return {
+      opacity: 0.34 + intensity * 0.58,
+      transform: [{ scale: 0.93 + intensity * 0.2 }],
+    };
+  });
 
   useEffect(() => {
     if (CAPTURE_ENGINE !== 'native-qwen') return;
@@ -198,11 +211,10 @@ export default function RecordScreen() {
       const normalized = !pausedRef.current && status?.state === 'recording'
         ? Math.max(0, Math.min(1, ((status.rmsDbfs ?? -60) + 60) / 48))
         : 0;
-      Animated.timing(audioPulse, {
-        toValue: normalized,
+      audioPulse.set(withTiming(normalized, {
         duration: 180,
-        useNativeDriver: true,
-      }).start();
+        easing: Easing.bezier(0.23, 1, 0.32, 1),
+      }));
     };
     const timer = setInterval(updatePulse, 250);
     updatePulse();
@@ -801,6 +813,18 @@ export default function RecordScreen() {
         }
         if (status?.state === 'idle' && meetingCreatedRef.current) {
           void (async () => {
+            const currentMeeting = await getMeeting(idRef.current).catch(() => null);
+            if (currentMeeting && shouldPreserveTerminalNativeMeeting(currentMeeting)) {
+              // Audio cleanup after a complete transcript is intentional. The
+              // existing meeting is the source of truth, not an empty folder.
+              activeRef.current = false;
+              listeningRef.current = false;
+              setListening(false);
+              setPaused(false);
+              await refresh();
+              router.replace(`/meeting/${idRef.current}`);
+              return;
+            }
             const metrics = dirRef.current
               ? await getNativeCaptureMetrics(dirRef.current, true).catch(() => null)
               : null;
@@ -808,7 +832,10 @@ export default function RecordScreen() {
             listeningRef.current = false;
             setListening(false);
             setPaused(false);
-            if (metrics) {
+            if (metrics && (!currentMeeting || canApplyIdleCaptureMetrics({
+              meeting: currentMeeting,
+              finalizedChunkCount: metrics.finalizedUris.length,
+            }))) {
               await updateMeeting(idRef.current, {
                 durationMs: metrics.wallDurationMs,
                 audioDurationMs: metrics.audioDurationMs,
@@ -1118,11 +1145,8 @@ export default function RecordScreen() {
             styles.haloOuter,
             {
               backgroundColor: theme.mutedSoft,
-              transform: [{
-                scale: audioPulse.interpolate({ inputRange: [0, 1], outputRange: [0.96, 1.08] }),
-              }],
-              opacity: audioPulse.interpolate({ inputRange: [0, 1], outputRange: [0.45, 0.82] }),
             },
+            audioPulseStyle,
           ]}
         >
           <View style={[styles.haloInner, { backgroundColor: theme.mint }]}>

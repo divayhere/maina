@@ -1,7 +1,7 @@
 import { Ionicons } from '@expo/vector-icons';
 import { router, useFocusEffect } from 'expo-router';
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { ActivityIndicator, AppState, FlatList, Pressable, TextInput, View } from 'react-native';
+import { ActivityIndicator, AppState, FlatList, Pressable, RefreshControl, TextInput, View } from 'react-native';
 
 import { AppText, Banner, Card, Chip, EmptyState, SectionLabel } from '@/design/components';
 import { DrawerMenu } from '@/design/shell';
@@ -10,7 +10,6 @@ import { useMainaLayout } from '@/design/layout';
 import { useAppTheme } from '@/design/theme';
 import { radius, space } from '@/design/tokens';
 import { describeMainaKnowledgeCloudSyncStatus } from '@/services/mainaKnowledgeCloudCore';
-import { countActionableNotifications } from '@/services/notifications';
 import { useMeetings } from '@/state/meetingsStore';
 import { formatDate, formatDuration, formatTime } from '@/utils/format';
 
@@ -120,6 +119,7 @@ export default function MeetingsScreen() {
   const { topPadding, contentBottomPadding } = useMainaLayout();
   const { meetings, refresh, loaded } = useMeetings();
   const [query, setQuery] = useState('');
+  const [refreshing, setRefreshing] = useState(false);
 
   useFocusEffect(
     useCallback(() => {
@@ -144,8 +144,14 @@ export default function MeetingsScreen() {
     return meetings.filter((meeting) => meeting.title.toLowerCase().includes(needle));
   }, [meetings, query]);
 
-  const interrupted = meetings.find((meeting) => meeting.status === 'interrupted');
-  const notificationCount = countActionableNotifications(meetings);
+  const refreshFromGesture = useCallback(async () => {
+    setRefreshing(true);
+    try {
+      await refresh();
+    } finally {
+      setRefreshing(false);
+    }
+  }, [refresh]);
 
   return (
     <View style={{ flex: 1, backgroundColor: theme.bg }}>
@@ -155,32 +161,16 @@ export default function MeetingsScreen() {
         keyExtractor={(item) => item.id}
         renderItem={({ item }) => <MeetingRow item={item} />}
         ItemSeparatorComponent={() => <View style={{ height: space.lg }} />}
+        refreshControl={
+          <RefreshControl
+            refreshing={refreshing}
+            onRefresh={() => void refreshFromGesture()}
+            tintColor={theme.primary}
+            colors={[theme.primary]}
+          />
+        }
         ListHeaderComponent={
           <View style={{ gap: space.lg, paddingTop: topPadding, marginBottom: space.lg }}>
-            <View style={{ gap: 6 }}>
-              <AppText variant="body" muted>
-                Your ambient meeting memory stays on this phone first, then turns into usable notes when the transcript is ready.
-              </AppText>
-              <AppText variant="meta" muted>
-                {meetings.length} recording{meetings.length === 1 ? '' : 's'} · {notificationCount} alert{notificationCount === 1 ? '' : 's'}
-              </AppText>
-            </View>
-            {interrupted ? (
-              <Pressable onPress={() => router.push(`/meeting/${interrupted.id}/recover`)}>
-                <Banner tone="warn" style={{ gap: 8 }}>
-                  <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.md }}>
-                    <Ionicons name="alert-circle-outline" size={24} color={theme.warn} />
-                    <AppText variant="title" style={{ flex: 1 }}>
-                      A recording was cut short
-                    </AppText>
-                  </View>
-                  <AppText variant="body" muted>
-                    We saved what we could. Tap to fix it now.
-                  </AppText>
-                </Banner>
-              </Pressable>
-            ) : null}
-
             <View
               style={{
                 flexDirection: 'row',
@@ -202,7 +192,12 @@ export default function MeetingsScreen() {
               />
             </View>
 
-            <SectionLabel>Recent</SectionLabel>
+            <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+              <SectionLabel>Recent</SectionLabel>
+              <AppText variant="meta" muted>
+                {meetings.length} recording{meetings.length === 1 ? '' : 's'}
+              </AppText>
+            </View>
           </View>
         }
         ListEmptyComponent={

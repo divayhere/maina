@@ -5,7 +5,7 @@ import { FlashList } from '@shopify/flash-list';
 import { router, useFocusEffect, useLocalSearchParams } from 'expo-router';
 import { useSpeechRecognitionEvent } from 'expo-speech-recognition';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ActivityIndicator, Alert, AppState, Pressable, StyleSheet, TextInput, View } from 'react-native';
+import { ActivityIndicator, Alert, AppState, KeyboardAvoidingView, Platform, Pressable, StyleSheet, TextInput, View } from 'react-native';
 
 import { chooseRecognitionLanguage, startFileSession, stopSession, supportsOnDevice } from '@/core/transcription/nativeSpeech';
 import { appendWithoutOverlap } from '@/core/transcription/transcript';
@@ -194,7 +194,7 @@ function formatPacketError(message?: string | null): string {
 
 export default function MeetingDetail() {
   const { theme } = useAppTheme();
-  const { contentBottomPadding } = useMainaLayout();
+  const { contentBottomPadding, topBarHeight } = useMainaLayout();
   const { id, allowInterrupted, startRepass: startRepassParam } = useLocalSearchParams<{
     id: string;
     allowInterrupted?: string;
@@ -749,7 +749,11 @@ export default function MeetingDetail() {
     const hasText = transcriptSummary?.hasText ?? false;
     const hasAudio = !!meeting?.audioUri && meeting.segmentCount > 0 && audioAvailable;
     return (
-      <View style={{ flex: 1, backgroundColor: theme.bg }}>
+      <KeyboardAvoidingView
+        style={{ flex: 1, backgroundColor: theme.bg }}
+        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+        keyboardVerticalOffset={topBarHeight}
+      >
         <TopBar title={meeting?.title ?? 'Meeting'} back />
         <FlashList
           data={blocks}
@@ -818,7 +822,7 @@ export default function MeetingDetail() {
           ListFooterComponent={loadingMore ? <View style={{ padding: space.lg }}><ActivityIndicator color={theme.primary} /></View> : null}
           contentContainerStyle={{ paddingBottom: contentBottomPadding }}
         />
-      </View>
+      </KeyboardAvoidingView>
     );
   }
 
@@ -832,7 +836,11 @@ export default function MeetingDetail() {
   ] as const;
 
   return (
-    <View style={{ flex: 1, backgroundColor: theme.bg }}>
+    <KeyboardAvoidingView
+      style={{ flex: 1, backgroundColor: theme.bg }}
+      behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+      keyboardVerticalOffset={topBarHeight}
+    >
       <TopBar title={meeting?.title ?? 'Meeting'} back />
       <FlashList
         data={overviewSections}
@@ -1046,7 +1054,7 @@ export default function MeetingDetail() {
           );
         }}
       />
-    </View>
+    </KeyboardAvoidingView>
   );
 }
 

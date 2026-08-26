@@ -1,7 +1,7 @@
 import { Ionicons } from '@expo/vector-icons';
 import { router, useFocusEffect } from 'expo-router';
 import { useCallback, useMemo, useState } from 'react';
-import { FlatList, Pressable, View } from 'react-native';
+import { FlatList, Pressable, RefreshControl, View } from 'react-native';
 
 import { listTodos, updateTodoDone, type TodoItem } from '@/data/meetings';
 import { AppText, Banner, Card, SectionLabel } from '@/design/components';
@@ -76,6 +76,7 @@ export default function TodosScreen() {
   const { contentBottomPadding, topPadding } = useMainaLayout();
   const { meetings, refresh } = useMeetings();
   const [todos, setTodos] = useState<TodoItem[]>([]);
+  const [refreshing, setRefreshing] = useState(false);
 
   const load = useCallback(async () => {
     await refresh();
@@ -98,6 +99,15 @@ export default function TodosScreen() {
     () => Object.fromEntries(meetings.map((meeting) => [meeting.id, meeting.title])),
     [meetings],
   );
+
+  const refreshFromGesture = useCallback(async () => {
+    setRefreshing(true);
+    try {
+      await load();
+    } finally {
+      setRefreshing(false);
+    }
+  }, [load]);
 
   return (
     <View style={{ flex: 1, backgroundColor: theme.bg }}>
@@ -178,6 +188,14 @@ export default function TodosScreen() {
           </Banner>
         }
         ItemSeparatorComponent={() => <View style={{ height: space.xxxl }} />}
+        refreshControl={
+          <RefreshControl
+            refreshing={refreshing}
+            onRefresh={() => void refreshFromGesture()}
+            tintColor={theme.primary}
+            colors={[theme.primary]}
+          />
+        }
         contentContainerStyle={{
           paddingHorizontal: 16,
           paddingBottom: contentBottomPadding,

@@ -10,6 +10,8 @@ export interface MainaNotification {
   tone: MainaNotificationTone;
   createdAt: number;
   href: string;
+  actionLabel: string;
+  action: 'review_recovery' | 'retry_transcript' | 'retry_notes' | 'retry_cloud' | 'open_settings' | 'review_meeting';
 }
 
 function syncFailureCopy(status: KnowledgeCloudSyncStatus, error?: string | null) {
@@ -53,10 +55,12 @@ export function buildMainaNotifications(meetings: Meeting[]): MainaNotification[
         id: `interrupted:${meeting.id}`,
         meetingId: meeting.id,
         title: 'A recording was cut short',
-        body: 'Maina saved what it could. Review recovery and keep the usable audio.',
+        body: 'Saved audio or text is available for review.',
         tone: 'warn',
         createdAt: meeting.startedAt,
         href: `/meeting/${meeting.id}/recover`,
+        actionLabel: 'Review options',
+        action: 'review_recovery',
       });
     }
 
@@ -65,22 +69,12 @@ export function buildMainaNotifications(meetings: Meeting[]): MainaNotification[
         id: `transcript-partial:${meeting.id}`,
         meetingId: meeting.id,
         title: 'Some audio needs another pass',
-        body: 'Maina kept the partial transcript and recovery audio. Open the meeting to retry safely.',
+        body: 'Maina kept the saved audio and will retry when you choose.',
         tone: 'warn',
         createdAt: meeting.updatedAt ?? meeting.startedAt,
         href: `/meeting/${meeting.id}`,
-      });
-    }
-
-    if (meeting.status === 'audio_expired_incomplete') {
-      notifications.push({
-        id: `audio-expired:${meeting.id}`,
-        meetingId: meeting.id,
-        title: 'Partial transcript kept',
-        body: 'The oldest recovery audio reached the storage limit and was removed. Saved text remains available.',
-        tone: 'warn',
-        createdAt: meeting.updatedAt ?? meeting.startedAt,
-        href: `/meeting/${meeting.id}`,
+        actionLabel: 'Retry now',
+        action: 'retry_transcript',
       });
     }
 
@@ -89,15 +83,22 @@ export function buildMainaNotifications(meetings: Meeting[]): MainaNotification[
         id: `summary-failed:${meeting.id}`,
         meetingId: meeting.id,
         title: "Notes didn't come through",
-        body: 'Your transcript is safe. Open the meeting and retry the notes packet.',
+        body: 'Your transcript is safe.',
         tone: 'warn',
         createdAt: meeting.updatedAt ?? meeting.startedAt,
         href: `/meeting/${meeting.id}`,
+        actionLabel: 'Retry notes',
+        action: 'retry_notes',
       });
     }
 
     const syncCopy = syncFailureCopy(meeting.knowledgeCloudSyncStatus, meeting.knowledgeCloudError);
     if (syncCopy) {
+      const action = meeting.knowledgeCloudSyncStatus === 'sync_failed_auth'
+        ? 'open_settings' as const
+        : meeting.knowledgeCloudSyncStatus === 'sync_failed_retryable'
+          ? 'retry_cloud' as const
+          : 'review_meeting' as const;
       notifications.push({
         id: `cloud:${meeting.id}:${meeting.knowledgeCloudSyncStatus}`,
         meetingId: meeting.id,
@@ -105,19 +106,13 @@ export function buildMainaNotifications(meetings: Meeting[]): MainaNotification[
         body: syncCopy.body,
         tone: 'warn',
         createdAt: meeting.knowledgeCloudLastAttemptAt ?? meeting.updatedAt ?? meeting.startedAt,
-        href: `/meeting/${meeting.id}`,
-      });
-    }
-
-    if (meeting.summaryStatus === 'ready' && meeting.summary?.trim()) {
-      notifications.push({
-        id: `summary-ready:${meeting.id}`,
-        meetingId: meeting.id,
-        title: 'Notes ready',
-        body: `${meeting.title} is ready to review, share, or sync.`,
-        tone: 'success',
-        createdAt: meeting.updatedAt ?? meeting.startedAt,
-        href: `/meeting/${meeting.id}`,
+        href: action === 'open_settings' ? '/settings' : `/meeting/${meeting.id}`,
+        actionLabel: action === 'open_settings'
+          ? 'Open settings'
+          : action === 'retry_cloud'
+            ? 'Retry sync'
+            : 'Review sync',
+        action,
       });
     }
   }

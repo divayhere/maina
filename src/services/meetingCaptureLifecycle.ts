@@ -8,6 +8,7 @@ import {
   type Meeting,
 } from '@/data/meetings';
 import { completedCaptureDurationRepair } from '@/core/recording/checkpoint';
+import { terminalNativeMeetingRepair } from '@/core/recording/nativeCaptureReconciliation';
 import {
   acknowledgeNativePostProcessingResult,
   getNativeCaptureStatus,
@@ -219,6 +220,17 @@ async function reconcilePendingNativeMeetingWorkInternal(): Promise<number> {
         },
       });
     }
+    const terminalRepair = terminalNativeMeetingRepair(meeting);
+    if (terminalRepair) {
+      await updateMeeting(meeting.id, terminalRepair);
+      log.warn('recovery', 'repaired terminal meeting state after completed audio cleanup', {
+        meetingId: meeting.id,
+        restoredStatus: terminalRepair.status,
+        restoredDurationMs: terminalRepair.durationMs,
+      });
+      continue;
+    }
+
     const repairedDurationMs = completedCaptureDurationRepair(meeting);
     if (repairedDurationMs != null) {
       await updateMeeting(meeting.id, { durationMs: repairedDurationMs });

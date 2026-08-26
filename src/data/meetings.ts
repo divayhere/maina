@@ -909,6 +909,33 @@ export async function recoverInterruptedMeetings(excludedMeetingIds: string[] = 
   return rows.length;
 }
 
+/**
+ * An interruption is an honest warning, not a dead end. When the owner chooses
+ * to keep the captured result, clear the exception state without deleting any
+ * transcript text. This also lets the normal notes/sync pipeline continue.
+ */
+export async function acceptSavedMeetingResult(meetingId: string): Promise<void> {
+  const [meeting, transcript] = await Promise.all([
+    getMeeting(meetingId),
+    getTranscriptSummary(meetingId),
+  ]);
+  if (!meeting) return;
+  const status: MeetingStatus = meeting.summaryStatus === 'ready'
+    ? 'summarized'
+    : transcript.hasText
+      ? 'transcribed'
+      : 'recorded';
+  await updateMeeting(meetingId, {
+    status,
+    lastError: null,
+  });
+  log.info('meetings', 'saved meeting result accepted by owner', {
+    meetingId,
+    status,
+    transcriptBlocks: transcript.blockCount,
+  });
+}
+
 export async function markMeetingsAudioDeleted(ids: string[]): Promise<void> {
   if (ids.length === 0) return;
   const db = await getDb();

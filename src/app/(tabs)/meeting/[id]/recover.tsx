@@ -1,9 +1,9 @@
 import { router, useFocusEffect, useLocalSearchParams } from 'expo-router';
 import { useCallback, useState } from 'react';
-import { ActivityIndicator, StyleSheet, View } from 'react-native';
+import { ActivityIndicator, ScrollView, StyleSheet, View } from 'react-native';
 
-import { getMeeting, getTranscriptSummary, listRecordingSegments, type Meeting } from '@/data/meetings';
-import { AppText, Banner, Card, Chip, PrimaryButton, SectionLabel } from '@/design/components';
+import { acceptSavedMeetingResult, getMeeting, getTranscriptSummary, listRecordingSegments, type Meeting } from '@/data/meetings';
+import { AppText, Banner, Card, Chip, PrimaryButton, SecondaryButton, SectionLabel } from '@/design/components';
 import { TopBar } from '@/design/shell';
 import { useMainaLayout } from '@/design/layout';
 import { useAppTheme } from '@/design/theme';
@@ -21,6 +21,7 @@ export default function MeetingRecoveryScreen() {
   const [audioSegments, setAudioSegments] = useState(0);
   const [audioAvailable, setAudioAvailable] = useState(false);
   const [sharing, setSharing] = useState(false);
+  const [accepting, setAccepting] = useState(false);
 
   const load = useCallback(() => {
     if (!id) return;
@@ -53,11 +54,25 @@ export default function MeetingRecoveryScreen() {
     }
   };
 
+  const acceptSavedResult = async () => {
+    if (!meeting) return;
+    setAccepting(true);
+    try {
+      await acceptSavedMeetingResult(meeting.id);
+      router.replace(`/meeting/${meeting.id}`);
+    } finally {
+      setAccepting(false);
+    }
+  };
+
   return (
     <View style={{ flex: 1, backgroundColor: theme.bg }}>
       <TopBar title={meeting?.title ?? 'Recovered recording'} back />
 
-      <View style={[styles.content, { paddingTop: topPadding, paddingBottom: contentBottomPadding }]}>
+      <ScrollView
+        contentContainerStyle={[styles.content, { paddingTop: topPadding, paddingBottom: contentBottomPadding }]}
+        keyboardShouldPersistTaps="handled"
+      >
         <View style={{ gap: space.sm }}>
           {meeting ? (
             <AppText variant="meta" muted>
@@ -68,9 +83,9 @@ export default function MeetingRecoveryScreen() {
         </View>
 
         <Banner tone="warn" style={{ gap: space.md }}>
-          <AppText variant="title">Maina saved what it had</AppText>
+          <AppText variant="title">Recording ended early</AppText>
           <AppText variant="body" muted>
-            This recording was interrupted. You can keep the saved text, and if audio is still available you can ask Maina to retry transcription.
+            Choose what Maina should do with the saved result.
           </AppText>
         </Banner>
 
@@ -88,28 +103,26 @@ export default function MeetingRecoveryScreen() {
         </Card>
 
         <View style={{ gap: space.md }}>
-          <PrimaryButton label="Open transcript safely" onPress={() => router.push(`/meeting/${id}?allowInterrupted=1`)} />
           {audioAvailable ? (
             <PrimaryButton
-              label="Retry transcription from saved audio"
+              label="Retry transcription"
               onPress={() => router.push(`/meeting/${id}?allowInterrupted=1&startRepass=1`)}
             />
           ) : null}
-          <PrimaryButton
+          <SecondaryButton label="Open saved transcript" onPress={() => router.push(`/meeting/${id}?allowInterrupted=1`)} />
+          <SecondaryButton
+            label={accepting ? 'Keeping saved result...' : 'Keep saved result'}
+            disabled={accepting}
+            onPress={() => void acceptSavedResult()}
+          />
+          <SecondaryButton
             label={sharing ? 'Preparing export...' : 'Save a copy'}
+            disabled={sharing}
             onPress={shareCurrentTranscript}
           />
         </View>
 
-        {meeting ? (
-          <Card style={{ gap: space.sm }}>
-            <SectionLabel>What happens next</SectionLabel>
-            <AppText variant="body" muted>
-              Open the transcript to inspect what was saved. If the audio is still here, retry transcription from saved audio. Once the transcript looks right, you can write notes from the meeting page.
-            </AppText>
-          </Card>
-        ) : null}
-      </View>
+      </ScrollView>
     </View>
   );
 }
