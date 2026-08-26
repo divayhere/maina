@@ -46,6 +46,7 @@ import { reconcilePendingMainaKnowledgeCloudCorrections } from '@/services/maina
 import { reconcileAutoSummaryEligibility, reconcilePendingMeetingPackets } from '@/services/meetingPacket';
 import { initSentry, Sentry } from '@/services/sentry';
 import { installWatchdog } from '@/services/watchdog';
+import { clearLegacyDirectAiConfiguration } from '@/services/config';
 
 initSentry();
 
@@ -82,6 +83,9 @@ function RootLayout() {
         }
         log.info('app', 'launch');
         await initDb();
+        // Previous staging builds stored direct provider and MKC values in
+        // SQLite. Cloud notes now use a scoped SecureStore session only.
+        await clearLegacyDirectAiConfiguration();
 
         // A process death can leave the active native WAV as *.partial. Finalize
         // it before trying to resume native post-processing from durable audio.

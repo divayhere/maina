@@ -38,7 +38,11 @@ export JAVA_HOME="$MAINA_JAVA_HOME"
 export ANDROID_HOME="$MAINA_ANDROID_HOME"
 export ANDROID_SDK_ROOT="$MAINA_ANDROID_HOME"
 export GRADLE_USER_HOME="$MAINA_BUILD_ROOT/gradle-user-home"
-export NODE_ENV=production
+# Do not force NODE_ENV here. This file is sourced by both Android build
+# commands and `npm ci`; forcing production mode causes npm to omit the
+# dev-only `patch-package` dependency required by this project's postinstall.
+# Release artifact commands can opt into NODE_ENV=production after dependencies
+# are materialized.
 export MAINA_REPO_ROOT MAINA_NODE_BIN MAINA_JAVA_HOME MAINA_ANDROID_HOME
 export MAINA_BUILD_ROOT MAINA_ADB_SERIAL MAINA_ANDROID_ABI
 

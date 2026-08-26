@@ -12,6 +12,7 @@ import {
 } from '@/data/meetings';
 import { getMainaKnowledgeCloudSettings } from '@/services/config';
 import { log } from '@/services/logger';
+import { clearMainaCloudSession } from '@/services/mainaCloudSession';
 import {
   buildMainaKnowledgeCloudCorrectionPackage,
   packetCorrectionSnapshots,
@@ -97,6 +98,7 @@ async function syncCorrection(correctionKey: string): Promise<void> {
           : result.outcome === 'blocked_budget'
             ? 'sync_blocked_budget'
             : 'sync_failed_retryable';
+    if (syncStatus === 'sync_failed_auth') await clearMainaCloudSession();
     await updateKnowledgeCloudCorrection(correctionKey, {
       syncStatus,
       error: result.message,

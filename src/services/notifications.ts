@@ -18,8 +18,8 @@ function syncFailureCopy(status: KnowledgeCloudSyncStatus, error?: string | null
   switch (status) {
     case 'sync_failed_auth':
       return {
-        title: 'Cloud token needs updating',
-        body: error ?? 'Maina Knowledge Cloud rejected the saved access token. Update cloud settings and retry.',
+        title: 'Reconnect Maina Cloud',
+        body: error ?? 'This phone needs to reconnect to Maina Cloud before it can continue syncing.',
       };
     case 'sync_failed_conflict':
       return {

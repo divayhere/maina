@@ -206,6 +206,15 @@ const MIGRATIONS: Migration[] = [
     CREATE INDEX IF NOT EXISTS idx_meeting_pipeline_stage_state
       ON meeting_pipeline_stages(stage, state, updated_at ASC);`);
   },
+  // v12 — MKC owns the durable cloud-notes job. Android only retains its opaque
+  // id and last poll time, so it can safely resume without holding provider
+  // credentials or recomputing a finalized transcript.
+  async (db) => {
+    await addColumnIfMissing(db, 'meetings', 'cloud_notes_job_id', 'TEXT');
+    await addColumnIfMissing(db, 'meetings', 'cloud_notes_last_polled_at', 'INTEGER');
+    await addColumnIfMissing(db, 'meetings', 'cloud_notes_retry_count', 'INTEGER NOT NULL DEFAULT 0');
+    await addColumnIfMissing(db, 'meetings', 'cloud_notes_last_retry_at', 'INTEGER');
+  },
 ];
 
 export async function initDb(): Promise<void> {

@@ -263,7 +263,7 @@ export function describeMainaKnowledgeCloudSyncStatus(input: {
     case 'sync_succeeded':
       return { label: 'Synced to cloud', detail: 'This meeting is stored in Maina Knowledge Cloud.', tone: 'primary' as MainaKnowledgeCloudTone };
     case 'sync_failed_auth':
-      return { label: 'Cloud access needs attention', detail: input.error ?? 'Maina Knowledge Cloud rejected the saved access token. Update Settings before retrying.', tone: 'warn' as MainaKnowledgeCloudTone };
+      return { label: 'Cloud connection needs attention', detail: input.error ?? 'Reconnect Maina Cloud in Settings, then Maina can continue syncing safely.', tone: 'warn' as MainaKnowledgeCloudTone };
     case 'sync_queued':
       return { label: 'Waiting to sync', detail: 'This meeting is queued for Maina Knowledge Cloud.', tone: 'muted' as MainaKnowledgeCloudTone };
     case 'syncing':

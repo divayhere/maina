@@ -9,6 +9,7 @@ const {
   mockUpdateMeeting,
   mockUpdateMeetingPipelineStage,
   mockGetMainaKnowledgeCloudSettings,
+  mockClearMainaCloudSession,
 } = vi.hoisted(() => ({
   mockGetMeeting: vi.fn(),
   mockGetTranscriptPage: vi.fn(),
@@ -18,6 +19,7 @@ const {
   mockUpdateMeeting: vi.fn(),
   mockUpdateMeetingPipelineStage: vi.fn(),
   mockGetMainaKnowledgeCloudSettings: vi.fn(),
+  mockClearMainaCloudSession: vi.fn(),
 }));
 
 vi.mock('@/data/meetings', () => ({
@@ -40,6 +42,10 @@ vi.mock('@/services/logger', () => ({
     warn: vi.fn(),
     error: vi.fn(),
   },
+}));
+
+vi.mock('@/services/mainaCloudSession', () => ({
+  clearMainaCloudSession: mockClearMainaCloudSession,
 }));
 
 let queueEligibleMainaKnowledgeCloudSyncs: typeof import('./mainaKnowledgeCloud').queueEligibleMainaKnowledgeCloudSyncs;
@@ -125,6 +131,7 @@ describe('mainaKnowledgeCloud service', () => {
 
     expect(meeting.knowledgeCloudSyncStatus).toBe('sync_failed_auth');
     expect(meeting.knowledgeCloudError).toBe('Invalid bearer token');
+    expect(mockClearMainaCloudSession).toHaveBeenCalledOnce();
     expect(mockUpdateMeetingPipelineStage).toHaveBeenLastCalledWith(expect.objectContaining({
       stage: 'mkc', state: 'failed',
     }));

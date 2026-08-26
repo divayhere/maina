@@ -150,6 +150,10 @@ export interface Meeting {
   knowledgeCloudLastAttemptAt?: number | null;
   knowledgeCloudError?: string | null;
   knowledgeCloudCanonicalSha256?: string | null;
+  cloudNotesJobId?: string | null;
+  cloudNotesLastPolledAt?: number | null;
+  cloudNotesRetryCount?: number | null;
+  cloudNotesLastRetryAt?: number | null;
   nativePostprocessRunId?: string | null;
   nativePostprocessImportedAt?: number | null;
 }
@@ -189,6 +193,10 @@ interface Row {
   knowledge_cloud_last_attempt_at: number | null;
   knowledge_cloud_error: string | null;
   knowledge_cloud_canonical_sha256: string | null;
+  cloud_notes_job_id: string | null;
+  cloud_notes_last_polled_at: number | null;
+  cloud_notes_retry_count: number | null;
+  cloud_notes_last_retry_at: number | null;
   native_postprocess_run_id: string | null;
   native_postprocess_imported_at: number | null;
 }
@@ -250,6 +258,10 @@ const toMeeting = (r: Row): Meeting => ({
   knowledgeCloudLastAttemptAt: r.knowledge_cloud_last_attempt_at,
   knowledgeCloudError: r.knowledge_cloud_error,
   knowledgeCloudCanonicalSha256: r.knowledge_cloud_canonical_sha256,
+  cloudNotesJobId: r.cloud_notes_job_id,
+  cloudNotesLastPolledAt: r.cloud_notes_last_polled_at,
+  cloudNotesRetryCount: r.cloud_notes_retry_count ?? 0,
+  cloudNotesLastRetryAt: r.cloud_notes_last_retry_at,
   nativePostprocessRunId: r.native_postprocess_run_id,
   nativePostprocessImportedAt: r.native_postprocess_imported_at,
 });
@@ -728,6 +740,10 @@ export async function updateMeeting(id: string, patch: Partial<Meeting>): Promis
     knowledgeCloudLastAttemptAt: 'knowledge_cloud_last_attempt_at',
     knowledgeCloudError: 'knowledge_cloud_error',
     knowledgeCloudCanonicalSha256: 'knowledge_cloud_canonical_sha256',
+    cloudNotesJobId: 'cloud_notes_job_id',
+    cloudNotesLastPolledAt: 'cloud_notes_last_polled_at',
+    cloudNotesRetryCount: 'cloud_notes_retry_count',
+    cloudNotesLastRetryAt: 'cloud_notes_last_retry_at',
     nativePostprocessRunId: 'native_postprocess_run_id',
     nativePostprocessImportedAt: 'native_postprocess_imported_at',
   };

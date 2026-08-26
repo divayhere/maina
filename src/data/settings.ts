@@ -21,6 +21,12 @@ export async function setSetting(key: string, value: string): Promise<void> {
   );
 }
 
+/** Remove obsolete or revoked configuration without leaving a blank secret row. */
+export async function deleteSetting(key: string): Promise<void> {
+  const db = await getDb();
+  await db.runAsync('DELETE FROM settings WHERE key = ?', [key]);
+}
+
 export async function getLanguage(): Promise<string> {
   return (await getSetting(KEY_LANG)) ?? DEFAULT_LANGUAGE;
 }

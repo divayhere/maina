@@ -42,7 +42,6 @@ import { describeMainaKnowledgeCloudSyncStatus } from '@/services/mainaKnowledge
 import {
   requeueMainaKnowledgeCloudCorrectionsForMeeting,
 } from '@/services/mainaKnowledgeCloudCorrections';
-import { chooseSummaryProviderLabel } from '@/services/meetingPacketMeta';
 import { maybeQueueMeetingPacket, runMeetingPacketGeneration } from '@/services/meetingPacket';
 import { log } from '@/services/logger';
 import { ensureStorageBudget } from '@/services/storageBudget';
@@ -180,15 +179,7 @@ function TodoPreviewRow({
 
 function formatPacketError(message?: string | null): string {
   const normalized = message?.trim() ?? '';
-  if (!normalized) return 'Packet generation failed. Check AI setup and retry.';
-  const lower = normalized.toLowerCase();
-  if (
-    lower.includes('no longer available')
-    || lower.includes('not_found')
-    || (lower.includes('models/gemini') && lower.includes('update your code'))
-  ) {
-    return 'The saved Gemini model is no longer valid for this API key. Maina should refresh it automatically on retry, or you can re-save Gemini in Settings.';
-  }
+  if (!normalized) return 'Notes are temporarily unavailable. Maina will retry safely.';
   return normalized;
 }
 
@@ -231,7 +222,6 @@ export default function MeetingDetail() {
   const repassTailRef = useRef('');
   const autoRepassHandledRef = useRef(false);
 
-  const providerLabel = useMemo(() => chooseSummaryProviderLabel(meeting), [meeting]);
   const hasCompleteTranscript = meeting?.status === 'transcribed'
     || meeting?.status === 'summarizing'
     || meeting?.status === 'summarized';
@@ -662,7 +652,7 @@ export default function MeetingDetail() {
     setPacketBusy(true);
     try {
       await setMeetingSummaryState(id, 'queued');
-      await runMeetingPacketGeneration(id);
+      await runMeetingPacketGeneration(id, { regenerate: meeting.summaryStatus === 'ready' });
       await refresh();
       load();
     } finally {
@@ -887,11 +877,9 @@ export default function MeetingDetail() {
                     <AppText variant="body" muted>
                       {!transcriptSummary?.hasText
                         ? 'No words were saved yet. You can retry from the Transcript tab while the audio is still on this phone.'
-                        : providerLabel === 'No AI provider'
-                        ? 'Notes will be ready once an AI account is connected.'
-                        : "You haven't asked for notes on this one yet."}
+                        : 'Maina will write notes automatically once this phone is connected to Maina Cloud.'}
                     </AppText>
-                    {transcriptSummary?.hasText && hasCompleteTranscript && providerLabel !== 'No AI provider' ? (
+                    {transcriptSummary?.hasText && hasCompleteTranscript ? (
                       <PrimaryButton
                         label="Write my notes"
                         onPress={() => void generatePacket()}
@@ -977,7 +965,7 @@ export default function MeetingDetail() {
                     />
                   </View>
                 ) : null}
-                {needsCloudSettings ? <AppText variant="meta" color={theme.warn}>Cloud access needs attention in Settings.</AppText> : null}
+                {needsCloudSettings ? <AppText variant="meta" color={theme.warn}>Reconnect Maina Cloud in Settings. Your local meeting is safe.</AppText> : null}
               </Card>
             );
           }

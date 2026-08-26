@@ -29,6 +29,11 @@ npm run verify:toolchain
 npm run verify:release
 ```
 
+The bootstrap script deliberately does not force `NODE_ENV=production` before
+`npm ci`: Maina's reproducible install needs the checked-in dev dependency
+`patch-package` during `postinstall`. Release commands set their own runtime
+mode only after dependencies are present.
+
 `verify:release` is the release gate. It runs static checks, Expo dependency
 compatibility, Android regeneration, configuration parity validation, Android
 module unit tests, Kotlin compilation, and merged-manifest assertions. It does

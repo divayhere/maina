@@ -11,6 +11,7 @@ const mocks = vi.hoisted(() => ({
   listMeetingNeedingSync: vi.fn(),
   updateCorrection: vi.fn(),
   getSettings: vi.fn(),
+  clearSession: vi.fn(),
 }));
 
 vi.mock('@/data/meetings', () => ({
@@ -31,6 +32,10 @@ vi.mock('@/services/config', () => ({
 
 vi.mock('@/services/logger', () => ({
   log: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+}));
+
+vi.mock('@/services/mainaCloudSession', () => ({
+  clearMainaCloudSession: mocks.clearSession,
 }));
 
 let maybeQueuePacketCorrections: typeof import('./mainaKnowledgeCloudCorrections').maybeQueueMainaKnowledgeCloudPacketCorrections;

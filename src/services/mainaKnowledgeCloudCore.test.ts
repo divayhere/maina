@@ -141,6 +141,6 @@ describe('mainaKnowledgeCloudCore', () => {
   it('describes sync status in user-facing language', () => {
     expect(describeMainaKnowledgeCloudSyncStatus({ status: 'sync_succeeded' }).label).toBe('Synced to cloud');
     expect(describeMainaKnowledgeCloudSyncStatus({ status: 'local_only' }).label).toBe('Only on this phone');
-    expect(describeMainaKnowledgeCloudSyncStatus({ status: 'sync_failed_auth' }).label).toBe('Cloud access needs attention');
+    expect(describeMainaKnowledgeCloudSyncStatus({ status: 'sync_failed_auth' }).label).toBe('Cloud connection needs attention');
   });
 });
