@@ -2,6 +2,7 @@ import * as FileSystem from 'expo-file-system/legacy';
 
 import { listMeetings, updateMeeting } from '@/data/meetings';
 import { getAppConfig } from '@/services/config';
+import { deleteNativeCaptureDirectory } from '@/hardware/recording/foreground';
 import { log } from '@/services/logger';
 import { planAudioRetention } from '@/services/audioRetentionCore';
 
@@ -47,7 +48,18 @@ export async function enforceAudioRetentionPolicy(): Promise<void> {
   const expired = new Set(decision.expiredIncompleteIds);
   for (const item of measured) {
     if (!decision.deleteIds.includes(item.meeting.id) || !item.meeting.audioUri) continue;
-    await FileSystem.deleteAsync(item.meeting.audioUri, { idempotent: true }).catch(() => {});
+    const nativeDeleted = await deleteNativeCaptureDirectory(item.meeting.audioUri).catch(() => false);
+    const expoDeleted = nativeDeleted
+      ? true
+      : await FileSystem.deleteAsync(item.meeting.audioUri, { idempotent: true })
+        .then(() => true)
+        .catch(() => false);
+    if (!expoDeleted) {
+      log.warn('audio-retention', 'audio deletion was not confirmed; keeping database pointer', {
+        meetingId: item.meeting.id,
+      });
+      continue;
+    }
     await updateMeeting(item.meeting.id, {
       audioUri: null,
       ...(expired.has(item.meeting.id)

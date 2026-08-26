@@ -207,6 +207,10 @@ class MainaRecorderModule : Module() {
             MainaNativeAudioCapture.inspectDirectory(directory, recoverPartials).asMap()
         }
 
+        AsyncFunction("deleteNativeCaptureDirectory") { directory: String ->
+            MainaNativeAudioCapture.deleteCaptureDirectory(directory)
+        }
+
         AsyncFunction("getQwenAsrStatus") {
             qwen().status().asMap()
         }

@@ -167,11 +167,11 @@ internal class MainaPostProcessingOutbox(context: Context) :
         )
     }
 
-    fun clearWindowBlocks(meetingId: String, runId: String, baseSequence: Int) =
+    fun clearWindowBlocks(meetingId: String, runId: String, baseSequence: Int, maxPieces: Int) =
         writableDatabase.delete(
             "blocks",
             "meeting_id = ? AND run_id = ? AND sequence >= ? AND sequence <= ?",
-            arrayOf(meetingId, runId, baseSequence.toString(), (baseSequence + 1).toString()),
+            arrayOf(meetingId, runId, baseSequence.toString(), (baseSequence + maxPieces - 1).toString()),
         )
 
     fun markWindow(

@@ -146,10 +146,14 @@ async function reconcilePendingNativeMeetingWorkInternal(): Promise<number> {
         lastError: nativeResult.lastError,
         blocks: nativeResult.blocks,
       });
-      const acknowledged = await acknowledgeNativePostProcessingResult(
-        nativeResult.meetingId,
-        nativeResult.runId,
-      ).catch((cause) => {
+      // Preserve native per-window evidence for a partial transcript. A later
+      // retry can then decode only the failed interval rather than replaying
+      // the whole meeting. Complete results remain safe to acknowledge/delete.
+      const acknowledged = nativeResult.state === 'complete'
+        ? await acknowledgeNativePostProcessingResult(
+          nativeResult.meetingId,
+          nativeResult.runId,
+        ).catch((cause) => {
         // The Expo transaction has committed. Leaving the native result intact
         // is safe: a later retry is idempotent and will attempt acknowledgement
         // again rather than ever losing the recording's transcription.
@@ -158,8 +162,9 @@ async function reconcilePendingNativeMeetingWorkInternal(): Promise<number> {
           runId: nativeResult.runId,
           err: String(cause),
         });
-        return false;
-      });
+          return false;
+        })
+        : false;
       await updateMeetingPipelineStage({
         meetingId: nativeResult.meetingId,
         stage: 'asr',

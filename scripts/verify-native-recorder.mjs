@@ -52,7 +52,9 @@ for (const invariant of [
 
 const postProcessing = readFileSync(path.join(androidRoot, 'src/main/java/com/divay/maina/recorder/MainaPostProcessingService.kt'), 'utf8');
 for (const invariant of [
-  'MainaPostProcessingSupport.splitForRetry(window)',
+  'MainaPostProcessingSupport.splitForRetry(window, asr.lowestEnergySplit(uri, window))',
+  'MAX_RECOVERY_DEPTH = 2',
+  'MAX_RECOVERY_PIECES = 4',
   'asr.release()',
   'override fun onTimeout',
   'WindowEvidence',

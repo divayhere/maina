@@ -42,6 +42,8 @@ internal class MainaPostProcessingService : Service() {
         const val EXTRA_MEETING_STARTED_AT = "meetingStartedAt"
         const val EXTRA_FORCE_RETRY = "forceRetry"
         private const val WAKE_LOCK_TIMEOUT_MS = 6L * 60L * 60L * 1000L
+        private const val MAX_RECOVERY_DEPTH = 2
+        private const val MAX_RECOVERY_PIECES = 4
 
         @Volatile private var currentlyProcessingMeetingId: String? = null
 
@@ -174,9 +176,16 @@ internal class MainaPostProcessingService : Service() {
         val windowPlans = durations.map(MainaPostProcessingSupport::planWindows)
         val totalWindows = windowPlans.sumOf { it.size }
         val outbox = MainaPostProcessingOutbox.shared(applicationContext)
+        // A zero wall-clock start previously rendered transcript blocks at
+        // 5:30 am IST (Unix epoch). Reconstruct from the durable boundary.
+        val effectiveMeetingStartedAt = when {
+            meetingStartedAt > 1_000_000_000_000L -> meetingStartedAt
+            captureEndedAt != null && effectiveWallDurationMs > 0L -> captureEndedAt - effectiveWallDurationMs
+            else -> System.currentTimeMillis() - effectiveWallDurationMs
+        }.coerceAtLeast(1L)
         val start = outbox.begin(
             meetingId = meetingId,
-            meetingStartedAt = meetingStartedAt,
+            meetingStartedAt = effectiveMeetingStartedAt,
             captureEndedAt = captureEndedAt,
             durationMs = effectiveWallDurationMs,
             audioDurationMs = effectiveAudioDurationMs,
@@ -201,7 +210,7 @@ internal class MainaPostProcessingService : Service() {
         var failedWindows = 0
         var processedSegments = 0
         var lastError: String? = null
-        var chunkCursorAt = meetingStartedAt
+        var chunkCursorAt = effectiveMeetingStartedAt
         var windowOrdinal = 0
 
         updateProgress("Scanning the meeting", completedWindows, totalWindows)
@@ -215,7 +224,7 @@ internal class MainaPostProcessingService : Service() {
                     "Chunk start meetingId=$meetingId chunkIndex=$chunkIndex chunkDurationMs=$chunkDurationMs windows=${windows.size} uri=$uri",
                 )
                 windows.forEachIndexed { windowIndex, window ->
-                    val baseSequence = windowOrdinal * 2
+                    val baseSequence = windowOrdinal * MAX_RECOVERY_PIECES
                     windowOrdinal += 1
                     val windowKey = MainaPostProcessingOutbox.windowKey(chunkIndex, windowIndex)
                     if (windowKey in start.completedWindowKeys) {
@@ -229,7 +238,7 @@ internal class MainaPostProcessingService : Service() {
                         "MainaPostProcessing",
                         "Window start meetingId=$meetingId chunkIndex=$chunkIndex windowIndex=$windowIndex startMs=${window.startMs} endMs=${window.endMs}",
                     )
-                    outbox.clearWindowBlocks(meetingId, start.runId, baseSequence)
+                    outbox.clearWindowBlocks(meetingId, start.runId, baseSequence, MAX_RECOVERY_PIECES)
                     if (previousText.isBlank() && start.resumed) {
                         previousText = outbox.lastBlockTextBefore(meetingId, start.runId, baseSequence)
                     }
@@ -252,7 +261,7 @@ internal class MainaPostProcessingService : Service() {
                                 "Window done meetingId=$meetingId chunkIndex=$chunkIndex windowIndex=$windowIndex attempts=${outcome.pieces.size} processingMs=${outcome.pieces.sumOf { it.processingMs }}",
                             )
                         }
-                        outcome.pieces.take(2).forEachIndexed { pieceIndex, result ->
+                        outcome.pieces.take(MAX_RECOVERY_PIECES).forEachIndexed { pieceIndex, result ->
                             val rawText = result.text.trim()
                             val text = MainaPostProcessingSupport.removeExactOverlap(previousText, rawText)
                             if (text.isNotBlank()) {
@@ -358,11 +367,15 @@ internal class MainaPostProcessingService : Service() {
         asr: MainaQwenAsr,
         uri: String,
         window: AsrWindow,
+        depth: Int = 0,
     ): WindowDecodeOutcome {
         val first = asr.transcribe(uri, window.startMs, window.endMs)
         if (!isSuspicious(first)) return WindowDecodeOutcome(listOf(first), true, null)
 
-        val retries = MainaPostProcessingSupport.splitForRetry(window)
+        if (depth >= MAX_RECOVERY_DEPTH) {
+            return WindowDecodeOutcome(listOf(first), false, suspiciousReason(first))
+        }
+        val retries = MainaPostProcessingSupport.splitForRetry(window, asr.lowestEnergySplit(uri, window))
         if (retries.isEmpty()) {
             return WindowDecodeOutcome(listOf(first), false, suspiciousReason(first))
         }
@@ -375,9 +388,9 @@ internal class MainaPostProcessingService : Service() {
         var error: String? = null
         retries.forEach { retry ->
             try {
-                val result = asr.transcribe(uri, retry.startMs, retry.endMs)
-                pieces += result
-                if (isSuspicious(result)) error = suspiciousReason(result)
+                val recovered = decodeWindowWithRecovery(asr, uri, retry, depth + 1)
+                pieces += recovered.pieces
+                if (!recovered.complete) error = recovered.error ?: "Local transcription coverage is incomplete."
             } catch (cause: Throwable) {
                 if (cause is InterruptedException) throw cause
                 error = cause.message ?: cause.javaClass.simpleName
@@ -385,7 +398,7 @@ internal class MainaPostProcessingService : Service() {
         }
         return WindowDecodeOutcome(
             pieces = pieces,
-            complete = pieces.size == retries.size && error == null,
+            complete = pieces.isNotEmpty() && pieces.size <= MAX_RECOVERY_PIECES && error == null,
             error = error,
         )
     }

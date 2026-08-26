@@ -618,6 +618,15 @@ internal class MainaNativeAudioCapture(
             )
         }
 
+        /** Native app-storage deletion with a truthful result. Expo's file
+         * facade cannot consistently remove directories created by this
+         * service across Android storage implementations. */
+        fun deleteCaptureDirectory(uriOrPath: String): Boolean {
+            val directory = directoryFrom(uriOrPath)
+            if (!directory.exists()) return true
+            return directory.deleteRecursively() && !directory.exists()
+        }
+
         private fun directoryFrom(uriOrPath: String): File =
             if (uriOrPath.startsWith("file:")) File(URI(uriOrPath)) else File(uriOrPath)
 

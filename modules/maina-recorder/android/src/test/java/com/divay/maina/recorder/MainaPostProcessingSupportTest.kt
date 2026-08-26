@@ -60,6 +60,31 @@ class MainaPostProcessingSupportTest {
     }
 
     @Test
+    fun `low energy split is respected while preserving overlap`() {
+        assertEquals(
+            listOf(
+                AsrWindow(startMs = 0L, endMs = 6_500L),
+                AsrWindow(startMs = 5_500L, endMs = 15_000L),
+            ),
+            MainaPostProcessingSupport.splitForRetry(
+                AsrWindow(startMs = 0L, endMs = 15_000L),
+                splitAtMs = 6_000L,
+            ),
+        )
+    }
+
+    @Test
+    fun `out of range split falls back inside a safe bounded interval`() {
+        val pieces = MainaPostProcessingSupport.splitForRetry(
+            AsrWindow(startMs = 0L, endMs = 15_000L),
+            splitAtMs = 15_000L,
+        )
+        assertEquals(2, pieces.size)
+        assertEquals(true, pieces.all { it.endMs > it.startMs })
+        assertEquals(true, pieces[0].endMs < 15_000L)
+    }
+
+    @Test
     fun `short suspicious window is not recursively split`() {
         assertEquals(
             emptyList<AsrWindow>(),

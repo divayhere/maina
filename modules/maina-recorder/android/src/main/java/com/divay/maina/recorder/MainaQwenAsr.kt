@@ -11,6 +11,7 @@ import java.net.URI
 import kotlin.math.abs
 import kotlin.math.log10
 import kotlin.math.max
+import kotlin.math.min
 
 /**
  * Qwen is deliberately a post-capture worker. It never owns the microphone,
@@ -68,6 +69,35 @@ internal class MainaQwenAsr(private val context: Context) {
             else "Invalid model file size: ${invalid.key} (${file.length()} != ${invalid.value})"
             ModelStatus(false, root.absolutePath, reason)
         }
+    }
+
+    /** Select a quiet boundary near the middle of a failed ASR window.
+     * This is deliberately small, deterministic DSP: it is not global noise
+     * suppression or AGC, both of which can damage speech recognition. */
+    fun lowestEnergySplit(uriOrPath: String, window: AsrWindow): Long? {
+        val wav = readWavWindow(fileFor(uriOrPath), window.startMs, window.endMs)
+        if (wav.samples.isEmpty()) return null
+        val frameSamples = max(1, wav.sampleRate / 4) // 250 ms
+        val firstFrame = max(1, (wav.samples.size / frameSamples) / 5)
+        val lastFrame = max(firstFrame + 1, (wav.samples.size / frameSamples) * 4 / 5)
+        var bestFrame = -1
+        var bestEnergy = Double.POSITIVE_INFINITY
+        for (frame in firstFrame until lastFrame) {
+            val from = frame * frameSamples
+            val until = min(wav.samples.size, from + frameSamples)
+            if (until <= from) continue
+            var energy = 0.0
+            for (index in from until until) {
+                val value = wav.samples[index].toDouble()
+                energy += value * value
+            }
+            if (energy < bestEnergy) {
+                bestEnergy = energy
+                bestFrame = frame
+            }
+        }
+        if (bestFrame < 0) return null
+        return wav.windowStartMs + bestFrame.toLong() * frameSamples * 1000L / wav.sampleRate
     }
 
     @Synchronized

@@ -48,14 +48,17 @@ internal object MainaPostProcessingSupport {
     }
 
     /**
-     * A token-capped or speech-like empty window gets one bounded recovery
-     * pass as two shorter overlapping windows. We never respond by increasing
-     * Qwen's token/KV-cache limits.
+     * A token-capped or speech-like empty window gets a bounded recovery pass
+     * as two shorter overlapping windows. `splitAtMs` is normally selected at
+     * a low-energy point by MainaQwenAsr; midpoint remains a deterministic
+     * fallback for malformed or silent input. We never increase Qwen's
+     * token/KV-cache limits on a phone.
      */
-    fun splitForRetry(window: AsrWindow): List<AsrWindow> {
+    fun splitForRetry(window: AsrWindow, splitAtMs: Long? = null): List<AsrWindow> {
         val duration = window.endMs - window.startMs
         if (duration < RETRY_MIN_WINDOW_MS) return emptyList()
-        val midpoint = window.startMs + duration / 2L
+        val midpoint = (splitAtMs ?: (window.startMs + duration / 2L))
+            .coerceIn(window.startMs + RETRY_MIN_WINDOW_MS / 4L, window.endMs - RETRY_MIN_WINDOW_MS / 4L)
         val halfOverlap = RETRY_OVERLAP_MS / 2L
         return listOf(
             AsrWindow(window.startMs, min(window.endMs, midpoint + halfOverlap)),

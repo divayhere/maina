@@ -105,6 +105,11 @@ export async function inspectNativeCaptureDirectory(
   return requireAndroidModule().inspectNativeCaptureDirectory(directory, recoverPartials);
 }
 
+export async function deleteNativeCaptureDirectory(directory: string): Promise<boolean> {
+  if (Platform.OS !== 'android' || !MainaRecorder || !directory) return false;
+  return MainaRecorder.deleteNativeCaptureDirectory(directory);
+}
+
 export async function getQwenAsrStatus(): Promise<QwenAsrStatus | null> {
   if (Platform.OS !== 'android' || !MainaRecorder) return null;
   return MainaRecorder.getQwenAsrStatus();
