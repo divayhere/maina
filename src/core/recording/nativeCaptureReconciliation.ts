@@ -10,6 +10,8 @@ export type NativeCaptureTerminalMeeting = {
   audioDurationMs: number;
   captureEndedAt?: number | null;
   startedAt: number;
+  /** The Expo database has durable, non-empty transcript text for this meeting. */
+  hasTranscriptText?: boolean;
 };
 
 /**
@@ -40,7 +42,16 @@ export function terminalNativeMeetingRepair(meeting: NativeCaptureTerminalMeetin
   captureEndedAt: number;
   lastError: null;
 } | null {
-  if (meeting.status !== 'interrupted' || meeting.audioUri || !hasCompleteNativeTranscript(meeting)) {
+  const staleTerminalStatus = meeting.status === 'interrupted'
+    || meeting.status === 'transcribing'
+    || meeting.status === 'transcript_partial';
+  if (!staleTerminalStatus || !hasCompleteNativeTranscript(meeting) || !meeting.hasTranscriptText) {
+    return null;
+  }
+  // An interrupted meeting is only the legacy false-alarm case after expected
+  // raw-audio cleanup. A currently-present audio directory may still need
+  // capture recovery, so never mask it.
+  if (meeting.status === 'interrupted' && meeting.audioUri) {
     return null;
   }
   const durationMs = Math.max(0, meeting.audioDurationMs || meeting.durationMs);

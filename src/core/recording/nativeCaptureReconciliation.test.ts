@@ -18,6 +18,7 @@ const complete = {
   audioDurationMs: 149_000,
   captureEndedAt: 357_000,
   startedAt: 0,
+  hasTranscriptText: true,
 };
 
 describe('native capture terminal reconciliation', () => {
@@ -41,6 +42,20 @@ describe('native capture terminal reconciliation', () => {
       status: 'interrupted',
       transcriptionCompletedWindows: 10,
       transcriptionFailedWindows: 2,
+    })).toBeNull();
+  });
+
+  it('repairs a stale transcribing label only after the transcript is durable', () => {
+    expect(terminalNativeMeetingRepair({ ...complete, status: 'transcribing', audioUri: '/audio' })).toEqual({
+      status: 'summarized',
+      durationMs: 149_000,
+      captureEndedAt: 149_000,
+      lastError: null,
+    });
+    expect(terminalNativeMeetingRepair({
+      ...complete,
+      status: 'transcribing',
+      hasTranscriptText: false,
     })).toBeNull();
   });
 });

@@ -1,5 +1,6 @@
 import {
   getMeeting,
+  getTranscriptSummary,
   importNativePostProcessingResult,
   listMeetings,
   updateMeeting,
@@ -8,7 +9,7 @@ import {
   type Meeting,
 } from '@/data/meetings';
 import { completedCaptureDurationRepair } from '@/core/recording/checkpoint';
-import { terminalNativeMeetingRepair } from '@/core/recording/nativeCaptureReconciliation';
+import { hasCompleteNativeTranscript, terminalNativeMeetingRepair } from '@/core/recording/nativeCaptureReconciliation';
 import {
   acknowledgeNativePostProcessingResult,
   getNativeCaptureStatus,
@@ -220,7 +221,16 @@ async function reconcilePendingNativeMeetingWorkInternal(): Promise<number> {
         },
       });
     }
-    const terminalRepair = terminalNativeMeetingRepair(meeting);
+    // Window counters alone are not transcript proof: native ASR can finish
+    // before its outbox is imported into Expo SQLite. Repair an old terminal
+    // label only after the actual text is confirmed durable in this database.
+    const transcriptSummary = hasCompleteNativeTranscript(meeting)
+      ? await getTranscriptSummary(meeting.id)
+      : null;
+    const terminalRepair = terminalNativeMeetingRepair({
+      ...meeting,
+      hasTranscriptText: transcriptSummary?.hasText ?? false,
+    });
     if (terminalRepair) {
       await updateMeeting(meeting.id, terminalRepair);
       log.warn('recovery', 'repaired terminal meeting state after completed audio cleanup', {
