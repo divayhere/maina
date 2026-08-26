@@ -42,4 +42,11 @@ export NODE_ENV=production
 export MAINA_REPO_ROOT MAINA_NODE_BIN MAINA_JAVA_HOME MAINA_ANDROID_HOME
 export MAINA_BUILD_ROOT MAINA_ADB_SERIAL MAINA_ANDROID_ABI
 
+# Runtime crash reporting uses the DSN embedded in the app. Source-map uploads
+# are a separate release operation and require a Sentry CLI auth token. Local
+# APK builds must remain reproducible when that token is intentionally absent.
+if [[ -z "${SENTRY_AUTH_TOKEN:-}" ]]; then
+  export SENTRY_DISABLE_AUTO_UPLOAD=true
+fi
+
 mkdir -p "$MAINA_BUILD_ROOT/gradle-project-cache" "$MAINA_BUILD_ROOT/outputs"
