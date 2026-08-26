@@ -6,7 +6,11 @@ import { getDb } from './db';
 import { log } from '../services/logger';
 import { splitTranscriptChunks, transcriptWordCount } from '../core/transcription/transcript';
 import { normalizeNativeBlockTimeline } from '../core/transcription/nativeBlockTiming';
-import { deriveNativeTranscriptOutcome, shouldImportNativePostProcessingResult } from '../services/nativePostProcessingCore';
+import {
+  deriveNativeTranscriptOutcome,
+  shouldImportNativePostProcessingResult,
+  shouldRepairNativeTranscriptStatus,
+} from '../services/nativePostProcessingCore';
 import { deriveStageTransition } from '../core/pipeline/stageState';
 
 export type MeetingStatus =
@@ -1199,17 +1203,28 @@ export async function importNativePostProcessingResult(input: {
   const db = await getDb();
   const current = await db.getFirstAsync<{
     native_postprocess_run_id: string | null;
+    status: MeetingStatus;
     started_at: number;
     transcription_window_count: number;
     transcription_completed_windows: number;
     transcription_failed_windows: number;
   }>(
-    `SELECT native_postprocess_run_id, started_at,
+    `SELECT native_postprocess_run_id, status, started_at,
             transcription_window_count, transcription_completed_windows, transcription_failed_windows
      FROM meetings WHERE id = ?`,
     [input.meetingId],
   );
-  if (!current || !shouldImportNativePostProcessingResult({
+  if (!current) return 'already_imported';
+
+  const incomingHasText = input.blocks.some((block) => block.text.trim().length > 0);
+  const incomingOutcome = deriveNativeTranscriptOutcome({
+    hasText: incomingHasText,
+    windowCount: input.windowCount,
+    completedWindows: input.completedWindows,
+    failedWindows: input.failedWindows,
+    lastError: input.lastError,
+  });
+  if (!shouldImportNativePostProcessingResult({
     persistedRunId: current.native_postprocess_run_id,
     persistedWindowCount: current.transcription_window_count,
     persistedCompletedWindows: current.transcription_completed_windows,
@@ -1218,21 +1233,35 @@ export async function importNativePostProcessingResult(input: {
     incomingWindowCount: input.windowCount,
     incomingCompletedWindows: input.completedWindows,
     incomingFailedWindows: input.failedWindows,
-  })) return 'already_imported';
+  })) {
+    if (shouldRepairNativeTranscriptStatus({
+      persistedStatus: current.status,
+      incomingStatus: incomingOutcome.status,
+    })) {
+      await db.runAsync(
+        `UPDATE meetings
+         SET status = ?, last_error = ?, updated_at = ?
+         WHERE id = ?
+           AND status IN ('recording', 'interrupted', 'recorded', 'transcribing', 'transcript_partial', 'audio_expired_incomplete')`,
+        [incomingOutcome.status, incomingOutcome.error, Date.now(), input.meetingId],
+      );
+      log.warn('meetings', 'repaired stale native transcript status from durable outbox', {
+        meetingId: input.meetingId,
+        runId: input.runId,
+        from: current.status,
+        to: incomingOutcome.status,
+      });
+      return 'imported';
+    }
+    return 'already_imported';
+  }
 
   const blocks = normalizeNativeBlockTimeline(input.blocks
     .map((block) => ({ ...block, text: block.text.trim() }))
     .filter((block) => block.text.length > 0)
     .sort((left, right) => left.sequence - right.sequence), current.started_at, input.durationMs);
   const now = Date.now();
-  const hasText = blocks.length > 0;
-  const outcome = deriveNativeTranscriptOutcome({
-    hasText,
-    windowCount: input.windowCount,
-    completedWindows: input.completedWindows,
-    failedWindows: input.failedWindows,
-    lastError: input.lastError,
-  });
+  const outcome = incomingOutcome;
 
   let didImport = false;
   await db.withExclusiveTransactionAsync(async (transaction) => {

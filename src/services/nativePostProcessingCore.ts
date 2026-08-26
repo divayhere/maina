@@ -69,3 +69,24 @@ export function shouldImportNativePostProcessingResult(input: {
     || input.persistedCompletedWindows !== input.incomingCompletedWindows
     || input.persistedFailedWindows !== input.incomingFailedWindows;
 }
+
+/**
+ * An outbox acknowledgement can fail after the Expo database has been
+ * imported. A later lifecycle write may also leave that database row in an
+ * in-progress state. The durable native result is authoritative, but never
+ * move a meeting backwards once notes are being generated or are complete.
+ */
+export function shouldRepairNativeTranscriptStatus(input: {
+  persistedStatus: string;
+  incomingStatus: NativeTranscriptOutcome['status'];
+}): boolean {
+  if (input.persistedStatus === input.incomingStatus) return false;
+  return [
+    'recording',
+    'interrupted',
+    'recorded',
+    'transcribing',
+    'transcript_partial',
+    'audio_expired_incomplete',
+  ].includes(input.persistedStatus);
+}

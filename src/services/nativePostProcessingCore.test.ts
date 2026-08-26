@@ -4,6 +4,7 @@ import {
   deriveNativeTranscriptOutcome,
   nativeProgress,
   shouldImportNativePostProcessingResult,
+  shouldRepairNativeTranscriptStatus,
 } from './nativePostProcessingCore';
 
 describe('native transcript truth model', () => {
@@ -69,6 +70,24 @@ describe('native transcript truth model', () => {
       incomingWindowCount: 13,
       incomingCompletedWindows: 13,
       incomingFailedWindows: 0,
+    })).toBe(false);
+  });
+
+  it('repairs a stale in-progress row from an already imported terminal result', () => {
+    expect(shouldRepairNativeTranscriptStatus({
+      persistedStatus: 'transcribing',
+      incomingStatus: 'transcribed',
+    })).toBe(true);
+  });
+
+  it('never moves a meeting backward after summary work has begun', () => {
+    expect(shouldRepairNativeTranscriptStatus({
+      persistedStatus: 'summarizing',
+      incomingStatus: 'transcribed',
+    })).toBe(false);
+    expect(shouldRepairNativeTranscriptStatus({
+      persistedStatus: 'summarized',
+      incomingStatus: 'transcribed',
     })).toBe(false);
   });
 });
