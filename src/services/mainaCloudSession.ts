@@ -27,6 +27,14 @@ export type MainaCloudPairingRequest = {
   expiresAt: string;
 };
 
+/**
+ * Pairing codes are opaque, case-sensitive credentials. Display the exact
+ * server value so an owner can approve the same credential the phone holds.
+ */
+export function formatMainaCloudPairingCode(value: string) {
+  return value;
+}
+
 export class MainaCloudApiError extends Error {
   constructor(
     message: string,
