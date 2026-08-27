@@ -65,6 +65,7 @@ import { recordingDir, segmentIndexFromUri, segmentPath } from '@/hardware/recor
 import { registerActiveTriggerHandler } from '@/hardware/trigger/hardwareTrigger';
 import { resolveRemoteAction } from '@/hardware/trigger/remoteControl';
 import { log } from '@/services/logger';
+import { reconcilePendingNativeMeetingWork } from '@/services/meetingCaptureLifecycle';
 import { getNativeCaptureMetrics } from '@/services/nativeCaptureMetrics';
 import {
   clearDiagnosticContext,
@@ -1099,6 +1100,18 @@ export default function RecordScreen() {
       clearDiagnosticContext();
       await setNativeCaptureState('idle').catch(() => {});
       router.replace(`/meeting/${id}`);
+      if (Platform.OS === 'ios' && CAPTURE_ENGINE === 'native-qwen') {
+        // iOS has no Android-style foreground post-processing service. Wake
+        // the durable queue after the WAV and meeting checkpoint are committed
+        // so a foreground save starts ASR without requiring an app relaunch.
+        // Reconciliation is idempotent and still resumes safely on relaunch.
+        void reconcilePendingNativeMeetingWork().catch((cause) => {
+          log.warn('recovery', 'iOS post-processing wake after save failed', {
+            meetingId: id,
+            err: String(cause),
+          });
+        });
+      }
     } catch (cause) {
       const message = cause instanceof Error ? cause.message : String(cause);
       setError('Maina could not finish the database checkpoint. Your WAV files remain on the phone.');
