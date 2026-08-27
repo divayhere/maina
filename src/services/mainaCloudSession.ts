@@ -195,9 +195,14 @@ export async function exchangeMainaCloudPairing(input: MainaCloudPairingRequest)
   const body = await readJson(response) as {
     access_token?: unknown;
     expires_at?: unknown;
-    user?: { user_id?: unknown; email?: unknown; display_name?: unknown; role?: unknown };
+    user?: { id?: unknown; user_id?: unknown; email?: unknown; display_name?: unknown; role?: unknown };
   };
-  if (!response.ok || typeof body.access_token !== 'string' || typeof body.user?.user_id !== 'string' || typeof body.user.email !== 'string') {
+  const userId = typeof body.user?.id === 'string'
+    ? body.user.id
+    : typeof body.user?.user_id === 'string'
+      ? body.user.user_id
+      : null;
+  if (!response.ok || typeof body.access_token !== 'string' || !userId || typeof body.user?.email !== 'string') {
     const failure = apiMessage(body, 'Maina Cloud pairing was not approved yet.');
     throw new MainaCloudApiError(failure.message, response.status, failure.code);
   }
@@ -205,7 +210,7 @@ export async function exchangeMainaCloudPairing(input: MainaCloudPairingRequest)
     accessToken: body.access_token,
     expiresAt: typeof body.expires_at === 'string' ? body.expires_at : null,
     user: {
-      userId: body.user.user_id,
+      userId,
       email: body.user.email,
       displayName: typeof body.user.display_name === 'string' ? body.user.display_name : null,
       role: typeof body.user.role === 'string' ? body.user.role : null,

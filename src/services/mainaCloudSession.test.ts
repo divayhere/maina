@@ -15,6 +15,7 @@ vi.mock('@/services/logger', () => ({ log: { info: vi.fn(), warn: vi.fn(), error
 import {
   MainaCloudApiError,
   clearMainaCloudSession,
+  exchangeMainaCloudPairing,
   formatMainaCloudPairingCode,
   getMainaCloudSession,
   mainaCloudFetch,
@@ -43,6 +44,23 @@ describe('mainaCloudSession', () => {
   it('displays the case-sensitive pairing credential byte-for-byte', () => {
     const code = 'mp_aB9z_Xy-17Q';
     expect(formatMainaCloudPairingCode(code)).toBe(code);
+  });
+
+  it('accepts the deployed pairing exchange user.id contract', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      access_token: 'scoped-mobile-session',
+      expires_at: '2030-01-01T00:00:00.000Z',
+      user: { id: 'user-production-shape', email: 'owner@maina.local', display_name: 'Divay', role: 'owner' },
+    }), { status: 200 })));
+
+    const session = await exchangeMainaCloudPairing({
+      pairingId: 'mobile_pairing_test',
+      verificationCode: 'mp_aB9z_Xy-17Q',
+      expiresAt: '2030-01-01T00:00:00.000Z',
+    });
+
+    expect(session.user.userId).toBe('user-production-shape');
+    expect(await getMainaCloudSession()).toEqual(session);
   });
 
   it('removes an expired session before any cloud call', async () => {
