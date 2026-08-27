@@ -138,6 +138,7 @@ export interface Meeting {
   transcriptionWindowCount: number;
   transcriptionCompletedWindows: number;
   transcriptionFailedWindows: number;
+  transcriptionRecoveryRounds: number;
   openTodoCount: number;
   totalTodoCount: number;
   updatedAt: number;
@@ -181,6 +182,7 @@ interface Row {
   transcription_window_count: number;
   transcription_completed_windows: number;
   transcription_failed_windows: number;
+  transcription_recovery_rounds: number;
   open_todo_count?: number | null;
   total_todo_count?: number | null;
   updated_at: number;
@@ -246,6 +248,7 @@ const toMeeting = (r: Row): Meeting => ({
   transcriptionWindowCount: r.transcription_window_count ?? 0,
   transcriptionCompletedWindows: r.transcription_completed_windows ?? 0,
   transcriptionFailedWindows: r.transcription_failed_windows ?? 0,
+  transcriptionRecoveryRounds: r.transcription_recovery_rounds ?? 0,
   openTodoCount: r.open_todo_count ?? 0,
   totalTodoCount: r.total_todo_count ?? 0,
   updatedAt: r.updated_at || r.started_at,
@@ -730,6 +733,7 @@ export async function updateMeeting(id: string, patch: Partial<Meeting>): Promis
     transcriptionWindowCount: 'transcription_window_count',
     transcriptionCompletedWindows: 'transcription_completed_windows',
     transcriptionFailedWindows: 'transcription_failed_windows',
+    transcriptionRecoveryRounds: 'transcription_recovery_rounds',
     updatedAt: 'updated_at',
     lastError: 'last_error',
     restartCount: 'restart_count',
@@ -1131,6 +1135,13 @@ export async function commitTranscriptFinalBlocks(input: {
   endedAt?: number | null;
   language?: string | null;
   speakerId?: string | null;
+  checkpoint?: {
+    windowKey: string;
+    chunkIndex: number;
+    windowIndex: number;
+    startedMs: number;
+    endedMs: number;
+  };
 }): Promise<TranscriptBlock[]> {
   const normalized = input.text.trim();
   const db = await getDb();
@@ -1177,6 +1188,22 @@ export async function commitTranscriptFinalBlocks(input: {
         ],
       );
     }
+    if (input.checkpoint) {
+      await transaction.runAsync(
+        `INSERT OR REPLACE INTO local_asr_windows
+          (meeting_id, window_key, chunk_index, window_index, started_ms, ended_ms, completed_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        [
+          input.meetingId,
+          input.checkpoint.windowKey,
+          input.checkpoint.chunkIndex,
+          input.checkpoint.windowIndex,
+          input.checkpoint.startedMs,
+          input.checkpoint.endedMs,
+          createdAt,
+        ],
+      );
+    }
   });
 
   const rows = await db.getAllAsync<TranscriptBlockRow>(
@@ -1186,6 +1213,43 @@ export async function commitTranscriptFinalBlocks(input: {
     [input.meetingId, baseSequence, baseSequence + chunks.length],
   );
   return rows.map(toTranscriptBlock);
+}
+
+export async function markLocalAsrWindowComplete(input: {
+  meetingId: string;
+  windowKey: string;
+  chunkIndex: number;
+  windowIndex: number;
+  startedMs: number;
+  endedMs: number;
+}): Promise<void> {
+  const db = await getDb();
+  await db.runAsync(
+    `INSERT OR REPLACE INTO local_asr_windows
+      (meeting_id, window_key, chunk_index, window_index, started_ms, ended_ms, completed_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    [input.meetingId, input.windowKey, input.chunkIndex, input.windowIndex, input.startedMs, input.endedMs, Date.now()],
+  );
+}
+
+export async function listCompletedLocalAsrWindowKeys(meetingId: string): Promise<Set<string>> {
+  const db = await getDb();
+  const rows = await db.getAllAsync<{ window_key: string }>(
+    'SELECT window_key FROM local_asr_windows WHERE meeting_id = ?',
+    [meetingId],
+  );
+  return new Set(rows.map((row) => row.window_key));
+}
+
+export async function getLastFinalTranscriptText(meetingId: string): Promise<string> {
+  const db = await getDb();
+  const row = await db.getFirstAsync<{ text: string }>(
+    `SELECT text FROM transcript_blocks
+     WHERE meeting_id = ? AND status = 'final'
+     ORDER BY sequence DESC LIMIT 1`,
+    [meetingId],
+  );
+  return row?.text?.trim() ?? '';
 }
 
 /**
@@ -1777,9 +1841,13 @@ export async function resetMeetingTranscript(meetingId: string): Promise<void> {
   const db = await getDb();
   await db.withTransactionAsync(async () => {
     await db.runAsync(`DELETE FROM transcript_blocks WHERE meeting_id = ?`, [meetingId]);
+    await db.runAsync(`DELETE FROM local_asr_windows WHERE meeting_id = ?`, [meetingId]);
     await db.runAsync(
       `UPDATE meetings
-       SET transcript = NULL, transcribed_segments = 0, updated_at = ?, last_error = NULL, summary_status = 'idle'
+       SET transcript = NULL, transcribed_segments = 0,
+           transcription_window_count = 0, transcription_completed_windows = 0,
+           transcription_failed_windows = 0, transcription_recovery_rounds = 0,
+           updated_at = ?, last_error = NULL, summary_status = 'idle'
        WHERE id = ?`,
       [Date.now(), meetingId],
     );

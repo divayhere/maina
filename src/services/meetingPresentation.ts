@@ -4,6 +4,7 @@ export type MeetingPresentationPhase =
   | 'recording'
   | 'recovery'
   | 'transcribing'
+  | 'no_speech'
   | 'transcript_partial'
   | 'summary'
   | 'summary_failed'
@@ -62,13 +63,18 @@ export function describeMeetingPresentation(meeting: Meeting): MeetingPresentati
     };
   }
   if (meeting.status === 'transcript_partial') {
+    const total = Math.max(0, meeting.transcriptionWindowCount);
+    const completed = Math.min(total, Math.max(0, meeting.transcriptionCompletedWindows));
+    const percent = total > 0 ? `${((completed / total) * 100).toFixed(completed / total >= 0.99 ? 1 : 0)}%` : null;
     return {
       phase: 'transcript_partial',
-      label: 'Transcript needs recovery',
-      tone: 'warn',
-      detail: 'Some saved audio needs another transcription pass.',
-      working: false,
-      canRetryTranscript: true,
+      label: percent ? `${percent} processed` : 'Partial transcript saved',
+      tone: 'muted',
+      detail: meeting.transcriptionRecoveryRounds < 3
+        ? 'Maina will retry the remaining saved audio.'
+        : 'Saved audio can be re-transcribed if you need another pass.',
+      working: meeting.transcriptionRecoveryRounds < 3,
+      canRetryTranscript: meeting.transcriptionRecoveryRounds >= 3,
     };
   }
   if (meeting.status === 'audio_expired_incomplete') {
@@ -82,6 +88,21 @@ export function describeMeetingPresentation(meeting: Meeting): MeetingPresentati
     };
   }
   if (meeting.status === 'recorded' || meeting.status === 'transcribing') {
+    const noSpeech = meeting.status === 'recorded'
+      && meeting.transcriptionWindowCount > 0
+      && meeting.transcriptionCompletedWindows === meeting.transcriptionWindowCount
+      && meeting.transcriptionFailedWindows === 0;
+    if (noSpeech) {
+      return {
+        phase: 'no_speech',
+        label: 'No speech detected',
+        tone: 'muted',
+        detail: 'The saved audio was checked, but no speech text was found.',
+        working: false,
+        progress: 1,
+        canRetryTranscript: Boolean(meeting.audioUri),
+      };
+    }
     const progress = transcriptionProgress(meeting);
     return {
       phase: 'transcribing',

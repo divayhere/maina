@@ -18,6 +18,7 @@ import { maybeQueueMainaKnowledgeCloudSync } from '@/services/mainaKnowledgeClou
 import { maybeQueueMainaKnowledgeCloudPacketCorrections } from '@/services/mainaKnowledgeCloudCorrections';
 import { mainaKnowledgeCloudSourceKey } from '@/services/mainaKnowledgeCloudCore';
 import { MainaCloudApiError, getMainaCloudSession, mainaCloudFetch } from '@/services/mainaCloudSession';
+import { notifyMeetingPacketChanged } from '@/services/meetingPacketSignals';
 
 const inflight = new Map<string, Promise<void>>();
 let executionTail: Promise<void> = Promise.resolve();
@@ -284,7 +285,10 @@ export function runMeetingPacketGeneration(meetingId: string, options?: { regene
   const task = executionTail
     .catch(() => {})
     .then(() => reconcileMeetingPacket(meetingId, options))
-    .finally(() => inflight.delete(key));
+    .finally(() => {
+      inflight.delete(key);
+      notifyMeetingPacketChanged(meetingId);
+    });
   executionTail = task.then(() => {}, () => {});
   inflight.set(key, task);
   return task;

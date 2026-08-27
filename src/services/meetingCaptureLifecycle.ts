@@ -22,15 +22,47 @@ import { log } from '@/services/logger';
 import { getNativeCaptureMetrics } from '@/services/nativeCaptureMetrics';
 import { runLocalAsrPipeline } from '@/services/localAsrPipeline';
 import { maybeQueueMeetingPacket } from '@/services/meetingPacket';
+import { enforceAudioRetentionPolicy } from '@/services/audioRetention';
+import {
+  IOS_ASR_MAX_RECOVERY_ROUNDS,
+  iosAsrRetryDelayMs,
+  isIOSAsrRetryDue,
+} from '@/services/iosAsrRecoveryPolicy';
 
 // Multiple foreground triggers (launch, resume, the meeting screen, and the
 // short foreground poll) can arrive together. Serialize them so only one
 // Expo-SQLite import ever observes a completed native outbox run at a time.
 let nativeReconciliationInFlight: Promise<number> | null = null;
 const iosPostProcessingInFlight = new Map<string, Promise<void>>();
+const iosPostProcessingRetryTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+function scheduleIOSPostProcessingRetry(meetingId: string, recoveryRounds: number): void {
+  const existing = iosPostProcessingRetryTimers.get(meetingId);
+  if (existing) clearTimeout(existing);
+  const delayMs = iosAsrRetryDelayMs(recoveryRounds);
+  if (delayMs == null || delayMs <= 0) {
+    iosPostProcessingRetryTimers.delete(meetingId);
+    return;
+  }
+  const timer = setTimeout(() => {
+    iosPostProcessingRetryTimers.delete(meetingId);
+    void getMeeting(meetingId).then((current) => {
+      if (!current?.audioUri || current.status !== 'transcript_partial') return;
+      if (current.transcriptionRecoveryRounds !== recoveryRounds) return;
+      void launchIOSPostProcessing(current);
+    }).catch((cause) => {
+      log.warn('recovery', 'iOS delayed transcription retry deferred until foreground', {
+        meetingId,
+        err: String(cause),
+      });
+    });
+  }, delayMs);
+  iosPostProcessingRetryTimers.set(meetingId, timer);
+}
 
 async function launchIOSPostProcessing(meeting: Meeting): Promise<boolean> {
   if (!meeting.audioUri) return false;
+  const captureDirectory = meeting.audioUri;
   if (iosPostProcessingInFlight.has(meeting.id)) return true;
 
   await updateMeetingPipelineStage({
@@ -39,17 +71,33 @@ async function launchIOSPostProcessing(meeting: Meeting): Promise<boolean> {
     state: 'running',
     error: null,
   });
-  const work = runLocalAsrPipeline({
+  const runPass = () => runLocalAsrPipeline({
     meetingId: meeting.id,
-    directory: meeting.audioUri,
+    directory: captureDirectory,
     meetingStartedAt: meeting.startedAt,
     recoverPartials: true,
-    // Qwen is the canonical transcript. Restarting after an iOS suspension
-    // therefore rebuilds the same deterministic blocks instead of appending a
-    // second copy to any live-preview text.
-    resetTranscript: true,
-  })
+    // Completed Qwen windows are transactionally checkpointed. Relaunch skips
+    // them and resumes only unfinished intervals rather than replaying hours.
+    resetTranscript: false,
+  });
+  const work = runPass()
+    .then(async (firstResult) => {
+      // Checkpoints make this a failed-window retry, not a second full pass.
+      if (firstResult.coverageComplete) return firstResult;
+      return runPass();
+    })
     .then(async (result) => {
+      const recoveryRounds = result.coverageComplete
+        ? meeting.transcriptionRecoveryRounds
+        : Math.min(IOS_ASR_MAX_RECOVERY_ROUNDS, meeting.transcriptionRecoveryRounds + 1);
+      await updateMeeting(meeting.id, { transcriptionRecoveryRounds: recoveryRounds });
+      if (result.coverageComplete) {
+        const timer = iosPostProcessingRetryTimers.get(meeting.id);
+        if (timer) clearTimeout(timer);
+        iosPostProcessingRetryTimers.delete(meeting.id);
+      } else {
+        scheduleIOSPostProcessingRetry(meeting.id, recoveryRounds);
+      }
       await updateMeetingPipelineStage({
         meetingId: meeting.id,
         stage: 'asr',
@@ -62,6 +110,7 @@ async function launchIOSPostProcessing(meeting: Meeting): Promise<boolean> {
           failedWindows: result.failedWindows,
           recoveredChunks: result.recoveredChunks,
           executionOwner: 'ios-js-resumable-fallback',
+          recoveryRounds,
         },
       });
       await updateMeetingPipelineStage({
@@ -76,6 +125,12 @@ async function launchIOSPostProcessing(meeting: Meeting): Promise<boolean> {
       if (result.coverageComplete && result.hasText) {
         await maybeQueueMeetingPacket(meeting.id).catch((cause) => {
           log.warn('summary', 'iOS post-call packet queue deferred', {
+            meetingId: meeting.id,
+            err: String(cause),
+          });
+        });
+        await enforceAudioRetentionPolicy().catch((cause) => {
+          log.warn('audio-retention', 'iOS completed-audio cleanup deferred', {
             meetingId: meeting.id,
             err: String(cause),
           });
@@ -370,6 +425,15 @@ async function reconcilePendingNativeMeetingWorkInternal(): Promise<number> {
       && (
         meeting.transcriptionWindowCount === 0
         || (meeting.transcriptionCompletedWindows + meeting.transcriptionFailedWindows) < meeting.transcriptionWindowCount
+        || (
+          meeting.status === 'transcript_partial'
+          && meeting.transcriptionRecoveryRounds < IOS_ASR_MAX_RECOVERY_ROUNDS
+          && isIOSAsrRetryDue({
+            recoveryRounds: meeting.transcriptionRecoveryRounds,
+            updatedAt: meeting.updatedAt,
+            now: Date.now(),
+          })
+        )
       )
     ) {
       if (await launchNativePostProcessing(meeting, { forceRetry: meeting.status === 'transcript_partial' })) resumed += 1;

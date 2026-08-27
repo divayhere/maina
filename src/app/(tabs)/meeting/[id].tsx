@@ -159,7 +159,16 @@ function TabChip({
         },
       ]}
     >
-      <AppText variant="heading" color={active ? theme.primaryForeground : theme.textSoft}>{label}</AppText>
+      <AppText
+        variant="bodyStrong"
+        color={active ? theme.primaryForeground : theme.textSoft}
+        numberOfLines={1}
+        adjustsFontSizeToFit
+        minimumFontScale={0.85}
+        style={{ flexShrink: 1, minWidth: 0, textAlign: 'center' }}
+      >
+        {label}
+      </AppText>
     </Pressable>
   );
 }
@@ -911,7 +920,7 @@ export default function MeetingDetail() {
                     </Banner>
                   ) : hasAudio && !transcriptionActive ? (
                     <ActionLink
-                      label={hasText ? 'Re-transcribe from saved audio' : presentation?.canRetryTranscript ? 'Retry transcription' : 'Transcribe from saved audio'}
+                      label="Re-transcribe from saved audio"
                       color={theme.primary}
                       onPress={() => void startRepass()}
                     />

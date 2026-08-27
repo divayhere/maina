@@ -46,6 +46,7 @@ import {
 import { reconcilePendingMainaKnowledgeCloudSyncs } from '@/services/mainaKnowledgeCloud';
 import { reconcilePendingMainaKnowledgeCloudCorrections } from '@/services/mainaKnowledgeCloudCorrections';
 import { queueEligibleMeetingPackets, reconcileAutoSummaryEligibility, reconcilePendingMeetingPackets } from '@/services/meetingPacket';
+import { subscribeMeetingPacketChanges } from '@/services/meetingPacketSignals';
 import { exchangeMainaCloudPairing } from '@/services/mainaCloudSession';
 import { initSentry, Sentry } from '@/services/sentry';
 import { installWatchdog } from '@/services/watchdog';
@@ -297,10 +298,21 @@ function RootLayout() {
       });
       runPipelineFromSignal();
     });
+    const unsubscribePackets = subscribeMeetingPacketChanges((meetingId) => {
+      log.info('summary', 'meeting packet state changed; waking poller', { meetingId });
+      if (packetPollTimer) {
+        clearTimeout(packetPollTimer);
+      }
+      packetPollTimer = setTimeout(() => {
+        packetPollTimer = null;
+        void schedulePacketPoll();
+      }, 1_000);
+    });
     return () => {
       stopped = true;
       subscription.remove();
       unsubscribeNative();
+      unsubscribePackets();
       if (packetPollTimer) clearTimeout(packetPollTimer);
     };
   }, [ready]);
