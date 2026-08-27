@@ -58,7 +58,7 @@ Assessment: strong evidence that durable chunked capture and partial-WAV recover
 
 Finding A1 — process-death recovery is durable but not immediately responsive. Foreground reconciliation should reclaim a dead run immediately when the owning process/service no longer exists, rather than relying only on heartbeat age.
 
-Finding A2 — autonomous recovery has a scheduling hole after a terminal partial pass. The immediate retry is efficient, but the documented four scheduled rounds did not appear in JobScheduler, and foreground relaunch excludes a fully checked partial manifest. The only visible continuation is manual `Re-transcribe from saved audio`. This fails the low-intervention requirement.
+Finding A2 — autonomous recovery has a scheduling hole after a terminal partial pass. The immediate retry is efficient, but the documented four scheduled rounds did not appear in JobScheduler, and foreground relaunch excludes a fully checked partial manifest. The most likely scheduler cause is the service calling `enqueueUniqueWork(..., KEEP, ...)` while the same uniquely named worker that launched it can still be pending: Android documents that `KEEP` ignores the new work in that case. The only visible continuation is manual `Re-transcribe from saved audio`. This fails the low-intervention requirement and must be proven with a worker-state regression test rather than fixed by assumption alone.
 
 Finding A3 — one unrecoverable interval currently blocks the entire notes/source pipeline forever even though 99.84% of windows and a substantial transcript are durable. Safety is correct—no incomplete immutable source was silently published—but product policy needs a bounded terminal-partial path with explicit coverage evidence rather than an indefinite trap.
 

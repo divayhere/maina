@@ -19,6 +19,7 @@ This ledger records primary sources used to assess the measured device behavior.
 ## Android
 
 - [WorkManager reference](https://developer.android.com/reference/androidx/work/WorkManager.html) — authoritative durable/persistent work abstraction.
+- [ExistingWorkPolicy reference](https://developer.android.com/reference/kotlin/androidx/work/ExistingWorkPolicy) — authoritative evidence that `KEEP` drops newly requested unique work while same-name work is still pending.
 - [Support for long-running workers](https://developer.android.com/develop/background-work/background-tasks/persistent/how-to/long-running) — authoritative foreground execution for long WorkManager jobs.
 - [Foreground-service timeouts](https://developer.android.com/develop/background-work/services/fgs/timeout) — authoritative timeout and `onTimeout` behavior.
 - [Android 15 foreground-service changes](https://developer.android.com/about/versions/15/changes/foreground-service-types) — authoritative six-hour aggregate limit for `mediaProcessing` foreground services.
