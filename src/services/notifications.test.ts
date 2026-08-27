@@ -21,6 +21,7 @@ const baseMeeting = (overrides: Partial<Meeting> = {}): Meeting => ({
   transcriptionWindowCount: 1,
   transcriptionCompletedWindows: 1,
   transcriptionFailedWindows: 0,
+  transcriptionRecoveryRounds: 0,
   openTodoCount: 0,
   totalTodoCount: 0,
   updatedAt: 1_700_000_060_000,
