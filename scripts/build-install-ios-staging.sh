@@ -49,6 +49,13 @@ npm test -- --run
 npm run verify:ios-native
 
 build_root="${MAINA_IOS_BUILD_ROOT:-/Users/divay/Developer/.builds/maina-ios-release-v${build_number}}"
+case "$build_root" in
+  /Users/divay/Developer/.builds/maina-ios-release-v*) ;;
+  *) echo "Refusing to clean unexpected iOS build root: $build_root" >&2; exit 1 ;;
+esac
+# Release evidence must never reuse stale Clang/Swift modules after pod or
+# Xcode changes. This directory contains generated build output only.
+rm -rf "$build_root"
 xcodebuild \
   -workspace ios/Maina.xcworkspace \
   -scheme Maina \

@@ -299,8 +299,8 @@ export async function maybeQueueMeetingPacket(meetingId: string): Promise<void> 
   void runMeetingPacketGeneration(meetingId);
 }
 
-export async function reconcilePendingMeetingPackets(): Promise<void> {
-  if (!await getMainaCloudSession()) return;
+export async function reconcilePendingMeetingPackets(): Promise<number> {
+  if (!await getMainaCloudSession()) return 0;
   const now = Date.now();
   const meetings = (await listMeetingsEligibleForSummaryQueue()).filter((meeting) => {
     if (meeting.summaryStatus === 'queued' || meeting.summaryStatus === 'running') return true;
@@ -313,6 +313,7 @@ export async function reconcilePendingMeetingPackets(): Promise<void> {
       && (!meeting.cloudNotesLastPolledAt || now - meeting.cloudNotesLastPolledAt >= RETRY_COOLDOWN_MS);
   });
   for (const meeting of meetings) void runMeetingPacketGeneration(meeting.id);
+  return meetings.length;
 }
 
 export async function reconcileAutoSummaryEligibility(): Promise<number> {

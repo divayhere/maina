@@ -4,7 +4,7 @@ import { router, useFocusEffect } from 'expo-router';
 import { useSpeechRecognitionEvent } from 'expo-speech-recognition';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Alert, AppState, Platform, Pressable, StyleSheet, View } from 'react-native';
-import Animated, { Easing, useAnimatedStyle, useSharedValue, withTiming } from 'react-native-reanimated';
+import Animated, { Easing, useAnimatedStyle, useReducedMotion, useSharedValue, withTiming } from 'react-native-reanimated';
 
 import {
   ACTIVE_LANGUAGES,
@@ -19,6 +19,7 @@ import {
 } from '@/core/transcription/nativeSpeech';
 import { appendWithoutOverlap, transcriptWordCount } from '@/core/transcription/transcript';
 import { buildRecordingCheckpoint } from '@/core/recording/checkpoint';
+import { recordingLevelFromDbfs } from '@/core/recording/audioLevel';
 import {
   canApplyIdleCaptureMetrics,
   shouldPreserveTerminalNativeMeeting,
@@ -199,12 +200,20 @@ export default function RecordScreen() {
   const [meetingCreated, setMeetingCreated] = useState(false);
   const [paused, setPaused] = useState(false);
   const [captureNote, setCaptureNote] = useState<string | null>(null);
+  const reducedMotion = useReducedMotion();
   const audioPulse = useSharedValue(0);
   const audioPulseStyle = useAnimatedStyle(() => {
     const intensity = audioPulse.get();
     return {
-      opacity: 0.34 + intensity * 0.58,
-      transform: [{ scale: 0.93 + intensity * 0.2 }],
+      opacity: 0.2 + intensity * 0.72,
+      transform: [{ scale: reducedMotion ? 1 : 0.88 + intensity * 0.3 }],
+    };
+  });
+  const audioPulseInnerStyle = useAnimatedStyle(() => {
+    const intensity = audioPulse.get();
+    return {
+      opacity: 0.7 + intensity * 0.3,
+      transform: [{ scale: reducedMotion ? 1 : 0.96 + intensity * 0.1 }],
     };
   });
 
@@ -218,9 +227,10 @@ export default function RecordScreen() {
       const status = await getNativeCaptureStatusAsync().catch(() => null);
       requestInFlight = false;
       if (cancelled) return;
-      const normalized = !pausedRef.current && status?.state === 'recording'
-        ? Math.max(0, Math.min(1, ((status.rmsDbfs ?? -60) + 60) / 48))
-        : 0;
+      const normalized = recordingLevelFromDbfs(
+        status?.rmsDbfs,
+        !pausedRef.current && status?.state === 'recording',
+      );
       audioPulse.set(withTiming(normalized, {
         duration: 180,
         easing: Easing.bezier(0.23, 1, 0.32, 1),
@@ -1253,11 +1263,11 @@ export default function RecordScreen() {
             audioPulseStyle,
           ]}
         >
-          <View style={[styles.haloInner, { backgroundColor: theme.mint }]}>
+          <Animated.View style={[styles.haloInner, { backgroundColor: theme.mint }, audioPulseInnerStyle]}>
             <View style={[styles.haloDotWrap, { backgroundColor: theme.accent }]}>
               <View style={[styles.haloDot, { backgroundColor: theme.primary }]} />
             </View>
-          </View>
+          </Animated.View>
         </Animated.View>
         <AppText variant="timer" style={styles.center}>{formatDuration(elapsed)}</AppText>
         <AppText variant="title" muted style={styles.center}>
