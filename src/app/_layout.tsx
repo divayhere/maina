@@ -6,6 +6,7 @@ import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 
 import { provisionCoreLanguages, requestSpeechPermissions } from '@/core/transcription/nativeSpeech';
+import { nextPacketPollDelay } from '@/core/pipeline/pipelineScheduling';
 import { initDb } from '@/data/db';
 import {
   getMeeting,
@@ -214,18 +215,6 @@ function RootLayout() {
         void provisionCoreLanguages().catch((cause) => {
           log.warn('native-speech', 'background language provisioning failed', { err: String(cause) });
         });
-        void reconcileAutoSummaryEligibility().catch((cause) => {
-          log.warn('summary', 'auto-summary eligibility reconciliation failed', { err: String(cause) });
-        });
-        void reconcilePendingMeetingPackets().catch((cause) => {
-          log.warn('summary', 'pending packet reconciliation failed', { err: String(cause) });
-        });
-        void reconcilePendingMainaKnowledgeCloudSyncs().catch((cause) => {
-          log.warn('maina-cloud', 'pending cloud sync reconciliation failed', { err: String(cause) });
-        });
-        void reconcilePendingMainaKnowledgeCloudCorrections().catch((cause) => {
-          log.warn('maina-cloud-correction', 'pending correction reconciliation failed', { err: String(cause) });
-        });
         setReady(true);
       } catch (e) {
         const message = e instanceof Error ? e.message : String(e);
@@ -238,6 +227,9 @@ function RootLayout() {
   useEffect(() => {
     if (!ready) return;
     let pipelineInFlight: Promise<void> | null = null;
+    let packetPollInFlight: Promise<void> | null = null;
+    let packetPollTimer: ReturnType<typeof setTimeout> | null = null;
+    let stopped = false;
     const syncAudioCleanup = async () => {
       const meetingIds = await getMeetingsWithDeletedAudio();
       await markMeetingsAudioDeleted(meetingIds);
@@ -247,7 +239,6 @@ function RootLayout() {
       // the seven-day/1 GB recovery policy.
       await enforceAudioRetentionPolicy();
       await reconcileAutoSummaryEligibility();
-      await reconcilePendingMeetingPackets();
       await reconcilePendingMainaKnowledgeCloudSyncs();
       await reconcilePendingMainaKnowledgeCloudCorrections();
       await flushDiagnostics().catch(() => {});
@@ -261,36 +252,52 @@ function RootLayout() {
       pipelineInFlight = work;
       return work;
     };
-    void schedulePipelineSync().catch((cause) => {
-      log.warn('meetings', 'audio cleanup state sync failed', { err: String(cause) });
-    });
+    const schedulePacketPoll = () => {
+      if (stopped || packetPollInFlight) return packetPollInFlight;
+      if (packetPollTimer) return Promise.resolve();
+      let work: Promise<void>;
+      work = reconcilePendingMeetingPackets()
+        .then((pendingCount) => {
+          const delayMs = nextPacketPollDelay(pendingCount, AppState.currentState === 'active');
+          if (stopped || delayMs == null) return;
+          packetPollTimer = setTimeout(() => {
+            packetPollTimer = null;
+            void schedulePacketPoll();
+          }, delayMs);
+        })
+        .catch((cause) => {
+          log.warn('summary', 'pending packet reconciliation failed', { err: String(cause) });
+        })
+        .finally(() => {
+          if (packetPollInFlight === work) packetPollInFlight = null;
+        });
+      packetPollInFlight = work;
+      return work;
+    };
+    const runPipelineFromSignal = () => {
+      void schedulePipelineSync()
+        .then(() => schedulePacketPoll())
+        .catch((cause) => {
+          log.warn('meetings', 'pipeline reconciliation failed', { err: String(cause) });
+        });
+    };
+    runPipelineFromSignal();
     const subscription = AppState.addEventListener('change', (state) => {
       if (state !== 'active') return;
-      void schedulePipelineSync().catch((cause) => {
-        log.warn('meetings', 'audio cleanup state sync failed', { err: String(cause) });
-      });
+      runPipelineFromSignal();
     });
     const unsubscribeNative = subscribeNativePostProcessingChanges((event) => {
       log.info('recovery', 'native post-processing state changed', {
         meetingId: event.meetingId,
         state: event.state,
       });
-      void schedulePipelineSync().catch((cause) => {
-        log.warn('recovery', 'native event reconciliation failed', { err: String(cause) });
-      });
+      runPipelineFromSignal();
     });
-    const packetTimer = setInterval(() => {
-      // Android may throttle this timer in the background; the native broadcast
-      // above is the immediate path and this poll is a cheap safety net while
-      // the React runtime remains alive.
-      void schedulePipelineSync().catch((cause) => {
-        log.warn('summary', 'native-to-packet reconciliation failed', { err: String(cause) });
-      });
-    }, 8_000);
     return () => {
+      stopped = true;
       subscription.remove();
       unsubscribeNative();
-      clearInterval(packetTimer);
+      if (packetPollTimer) clearTimeout(packetPollTimer);
     };
   }, [ready]);
 

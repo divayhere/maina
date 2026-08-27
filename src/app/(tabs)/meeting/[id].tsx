@@ -5,8 +5,9 @@ import { FlashList } from '@shopify/flash-list';
 import { router, useFocusEffect, useLocalSearchParams } from 'expo-router';
 import { useSpeechRecognitionEvent } from 'expo-speech-recognition';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ActivityIndicator, Alert, AppState, KeyboardAvoidingView, Platform, Pressable, StyleSheet, TextInput, View } from 'react-native';
+import { ActivityIndicator, Alert, AppState, KeyboardAvoidingView, Modal, Platform, Pressable, StyleSheet, TextInput, View } from 'react-native';
 
+import { MEETING_TITLE_MAX_LENGTH, normalizeMeetingTitle } from '@/core/meeting/meetingWorkspace';
 import { chooseRecognitionLanguage, startFileSession, stopSession, supportsOnDevice } from '@/core/transcription/nativeSpeech';
 import { appendWithoutOverlap } from '@/core/transcription/transcript';
 import {
@@ -40,19 +41,22 @@ import { segmentPath } from '@/hardware/recording/paths';
 import { maybeQueueMainaKnowledgeCloudSync } from '@/services/mainaKnowledgeCloud';
 import { describeMainaKnowledgeCloudSyncStatus } from '@/services/mainaKnowledgeCloudCore';
 import {
+  maybeQueueMainaKnowledgeCloudPacketCorrections,
   requeueMainaKnowledgeCloudCorrectionsForMeeting,
 } from '@/services/mainaKnowledgeCloudCorrections';
 import { maybeQueueMeetingPacket, runMeetingPacketGeneration } from '@/services/meetingPacket';
+import { describeMeetingPresentation } from '@/services/meetingPresentation';
 import { log } from '@/services/logger';
 import { ensureStorageBudget } from '@/services/storageBudget';
 import { retryNativeMeetingTranscription } from '@/services/meetingCaptureLifecycle';
 import { buildMeetingExportText, shareMeetingExport } from '@/services/transcriptExport';
 import { useMeetings } from '@/state/meetingsStore';
 import { formatDate, formatDuration, formatTime } from '@/utils/format';
+import { markdownToReadableText } from '@/utils/plainText';
 
 const PAGE_SIZE = 60;
 
-type MeetingTab = 'overview' | 'transcript';
+type MeetingTab = 'notes' | 'todos' | 'transcript';
 
 function formatMeetingLength(meeting: Pick<Meeting, 'durationMs' | 'audioDurationMs'>): string {
   const elapsedMs = Math.max(0, meeting.durationMs);
@@ -92,6 +96,44 @@ function ActionLink({
   return (
     <Pressable onPress={onPress} disabled={disabled} hitSlop={8}>
       <AppText variant="bodyStrong" color={disabled ? '#90A1A1' : color}>{label}</AppText>
+    </Pressable>
+  );
+}
+
+function MeetingIconButton({
+  icon,
+  label,
+  onPress,
+  disabled,
+  destructive,
+}: {
+  icon: React.ComponentProps<typeof Ionicons>['name'];
+  label: string;
+  onPress: () => void;
+  disabled?: boolean;
+  destructive?: boolean;
+}) {
+  const { theme } = useAppTheme();
+  return (
+    <Pressable
+      accessibilityRole="button"
+      accessibilityLabel={label}
+      disabled={disabled}
+      hitSlop={8}
+      onPress={onPress}
+      style={({ pressed }) => [
+        styles.iconAction,
+        {
+          backgroundColor: pressed ? theme.mutedSoft : 'transparent',
+          opacity: disabled ? 0.4 : 1,
+        },
+      ]}
+    >
+      <Ionicons
+        name={icon}
+        size={21}
+        color={destructive ? theme.destructive : theme.primary}
+      />
     </Pressable>
   );
 }
@@ -205,11 +247,14 @@ export default function MeetingDetail() {
   const [copyingTranscript, setCopyingTranscript] = useState(false);
   const [sharing, setSharing] = useState(false);
   const [transcriptSummary, setTranscriptSummary] = useState<Awaited<ReturnType<typeof getTranscriptSummary>> | null>(null);
-  const [tab, setTab] = useState<MeetingTab>('overview');
+  const [tab, setTab] = useState<MeetingTab>('notes');
   const [todos, setTodos] = useState<TodoItem[]>([]);
   const [manualTodo, setManualTodo] = useState('');
   const [packetBusy, setPacketBusy] = useState(false);
   const [cloudCorrections, setCloudCorrections] = useState<KnowledgeCloudCorrection[]>([]);
+  const [titleEditorOpen, setTitleEditorOpen] = useState(false);
+  const [titleDraft, setTitleDraft] = useState('');
+  const [savingTitle, setSavingTitle] = useState(false);
 
   const repassRef = useRef(false);
   const repassChainRef = useRef<Promise<void>>(Promise.resolve());
@@ -225,6 +270,10 @@ export default function MeetingDetail() {
   const hasCompleteTranscript = meeting?.status === 'transcribed'
     || meeting?.status === 'summarizing'
     || meeting?.status === 'summarized';
+  const presentation = useMemo(
+    () => meeting ? describeMeetingPresentation(meeting) : null,
+    [meeting],
+  );
   const packetError = useMemo(() => formatPacketError(meeting?.lastError), [meeting?.lastError]);
   const cloudState = useMemo(
     () =>
@@ -676,43 +725,136 @@ export default function MeetingDetail() {
     load();
   };
 
+  const openTitleEditor = () => {
+    setTitleDraft(meeting?.title ?? '');
+    setTitleEditorOpen(true);
+  };
+
+  const saveTitle = async () => {
+    if (!id || !meeting || savingTitle) return;
+    const title = normalizeMeetingTitle(titleDraft, meeting.title);
+    if (title === meeting.title) {
+      setTitleEditorOpen(false);
+      return;
+    }
+    setSavingTitle(true);
+    try {
+      await updateMeeting(id, { title });
+      await maybeQueueMainaKnowledgeCloudPacketCorrections({
+        meetingId: id,
+        packet: {
+          title,
+          summary: meeting.summary ?? '',
+          decisions: meeting.decisions,
+          todos: todos.map((todo) => todo.text),
+          openQuestions: meeting.openQuestions,
+        },
+        providerId: meeting.summaryProviderId,
+        model: meeting.summaryModel,
+      });
+      setTitleEditorOpen(false);
+      load();
+      await refresh();
+    } finally {
+      setSavingTitle(false);
+    }
+  };
+
+  const titleEditor = (
+    <Modal
+      animationType="fade"
+      transparent
+      visible={titleEditorOpen}
+      onRequestClose={() => setTitleEditorOpen(false)}
+    >
+      <KeyboardAvoidingView
+        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+        style={styles.modalKeyboard}
+      >
+        <Pressable style={[styles.modalScrim, { backgroundColor: theme.overlay }]} onPress={() => setTitleEditorOpen(false)}>
+          <Pressable
+            accessibilityRole="none"
+            onPress={(event) => event.stopPropagation()}
+            style={[styles.titleEditor, { backgroundColor: theme.surface, borderColor: theme.border }]}
+          >
+            <View style={{ gap: 4 }}>
+              <AppText variant="title">Rename meeting</AppText>
+              <AppText variant="meta" muted>Use a short title you can find later.</AppText>
+            </View>
+            <TextInput
+              accessibilityLabel="Meeting title"
+              autoFocus
+              maxLength={MEETING_TITLE_MAX_LENGTH}
+              onChangeText={setTitleDraft}
+              onSubmitEditing={() => void saveTitle()}
+              placeholder="Meeting title"
+              placeholderTextColor={theme.textSoft}
+              returnKeyType="done"
+              selectTextOnFocus
+              value={titleDraft}
+              style={[styles.titleInput, { backgroundColor: theme.bg, borderColor: theme.border, color: theme.text }]}
+            />
+            <View style={styles.modalActions}>
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="Cancel rename"
+                onPress={() => setTitleEditorOpen(false)}
+                style={styles.modalButton}
+              >
+                <AppText variant="bodyStrong" color={theme.textSoft}>Cancel</AppText>
+              </Pressable>
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="Save meeting title"
+                disabled={savingTitle}
+                onPress={() => void saveTitle()}
+                style={[styles.modalButton, { backgroundColor: theme.primary, opacity: savingTitle ? 0.6 : 1 }]}
+              >
+                <AppText variant="bodyStrong" color={theme.primaryForeground}>{savingTitle ? 'Saving…' : 'Save'}</AppText>
+              </Pressable>
+            </View>
+          </Pressable>
+        </Pressable>
+      </KeyboardAvoidingView>
+    </Modal>
+  );
+
+  const topBar = (
+    <TopBar
+      title={meeting?.title ?? 'Meeting'}
+      back
+      right={
+        <View style={styles.topBarActions}>
+          <MeetingIconButton icon="create-outline" label="Rename meeting" onPress={openTitleEditor} disabled={!meeting} />
+          <MeetingIconButton icon="trash-outline" label="Delete meeting" onPress={confirmDelete} disabled={!meeting} destructive />
+        </View>
+      }
+    />
+  );
+
   const header = (
-    <View style={{ gap: space.xl, paddingHorizontal: 16, paddingTop: space.xl, paddingBottom: space.xl }}>
+    <View style={{ gap: space.lg, paddingHorizontal: 16, paddingTop: space.lg, paddingBottom: space.lg }}>
       {meeting ? (
-        <View style={{ gap: 8 }}>
+        <View style={{ gap: space.sm }}>
           <AppText variant="meta" muted>
             {formatDate(meeting.startedAt)} · {formatTime(meeting.startedAt)} · {formatMeetingLength(meeting)}
-            {meeting.language ? ` · ${meeting.language}` : ''}
           </AppText>
-          <Chip
-            label={
-              meeting.summaryStatus === 'ready'
-                ? 'Notes ready'
-                : meeting.summaryStatus === 'running' || meeting.summaryStatus === 'queued'
-                  ? 'Writing your notes'
-                  : meeting.status === 'transcribing'
-                    ? 'Getting the text ready'
-                    : meeting.status === 'transcript_partial'
-                      ? 'Transcript needs recovery'
-                      : meeting.status === 'audio_expired_incomplete'
-                        ? 'Partial transcript saved'
-                    : meeting.status === 'interrupted'
-                      ? 'Recording was cut short'
-                      : transcriptSummary?.hasText
-                        ? 'Transcript saved'
-                        : 'Audio saved'
-            }
-            tone={
-              meeting.summaryStatus === 'failed'
-                || meeting.status === 'interrupted'
-                || meeting.status === 'transcript_partial'
-                || meeting.status === 'audio_expired_incomplete'
-                ? 'warn'
-                : meeting.summaryStatus === 'ready'
-                  ? 'primary'
-                  : 'muted'
-            }
-          />
+          <View style={styles.chipRow}>
+            <Chip label={presentation?.label ?? 'Meeting saved'} tone={presentation?.tone ?? 'muted'} />
+            {meeting.language ? <Chip label={meeting.language} tone="muted" /> : null}
+          </View>
+          {hasCompleteTranscript ? (
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="Rewrite notes"
+              disabled={packetBusy || meeting.summaryStatus === 'running'}
+              onPress={() => void generatePacket()}
+              style={({ pressed }) => [styles.rewriteAction, { opacity: pressed ? 0.7 : 1 }]}
+            >
+              <Ionicons name="refresh-outline" size={19} color={theme.primary} />
+              <AppText variant="bodyStrong" color={theme.primary}>Rewrite notes</AppText>
+            </Pressable>
+          ) : null}
         </View>
       ) : null}
 
@@ -726,7 +868,10 @@ export default function MeetingDetail() {
         }}
       >
         <View style={{ flex: 1 }}>
-          <TabChip active={tab === 'overview'} label="Notes" onPress={() => setTab('overview')} />
+          <TabChip active={tab === 'notes'} label="Notes" onPress={() => setTab('notes')} />
+        </View>
+        <View style={{ flex: 1 }}>
+          <TabChip active={tab === 'todos'} label="To-dos" onPress={() => setTab('todos')} />
         </View>
         <View style={{ flex: 1 }}>
           <TabChip active={tab === 'transcript'} label="Transcript" onPress={() => setTab('transcript')} />
@@ -738,13 +883,15 @@ export default function MeetingDetail() {
   if (tab === 'transcript') {
     const hasText = transcriptSummary?.hasText ?? false;
     const hasAudio = !!meeting?.audioUri && meeting.segmentCount > 0 && audioAvailable;
+    const transcriptionActive = presentation?.phase === 'transcribing';
     return (
-      <KeyboardAvoidingView
-        style={{ flex: 1, backgroundColor: theme.bg }}
-        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-        keyboardVerticalOffset={topBarHeight}
-      >
-        <TopBar title={meeting?.title ?? 'Meeting'} back />
+      <>
+        <KeyboardAvoidingView
+          style={{ flex: 1, backgroundColor: theme.bg }}
+          behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+          keyboardVerticalOffset={topBarHeight}
+        >
+          {topBar}
         <FlashList
           data={blocks}
           keyExtractor={(item) => item.blockId}
@@ -757,8 +904,38 @@ export default function MeetingDetail() {
               {header}
               <View style={{ gap: space.lg, paddingHorizontal: 16, paddingBottom: space.lg }}>
                 <Card style={{ gap: space.md }}>
-                  <SectionLabel>Transcript</SectionLabel>
-                  {!hasText && !repassing ? (
+                  <View style={styles.sectionHeader}>
+                    <SectionLabel>Transcript</SectionLabel>
+                    <View style={styles.inlineIconActions}>
+                      <MeetingIconButton
+                        icon="copy-outline"
+                        label={copyingTranscript ? 'Copying transcript' : 'Copy transcript'}
+                        onPress={() => void copyTranscript()}
+                        disabled={copyingTranscript || !hasText}
+                      />
+                      <MeetingIconButton
+                        icon="share-outline"
+                        label={sharing ? 'Preparing meeting share' : 'Share meeting'}
+                        onPress={() => void shareMeeting()}
+                        disabled={sharing || !hasText}
+                      />
+                    </View>
+                  </View>
+                  {transcriptionActive && !repassing ? (
+                    <Banner tone="info" style={{ gap: space.md }}>
+                      <View style={styles.busy}>
+                        <ActivityIndicator color={theme.primary} />
+                        <AppText variant="body" muted style={{ flex: 1 }}>
+                          {presentation?.detail ?? 'Saved audio is being transcribed on this phone.'}
+                        </AppText>
+                      </View>
+                      {presentation?.progress != null ? (
+                        <View style={{ height: 6, borderRadius: radius.pill, backgroundColor: theme.mutedSoft, overflow: 'hidden' }}>
+                          <View style={{ width: `${presentation.progress * 100}%`, height: '100%', backgroundColor: theme.primary }} />
+                        </View>
+                      ) : null}
+                    </Banner>
+                  ) : !hasText && !repassing ? (
                     <AppText variant="body" muted>No transcript blocks are saved for this recording yet.</AppText>
                   ) : null}
                   {repassing ? (
@@ -771,18 +948,14 @@ export default function MeetingDetail() {
                       </View>
                       <ActionLink label="Stop" color={theme.primary} onPress={cancelRepass} />
                     </Banner>
-                  ) : hasAudio ? (
+                  ) : hasAudio && !transcriptionActive ? (
                     <ActionLink
-                      label={hasText ? 'Re-transcribe from saved audio' : 'Transcribe from saved audio'}
+                      label={hasText ? 'Re-transcribe from saved audio' : presentation?.canRetryTranscript ? 'Retry transcription' : 'Transcribe from saved audio'}
                       color={theme.primary}
                       onPress={() => void startRepass()}
                     />
                   ) : null}
                   {repassError ? <AppText variant="body" color={theme.warn}>{repassError}</AppText> : null}
-                  <View style={{ flexDirection: 'row', gap: space.lg, flexWrap: 'wrap' }}>
-                    <ActionLink label={copyingTranscript ? 'Copying...' : 'Copy transcript'} color={theme.primary} onPress={() => void copyTranscript()} />
-                    <ActionLink label={sharing ? 'Preparing...' : 'Save a copy'} color={theme.primary} onPress={() => void shareMeeting()} />
-                  </View>
                 </Card>
 
                 <View style={{ flexDirection: 'row', alignItems: 'center', gap: space.md, flexWrap: 'wrap' }}>
@@ -793,7 +966,11 @@ export default function MeetingDetail() {
                       color={hasText ? theme.primary : theme.warn}
                     />
                     <AppText variant="meta" muted>
-                      {hasText ? `${transcriptSummary?.blockCount ?? blocks.length} transcript blocks` : 'No transcript'}
+                      {hasText
+                        ? `${transcriptSummary?.blockCount ?? blocks.length} transcript blocks`
+                        : transcriptionActive
+                          ? 'Transcription in progress'
+                          : 'No transcript'}
                       {hasAudio ? ' · audio kept' : ''}
                     </AppText>
                   </View>
@@ -806,13 +983,71 @@ export default function MeetingDetail() {
           }
           ListEmptyComponent={
             <View style={{ paddingHorizontal: 16, paddingBottom: space.xl }}>
-              <AppText variant="body" muted>Maina will show timestamped transcript blocks here once they exist.</AppText>
+              <AppText variant="body" muted>
+                {transcriptionActive
+                  ? 'Transcript blocks will appear after each local audio window is safely committed.'
+                  : 'No transcript blocks are available.'}
+              </AppText>
             </View>
           }
           ListFooterComponent={loadingMore ? <View style={{ padding: space.lg }}><ActivityIndicator color={theme.primary} /></View> : null}
           contentContainerStyle={{ paddingBottom: contentBottomPadding }}
         />
-      </KeyboardAvoidingView>
+        </KeyboardAvoidingView>
+        {titleEditor}
+      </>
+    );
+  }
+
+  if (tab === 'todos') {
+    return (
+      <>
+        <KeyboardAvoidingView
+          style={{ flex: 1, backgroundColor: theme.bg }}
+          behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+          keyboardVerticalOffset={topBarHeight}
+        >
+          {topBar}
+          <FlashList
+            data={['todos']}
+            keyExtractor={(item) => item}
+            ListHeaderComponent={header}
+            contentContainerStyle={{ paddingBottom: contentBottomPadding, paddingHorizontal: 16 }}
+            renderItem={() => (
+              <Card style={{ gap: space.lg, marginBottom: space.lg }}>
+                <View style={styles.sectionHeader}>
+                  <AppText variant="title">To-dos</AppText>
+                  <ActionLink label="Open all" color={theme.primary} onPress={() => router.push('/todos')} />
+                </View>
+                <View style={{ gap: space.md }}>
+                  {todos.length ? todos.map((todo) => (
+                    <TodoPreviewRow
+                      key={todo.id}
+                      todo={todo}
+                      onToggle={(value) => void updateTodoDone(todo.id, value).then(() => load()).then(() => refresh())}
+                      onDelete={() => void deleteTodo(todo.id).then(() => load()).then(() => refresh())}
+                    />
+                  )) : <AppText variant="body" muted>No to-dos yet.</AppText>}
+                </View>
+                <View style={{ gap: space.sm }}>
+                  <TextInput
+                    accessibilityLabel="New to-do"
+                    value={manualTodo}
+                    onChangeText={setManualTodo}
+                    placeholder="Add your own next step"
+                    placeholderTextColor={theme.textSoft}
+                    returnKeyType="done"
+                    onSubmitEditing={() => void addManualTodo()}
+                    style={[styles.todoInput, { borderColor: theme.border, backgroundColor: theme.surface, color: theme.text }]}
+                  />
+                  <PrimaryButton label="Add to-do" onPress={() => void addManualTodo()} />
+                </View>
+              </Card>
+            )}
+          />
+        </KeyboardAvoidingView>
+        {titleEditor}
+      </>
     );
   }
 
@@ -821,17 +1056,16 @@ export default function MeetingDetail() {
     'cloud',
     'decisions',
     'questions',
-    'todos',
-    'meta',
   ] as const;
 
   return (
-    <KeyboardAvoidingView
-      style={{ flex: 1, backgroundColor: theme.bg }}
-      behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-      keyboardVerticalOffset={topBarHeight}
-    >
-      <TopBar title={meeting?.title ?? 'Meeting'} back />
+    <>
+      <KeyboardAvoidingView
+        style={{ flex: 1, backgroundColor: theme.bg }}
+        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+        keyboardVerticalOffset={topBarHeight}
+      >
+        {topBar}
       <FlashList
         data={overviewSections}
         keyExtractor={(item) => item}
@@ -841,11 +1075,11 @@ export default function MeetingDetail() {
           if (item === 'summary') {
             return (
               <Card style={{ gap: space.md, marginBottom: space.lg }}>
-                <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', gap: space.md }}>
+                <View style={styles.sectionHeader}>
                   <AppText variant="title">Notes</AppText>
-                  <View style={{ flexDirection: 'row', gap: space.lg, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
-                    <ActionLink label="Copy summary" color={theme.primary} onPress={() => void copyText('Summary', meeting?.summary ?? '')} disabled={!meeting?.summary} />
-                    <ActionLink label={sharing ? 'Preparing...' : 'Save a copy'} color={theme.primary} onPress={() => void shareMeeting()} />
+                  <View style={styles.inlineIconActions}>
+                    <MeetingIconButton icon="copy-outline" label="Copy notes" onPress={() => void copyText('Summary', meeting?.summary ?? '')} disabled={!meeting?.summary} />
+                    <MeetingIconButton icon="share-outline" label={sharing ? 'Preparing meeting share' : 'Share meeting'} onPress={() => void shareMeeting()} disabled={sharing || !meeting?.summary} />
                   </View>
                 </View>
                 {packetBusy || meeting?.summaryStatus === 'queued' || meeting?.summaryStatus === 'running' ? (
@@ -870,13 +1104,30 @@ export default function MeetingDetail() {
                     </View>
                   </Banner>
                 ) : meeting?.summary ? (
-                  <AppText variant="body">{meeting.summary}</AppText>
+                  <AppText variant="body">{markdownToReadableText(meeting.summary)}</AppText>
+                ) : presentation?.phase === 'transcribing' ? (
+                  <Banner tone="info" style={{ gap: space.md }}>
+                    <View style={styles.busy}>
+                      <ActivityIndicator color={theme.primary} />
+                      <View style={{ flex: 1, gap: 4 }}>
+                        <AppText variant="bodyStrong">Getting the text ready</AppText>
+                        <AppText variant="body" muted>{presentation.detail}</AppText>
+                      </View>
+                    </View>
+                    {presentation.progress != null ? (
+                      <View style={{ height: 6, borderRadius: radius.pill, backgroundColor: theme.mutedSoft, overflow: 'hidden' }}>
+                        <View style={{ width: `${presentation.progress * 100}%`, height: '100%', backgroundColor: theme.primary }} />
+                      </View>
+                    ) : null}
+                  </Banner>
                 ) : (
                   <Banner tone="info" style={{ gap: space.md }}>
                     <AppText variant="title">{transcriptSummary?.hasText ? 'Transcript saved' : 'Audio saved'}</AppText>
                     <AppText variant="body" muted>
                       {!transcriptSummary?.hasText
-                        ? 'No words were saved yet. You can retry from the Transcript tab while the audio is still on this phone.'
+                        ? presentation?.phase === 'transcript_partial'
+                          ? 'Some saved audio needs another transcription pass.'
+                          : 'No transcript text is available for this recording.'
                         : 'Maina will write notes automatically once this phone is connected to Maina Cloud.'}
                     </AppText>
                     {transcriptSummary?.hasText && hasCompleteTranscript ? (
@@ -990,59 +1241,12 @@ export default function MeetingDetail() {
             );
           }
 
-          if (item === 'todos') {
-            return (
-              <Card style={{ gap: space.md, marginBottom: space.lg }}>
-                <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
-                  <AppText variant="heading">To-Dos</AppText>
-                  <ActionLink label="Open all" color={theme.primary} onPress={() => router.push('/todos')} />
-                </View>
-                <View style={{ gap: space.md }}>
-                  {todos.length ? todos.map((todo) => (
-                    <TodoPreviewRow
-                      key={todo.id}
-                      todo={todo}
-                      onToggle={(value) => void updateTodoDone(todo.id, value).then(() => load()).then(() => refresh())}
-                      onDelete={() => void deleteTodo(todo.id).then(() => load()).then(() => refresh())}
-                    />
-                  )) : <AppText variant="body" muted>No to-dos yet.</AppText>}
-                </View>
-                <View style={{ gap: space.sm }}>
-                  <TextInput
-                    value={manualTodo}
-                    onChangeText={setManualTodo}
-                    placeholder="Add your own next step"
-                    placeholderTextColor={theme.textSoft}
-                    style={{
-                      borderWidth: 1,
-                      borderColor: theme.border,
-                      borderRadius: radius.md,
-                      backgroundColor: theme.surface,
-                      color: theme.text,
-                      paddingHorizontal: 16,
-                      paddingVertical: space.md,
-                    }}
-                  />
-                  <PrimaryButton label="Add to-do" onPress={() => void addManualTodo()} />
-                </View>
-              </Card>
-            );
-          }
-
-          return (
-            <Card style={{ gap: space.md, marginBottom: space.lg }}>
-              <AppText variant="heading">Save & manage</AppText>
-              <View style={{ flexDirection: 'row', gap: space.lg, flexWrap: 'wrap' }}>
-                <ActionLink label={copyingTranscript ? 'Copying...' : 'Copy transcript'} color={theme.primary} onPress={() => void copyTranscript()} />
-                <ActionLink label={sharing ? 'Preparing...' : 'Save a copy'} color={theme.primary} onPress={() => void shareMeeting()} />
-                <ActionLink label="Write notes again" color={theme.primary} onPress={() => void generatePacket()} disabled={packetBusy || meeting?.summaryStatus === 'running'} />
-                <ActionLink label="Delete this recording" color={theme.destructive} onPress={confirmDelete} />
-              </View>
-            </Card>
-          );
+          return null;
         }}
       />
-    </KeyboardAvoidingView>
+      </KeyboardAvoidingView>
+      {titleEditor}
+    </>
   );
 }
 
@@ -1063,6 +1267,85 @@ const styles = StyleSheet.create({
     borderRadius: radius.pill,
     alignItems: 'center',
     justifyContent: 'center',
+  },
+  topBarActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 2,
+  },
+  iconAction: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  inlineIconActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 2,
+  },
+  sectionHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    gap: space.md,
+  },
+  chipRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    alignItems: 'center',
+    gap: space.sm,
+  },
+  rewriteAction: {
+    minHeight: 44,
+    alignSelf: 'flex-start',
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: space.sm,
+    paddingRight: space.md,
+  },
+  todoInput: {
+    minHeight: 48,
+    borderWidth: 1,
+    borderRadius: radius.md,
+    paddingHorizontal: 16,
+    paddingVertical: space.md,
+  },
+  modalKeyboard: {
+    flex: 1,
+  },
+  modalScrim: {
+    flex: 1,
+    justifyContent: 'center',
+    padding: space.xl,
+  },
+  titleEditor: {
+    borderWidth: 1,
+    borderRadius: radius.lg,
+    padding: space.xl,
+    gap: space.lg,
+  },
+  titleInput: {
+    minHeight: 52,
+    borderWidth: 1,
+    borderRadius: radius.md,
+    paddingHorizontal: 16,
+    paddingVertical: space.md,
+    fontSize: 17,
+  },
+  modalActions: {
+    flexDirection: 'row',
+    justifyContent: 'flex-end',
+    gap: space.sm,
+  },
+  modalButton: {
+    minWidth: 96,
+    minHeight: 48,
+    borderRadius: radius.pill,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: space.lg,
   },
   audioTag: {
     flexDirection: 'row',
