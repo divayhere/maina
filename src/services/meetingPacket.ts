@@ -4,7 +4,6 @@ import {
   getTranscriptPage,
   listMeetingTodos,
   listMeetingsEligibleForSummaryQueue,
-  listMeetingsNeedingSummary,
   replaceMeetingTodos,
   saveMeetingPacket,
   setMeetingSummaryState,
@@ -21,6 +20,7 @@ import { mainaKnowledgeCloudSourceKey } from '@/services/mainaKnowledgeCloudCore
 import { MainaCloudApiError, getMainaCloudSession, mainaCloudFetch } from '@/services/mainaCloudSession';
 
 const inflight = new Map<string, Promise<void>>();
+let executionTail: Promise<void> = Promise.resolve();
 const TRANSCRIPT_PAGE_SIZE = 100;
 const MAX_AUTOMATIC_RETRIES = 3;
 const RETRY_COOLDOWN_MS = 15 * 60 * 1000;
@@ -278,7 +278,14 @@ export function runMeetingPacketGeneration(meetingId: string, options?: { regene
   const key = `${meetingId}:${options?.regenerate ? 'regenerate' : 'normal'}`;
   const existing = inflight.get(key);
   if (existing) return existing;
-  const task = reconcileMeetingPacket(meetingId, options).finally(() => inflight.delete(key));
+  // Expo SQLite exposes one shared native connection. Applying multiple ready
+  // packets concurrently can overlap todo replacement transactions. Keep
+  // network/status/application work ordered; meetings still queue instantly.
+  const task = executionTail
+    .catch(() => {})
+    .then(() => reconcileMeetingPacket(meetingId, options))
+    .finally(() => inflight.delete(key));
+  executionTail = task.then(() => {}, () => {});
   inflight.set(key, task);
   return task;
 }
@@ -294,7 +301,17 @@ export async function maybeQueueMeetingPacket(meetingId: string): Promise<void> 
 
 export async function reconcilePendingMeetingPackets(): Promise<void> {
   if (!await getMainaCloudSession()) return;
-  const meetings = await listMeetingsNeedingSummary();
+  const now = Date.now();
+  const meetings = (await listMeetingsEligibleForSummaryQueue()).filter((meeting) => {
+    if (meeting.summaryStatus === 'queued' || meeting.summaryStatus === 'running') return true;
+    // A server-side transient can become ready after the app has already
+    // persisted `failed`. Revisit only bounded, cooled-down jobs so recovery is
+    // automatic without polling every historical failure forever.
+    return meeting.summaryStatus === 'failed'
+      && !!meeting.cloudNotesJobId
+      && (meeting.cloudNotesRetryCount ?? 0) < MAX_AUTOMATIC_RETRIES
+      && (!meeting.cloudNotesLastPolledAt || now - meeting.cloudNotesLastPolledAt >= RETRY_COOLDOWN_MS);
+  });
   for (const meeting of meetings) void runMeetingPacketGeneration(meeting.id);
 }
 

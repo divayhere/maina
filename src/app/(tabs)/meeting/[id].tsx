@@ -49,6 +49,7 @@ import { retryNativeMeetingTranscription } from '@/services/meetingCaptureLifecy
 import { buildMeetingExportText, shareMeetingExport } from '@/services/transcriptExport';
 import { useMeetings } from '@/state/meetingsStore';
 import { formatDate, formatDuration, formatTime } from '@/utils/format';
+import { markdownToReadableText } from '@/utils/plainText';
 
 const PAGE_SIZE = 60;
 
@@ -870,7 +871,7 @@ export default function MeetingDetail() {
                     </View>
                   </Banner>
                 ) : meeting?.summary ? (
-                  <AppText variant="body">{meeting.summary}</AppText>
+                  <AppText variant="body">{markdownToReadableText(meeting.summary)}</AppText>
                 ) : (
                   <Banner tone="info" style={{ gap: space.md }}>
                     <AppText variant="title">{transcriptSummary?.hasText ? 'Transcript saved' : 'Audio saved'}</AppText>

@@ -31,6 +31,11 @@ export async function requestNativeCapturePermission(): Promise<boolean> {
   return MainaRecorder.requestIOSMicrophonePermission();
 }
 
+export function getIOSAutomationScenario(): string | null {
+  if (Platform.OS !== 'ios' || !MainaRecorder?.getIOSAutomationScenario) return null;
+  return MainaRecorder.getIOSAutomationScenario();
+}
+
 export async function startRecordingForegroundService(): Promise<void> {
   // Android needs a foreground service to retain microphone ownership. iOS
   // retains an active AVAudioSession through the `audio` background mode, so
@@ -110,6 +115,19 @@ export async function acknowledgeNativePostProcessingResult(meetingId: string, r
 
 export function getNativeCaptureStatus(): NativeCaptureStatus | null {
   if (!MainaRecorder) return null;
+  return MainaRecorder.getNativeCaptureStatus();
+}
+
+/**
+ * Reads capture state without blocking React Native's JavaScript thread on
+ * iOS. Android keeps its existing synchronous service snapshot because its
+ * native implementation is already non-blocking and lock-screen qualified.
+ */
+export async function getNativeCaptureStatusAsync(): Promise<NativeCaptureStatus | null> {
+  if (!MainaRecorder) return null;
+  if (Platform.OS === 'ios' && MainaRecorder.getNativeCaptureStatusAsync) {
+    return MainaRecorder.getNativeCaptureStatusAsync();
+  }
   return MainaRecorder.getNativeCaptureStatus();
 }
 

@@ -78,3 +78,21 @@ This hygiene change does not alter Maina Knowledge Cloud endpoints, payload
 schemas, token names, source keys, or sync semantics. Before any future change
 that affects those, update the shared MKC integration registry and workstate
 from an environment that can access the backend repository.
+
+## iOS staging release
+
+The qualified iOS staging target is the USB iPhone 15 recorded in
+`scripts/build-install-ios-staging.sh`. Do not use iPhone Mirroring or another
+attached iPhone for automated qualification.
+
+After `npm run ios:prepare`, build and install with:
+
+```bash
+scripts/build-install-ios-staging.sh
+```
+
+The script requires 8 GB free before Xcode starts, builds into external
+DerivedData, verifies app version/build and code signing, and installs only to
+the explicit CoreDevice identifier. When a Sentry CLI token is absent it skips
+debug-symbol upload for the local staging build; it does not remove runtime
+Sentry from Maina.

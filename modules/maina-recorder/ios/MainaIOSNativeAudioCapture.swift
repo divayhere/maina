@@ -200,7 +200,21 @@ final class MainaIOSNativeAudioCapture: NSObject, AVAudioRecorderDelegate {
         .appendingPathComponent(partial.lastPathComponent.replacingOccurrences(of: ".partial.wav", with: ".wav"))
       guard !FileManager.default.fileExists(atPath: final.path) else { invalid += 1; continue }
       do {
-        _ = try AVAudioFile(forReading: partial)
+        // AVAudioRecorder writes PCM continuously but updates the RIFF/data
+        // lengths only during an orderly stop. After a process kill the audio
+        // payload is durable while both header lengths can still be zero.
+        // Repair those two bounded fields before asking AVFoundation to read it.
+        guard Self.repairInterruptedPcmWav(at: partial), Self.pcmWavDataBytes(at: partial) > 0 else {
+          try? FileManager.default.removeItem(at: partial)
+          invalid += 1
+          continue
+        }
+        let readable = try AVAudioFile(forReading: partial)
+        guard readable.length > 0 else {
+          try? FileManager.default.removeItem(at: partial)
+          invalid += 1
+          continue
+        }
         try FileManager.default.moveItem(at: partial, to: final)
         recovered += 1
       } catch {
@@ -240,14 +254,18 @@ final class MainaIOSNativeAudioCapture: NSObject, AVAudioRecorderDelegate {
 
   func durations(_ uris: [String]) -> [String: Any] {
     Dictionary(uniqueKeysWithValues: uris.map { uri in
+      let url = Self.fileURL(uri)
+      // Also repairs a malformed file moved by an older staging build. This is
+      // idempotent for a healthy WAV and lets upgrades recover existing audio.
+      _ = Self.repairInterruptedPcmWav(at: url)
       let duration: Double?
       do {
-        let file = try AVAudioFile(forReading: Self.fileURL(uri))
+        let file = try AVAudioFile(forReading: url)
         duration = file.length > 0 && file.fileFormat.sampleRate > 0
           ? Double(file.length) * 1_000 / file.fileFormat.sampleRate
-          : nil
+          : Self.pcmWavDurationMs(at: url)
       } catch {
-        duration = nil
+        duration = Self.pcmWavDurationMs(at: url)
       }
       return (uri, duration ?? NSNull())
     })
@@ -255,8 +273,14 @@ final class MainaIOSNativeAudioCapture: NSObject, AVAudioRecorderDelegate {
 
   func inputs() -> [[String: Any]] {
     queue.sync {
-      audioSession.currentRoute.inputs.enumerated().map { index, input in
-        ["id": index, "name": input.portName, "type": input.portType.rawValue]
+      // `currentRoute.inputs` is empty while the audio session is idle. Settings
+      // and Diagnostics still need to show the microphones iOS can select, so
+      // fall back to `availableInputs` until a recording owns the active route.
+      let inputs = audioSession.currentRoute.inputs.isEmpty
+        ? (audioSession.availableInputs ?? [])
+        : audioSession.currentRoute.inputs
+      return inputs.map { input in
+        ["id": input.uid.hashValue, "name": input.portName, "type": input.portType.rawValue]
       }
     }
   }
@@ -307,7 +331,8 @@ final class MainaIOSNativeAudioCapture: NSObject, AVAudioRecorderDelegate {
     currentPartialURL = nil
     guard let partial else { return }
     let bytes = Self.fileBytes(at: partial)
-    guard preserve, bytes > 44 else {
+    let payloadBytes = Self.pcmWavDataBytes(at: partial)
+    guard preserve, payloadBytes > 0 else {
       try? FileManager.default.removeItem(at: partial)
       appendJournal("chunk-discarded", fields: ["index": chunkIndex, "reason": reason])
       return
@@ -560,6 +585,125 @@ final class MainaIOSNativeAudioCapture: NSObject, AVAudioRecorderDelegate {
 
   private static func fileBytes(at url: URL) -> Int64 {
     ((try? FileManager.default.attributesOfItem(atPath: url.path)[.size]) as? NSNumber)?.int64Value ?? 0
+  }
+
+  /** Return the PCM payload length from Maina's RIFF/WAV file.
+   *
+   * AVAudioRecorder reserves a 4 KiB header containing JUNK/FLLR chunks, so a
+   * fixed 44-byte WAV assumption is incorrect. The `data` chunk is located by
+   * walking RIFF chunk boundaries and, for an interrupted file whose declared
+   * data length is still zero, the durable bytes after that header are used.
+   */
+  private static func pcmWavDataBytes(at url: URL) -> Int64 {
+    guard let layout = pcmWavLayout(at: url) else { return 0 }
+    return layout.payloadBytes
+  }
+
+  private static func pcmWavDurationMs(at url: URL) -> Double? {
+    guard let layout = pcmWavLayout(at: url), layout.sampleRate > 0, layout.blockAlign > 0 else { return nil }
+    let frames = Double(layout.payloadBytes) / Double(layout.blockAlign)
+    return frames > 0 ? frames * 1_000 / Double(layout.sampleRate) : nil
+  }
+
+  /** Repair only the two size fields that an orderly AVAudioRecorder stop
+   * normally finalizes. Existing audio bytes and format metadata are untouched.
+   */
+  private static func repairInterruptedPcmWav(at url: URL) -> Bool {
+    guard let layout = pcmWavLayout(at: url), layout.payloadBytes > 0,
+      layout.payloadBytes <= Int64(UInt32.max), layout.fileBytes >= 8,
+      layout.fileBytes - 8 <= Int64(UInt32.max)
+    else { return false }
+
+    let expectedData = UInt32(layout.payloadBytes)
+    let expectedRiff = UInt32(layout.fileBytes - 8)
+    if layout.declaredDataBytes == expectedData && layout.declaredRiffBytes == expectedRiff { return true }
+
+    guard let handle = try? FileHandle(forWritingTo: url) else { return false }
+    defer { try? handle.close() }
+    do {
+      try handle.seek(toOffset: 4)
+      handle.write(littleEndianData(expectedRiff))
+      try handle.seek(toOffset: UInt64(layout.dataSizeOffset))
+      handle.write(littleEndianData(expectedData))
+      try handle.synchronize()
+      return true
+    } catch {
+      return false
+    }
+  }
+
+  private struct PcmWavLayout {
+    let fileBytes: Int64
+    let dataSizeOffset: Int
+    let payloadBytes: Int64
+    let declaredDataBytes: UInt32
+    let declaredRiffBytes: UInt32
+    let sampleRate: UInt32
+    let blockAlign: UInt16
+  }
+
+  private static func pcmWavLayout(at url: URL) -> PcmWavLayout? {
+    let fileBytes = Self.fileBytes(at: url)
+    guard fileBytes >= 20, let handle = try? FileHandle(forReadingFrom: url) else { return nil }
+    defer { try? handle.close() }
+    let data: Data
+    do {
+      guard let prefix = try handle.read(upToCount: Int(min(fileBytes, 1_048_576))) else { return nil }
+      data = prefix
+    } catch {
+      return nil
+    }
+    guard data.count >= 20,
+      String(data: data[0..<4], encoding: .ascii) == "RIFF",
+      String(data: data[8..<12], encoding: .ascii) == "WAVE",
+      let declaredRiff = uint32LE(data, at: 4)
+    else { return nil }
+
+    var cursor = 12
+    var sampleRate: UInt32 = 0
+    var blockAlign: UInt16 = 0
+    while cursor + 8 <= data.count {
+      guard let size = uint32LE(data, at: cursor + 4) else { return nil }
+      let id = String(data: data[cursor..<(cursor + 4)], encoding: .ascii)
+      if id == "fmt ", cursor + 8 + Int(size) <= data.count, size >= 16 {
+        sampleRate = uint32LE(data, at: cursor + 12) ?? 0
+        blockAlign = uint16LE(data, at: cursor + 20) ?? 0
+      }
+      if id == "data" {
+        let payloadOffset = cursor + 8
+        let durablePayload = max(0, fileBytes - Int64(payloadOffset))
+        return PcmWavLayout(
+          fileBytes: fileBytes,
+          dataSizeOffset: cursor + 4,
+          payloadBytes: durablePayload,
+          declaredDataBytes: size,
+          declaredRiffBytes: declaredRiff,
+          sampleRate: sampleRate,
+          blockAlign: blockAlign
+        )
+      }
+      let paddedSize = Int(size) + (Int(size) & 1)
+      cursor += 8 + paddedSize
+    }
+    return nil
+  }
+
+  private static func uint16LE(_ data: Data, at offset: Int) -> UInt16? {
+    guard offset >= 0, offset + 2 <= data.count else { return nil }
+    return UInt16(data[offset]) | (UInt16(data[offset + 1]) << 8)
+  }
+
+  private static func uint32LE(_ data: Data, at offset: Int) -> UInt32? {
+    guard offset >= 0, offset + 4 <= data.count else { return nil }
+    return UInt32(data[offset])
+      | (UInt32(data[offset + 1]) << 8)
+      | (UInt32(data[offset + 2]) << 16)
+      | (UInt32(data[offset + 3]) << 24)
+  }
+
+  private static func littleEndianData<T: FixedWidthInteger>(_ value: T) -> Data {
+    var littleEndian = value.littleEndian
+    return Data(bytes: &littleEndian, count: MemoryLayout<T>.size)
   }
 
   private enum CaptureError: LocalizedError {

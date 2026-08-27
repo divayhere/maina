@@ -13,7 +13,7 @@ import { completedCaptureDurationRepair } from '@/core/recording/checkpoint';
 import { hasCompleteNativeTranscript, terminalNativeMeetingRepair } from '@/core/recording/nativeCaptureReconciliation';
 import {
   acknowledgeNativePostProcessingResult,
-  getNativeCaptureStatus,
+  getNativeCaptureStatusAsync,
   readNativePostProcessingResult,
   startNativePostProcessing,
 } from '@/hardware/recording/foreground';
@@ -221,7 +221,7 @@ async function launchNativePostProcessing(
 }
 
 async function reconcilePendingNativeMeetingWorkInternal(): Promise<number> {
-  const nativeStatus = getNativeCaptureStatus();
+  const nativeStatus = await getNativeCaptureStatusAsync().catch(() => null);
   const meetings = await listMeetings();
   let resumed = 0;
 

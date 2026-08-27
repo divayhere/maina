@@ -37,6 +37,13 @@ public final class MainaRecorderModule: Module {
       ]
     }
 
+    // Staging qualification hook. The value exists only when the process is
+    // launched explicitly from the USB test harness with an environment flag;
+    // normal user launches always return nil and cannot enter automation.
+    Function("getIOSAutomationScenario") { () -> String? in
+      ProcessInfo.processInfo.environment["MAINA_AUTOMATION_SCENARIO"]
+    }
+
     AsyncFunction("requestIOSMicrophonePermission") { (promise: Promise) in
       AVAudioSession.sharedInstance().requestRecordPermission { granted in
         promise.resolve(granted)
@@ -46,7 +53,7 @@ public final class MainaRecorderModule: Module {
     Function("startForegroundSession") { true }
     Function("stopForegroundSession") { }
     Function("setCaptureState") { (_: String) in }
-    Function("startNativeCapture") { (meetingId: String, directory: String, _: String, chunkDurationMs: Int, meetingStartedAt: Double) in
+    AsyncFunction("startNativeCapture") { (meetingId: String, directory: String, _: String, chunkDurationMs: Int, meetingStartedAt: Double) in
       try self.capture.start(
         meetingId: meetingId,
         directoryValue: directory,
@@ -54,18 +61,22 @@ public final class MainaRecorderModule: Module {
         meetingStartedAt: meetingStartedAt
       )
     }
-    Function("pauseNativeCapture") { try self.capture.pause() }
-    Function("resumeNativeCapture") { try self.capture.resume() }
-    Function("stopNativeCapture") { self.capture.stop() }
-    Function("abortNativeCapture") { self.capture.abort() }
+    AsyncFunction("pauseNativeCapture") { try self.capture.pause() }
+    AsyncFunction("resumeNativeCapture") { try self.capture.resume() }
+    AsyncFunction("stopNativeCapture") { self.capture.stop() }
+    AsyncFunction("abortNativeCapture") { self.capture.abort() }
     Function("getNativeCaptureStatus") { self.capture.status() }
-    Function("inspectNativeCaptureDirectory") { (directory: String, recoverPartials: Bool) in
+    // `status()` serializes against the capture queue. Exposing an async form
+    // keeps that wait off React Native's JavaScript thread while AVAudioSession
+    // is opening, rotating, or recovering an input route.
+    AsyncFunction("getNativeCaptureStatusAsync") { self.capture.status() }
+    AsyncFunction("inspectNativeCaptureDirectory") { (directory: String, recoverPartials: Bool) in
       self.capture.inspectDirectory(directory, recoverPartials: recoverPartials)
     }
-    Function("deleteNativeCaptureDirectory") { (directory: String) in
+    AsyncFunction("deleteNativeCaptureDirectory") { (directory: String) in
       self.capture.deleteDirectory(directory)
     }
-    Function("getPcmWavDurationsMs") { (uris: [String]) in self.capture.durations(uris) }
+    AsyncFunction("getPcmWavDurationsMs") { (uris: [String]) in self.capture.durations(uris) }
     Function("getAudioInputs") { self.capture.inputs() }
     Function("repairWavFiles") { (_: [String]) in 0 }
 
@@ -78,7 +89,7 @@ public final class MainaRecorderModule: Module {
         }
       }
     }
-    Function("releaseQwenAsr") { self.qwen.release() }
+    AsyncFunction("releaseQwenAsr") { self.qwen.release() }
     Function("startNativePostProcessing") { (_: [String: Any]) in
       throw NSError(domain: "MainaRecorder", code: 1002, userInfo: [NSLocalizedDescriptionKey: "The iOS local ASR runtime has not been installed yet."])
     }

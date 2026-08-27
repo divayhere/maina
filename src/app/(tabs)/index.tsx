@@ -12,6 +12,7 @@ import { radius, space } from '@/design/tokens';
 import { describeMainaKnowledgeCloudSyncStatus } from '@/services/mainaKnowledgeCloudCore';
 import { useMeetings } from '@/state/meetingsStore';
 import { formatDate, formatDuration, formatTime } from '@/utils/format';
+import { markdownToReadableText } from '@/utils/plainText';
 
 function describeTranscriptionProgress(item: Meeting): { detail?: string; progress?: number } {
   if (item.transcriptionWindowCount > 0) {
@@ -85,7 +86,7 @@ function MeetingRow({ item }: { item: Meeting }) {
 
           {item.summaryStatus === 'ready' && item.summary?.trim() ? (
             <AppText variant="body" muted numberOfLines={2}>
-              {item.summary.trim()}
+              {markdownToReadableText(item.summary)}
             </AppText>
           ) : (
             <AppText variant="body" muted numberOfLines={2}>

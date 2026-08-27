@@ -236,6 +236,7 @@ export interface DiagnosticRunSummary {
 
 interface MainaRecorderNativeModule {
   requestIOSMicrophonePermission?(): Promise<boolean>;
+  getIOSAutomationScenario?(): string | null;
   addListener(
     eventName: 'onHardwareTrigger',
     listener: (event: HardwareTriggerEvent) => void,
@@ -268,6 +269,7 @@ interface MainaRecorderNativeModule {
   readNativePostProcessingResult(meetingId: string): Promise<NativePostProcessingResult | null>;
   acknowledgeNativePostProcessingResult(meetingId: string, runId: string): Promise<{ acknowledged: boolean }>;
   getNativeCaptureStatus(): NativeCaptureStatus;
+  getNativeCaptureStatusAsync?(): Promise<NativeCaptureStatus>;
   inspectNativeCaptureDirectory(directory: string, recoverPartials: boolean): Promise<NativeCaptureDirectoryInspection>;
   deleteNativeCaptureDirectory(directory: string): Promise<boolean>;
   getQwenAsrStatus(): Promise<QwenAsrStatus>;

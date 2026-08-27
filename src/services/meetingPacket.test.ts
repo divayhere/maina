@@ -35,7 +35,7 @@ vi.mock('@/services/mainaCloudSession', () => ({
 }));
 
 import { buildTranscriptText } from '@/data/meetings';
-import { runMeetingPacketGeneration } from './meetingPacket';
+import { reconcilePendingMeetingPackets, runMeetingPacketGeneration } from './meetingPacket';
 
 describe('meetingPacket cloud broker integration', () => {
   let meeting: Record<string, unknown>;
@@ -54,6 +54,7 @@ describe('meetingPacket cloud broker integration', () => {
     mocks.listMeetingTodos.mockResolvedValue([{ text: 'Share revised timing.' }]);
     mocks.getAppConfig.mockResolvedValue({ autoSummarize: true });
     mocks.getSession.mockResolvedValue({ accessToken: 'opaque', user: { userId: 'u1', email: 'owner@maina.local' } });
+    mocks.listMeetingsEligibleForSummaryQueue.mockResolvedValue([]);
     mocks.updateMeeting.mockImplementation(async (_id: string, patch: Record<string, unknown>) => { meeting = { ...meeting, ...patch }; });
     mocks.saveMeetingPacket.mockResolvedValue(undefined);
     mocks.replaceMeetingTodos.mockResolvedValue(undefined);
@@ -96,5 +97,65 @@ describe('meetingPacket cloud broker integration', () => {
     expect(mocks.updateMeetingPipelineStage).toHaveBeenCalledWith(expect.objectContaining({
       meetingId: 'm1', stage: 'summary', state: 'running', completedUnits: 2, totalUnits: 5,
     }));
+  });
+
+  it('revisits a cooled-down failed cloud job and imports it when the server has recovered', async () => {
+    meeting = {
+      ...meeting,
+      summaryStatus: 'failed',
+      cloudNotesJobId: 'job-recovered',
+      cloudNotesRetryCount: 1,
+      cloudNotesLastPolledAt: Date.now() - 16 * 60 * 1000,
+    };
+    mocks.listMeetingsEligibleForSummaryQueue.mockResolvedValue([meeting]);
+    mocks.cloudFetch.mockResolvedValue(new Response(JSON.stringify({
+      job_id: 'job-recovered', source_key: 'meeting:maina:m1', packet_version: 'meeting-packet-v3', status: 'ready',
+      provider: 'google', model: 'managed-model', progress: { completed_sections: 1, total_sections: 1 },
+      packet: { title: 'Recovered notes', summary: 'The notes job recovered.', decisions: [], todos: [], open_questions: [] },
+    })));
+
+    await reconcilePendingMeetingPackets();
+    await vi.waitFor(() => expect(mocks.saveMeetingPacket).toHaveBeenCalled());
+
+    expect(mocks.cloudFetch).toHaveBeenCalledWith('/v1/meeting-packets/job-recovered');
+  });
+
+  it('does not hot-poll a recently observed failed cloud job', async () => {
+    meeting = {
+      ...meeting,
+      summaryStatus: 'failed',
+      cloudNotesJobId: 'job-recent',
+      cloudNotesRetryCount: 1,
+      cloudNotesLastPolledAt: Date.now() - 60_000,
+    };
+    mocks.listMeetingsEligibleForSummaryQueue.mockResolvedValue([meeting]);
+
+    await reconcilePendingMeetingPackets();
+
+    expect(mocks.cloudFetch).not.toHaveBeenCalled();
+  });
+
+  it('serializes packet application across meetings on the shared SQLite connection', async () => {
+    let activeRequests = 0;
+    let maximumConcurrentRequests = 0;
+    mocks.getMeeting.mockImplementation(async (id: string) => ({ ...meeting, id, cloudNotesJobId: `job-${id}`, summaryStatus: 'running' }));
+    mocks.cloudFetch.mockImplementation(async (path: string) => {
+      activeRequests += 1;
+      maximumConcurrentRequests = Math.max(maximumConcurrentRequests, activeRequests);
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      activeRequests -= 1;
+      const jobId = path.split('/').at(-1);
+      return new Response(JSON.stringify({
+        job_id: jobId, source_key: `meeting:maina:${jobId}`, packet_version: 'meeting-packet-v3', status: 'processing',
+        provider: 'google', model: 'managed-model', progress: { completed_sections: 0, total_sections: 1 },
+      }));
+    });
+
+    await Promise.all([
+      runMeetingPacketGeneration('m1'),
+      runMeetingPacketGeneration('m2'),
+    ]);
+
+    expect(maximumConcurrentRequests).toBe(1);
   });
 });

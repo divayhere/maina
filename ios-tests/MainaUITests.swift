@@ -28,9 +28,14 @@ final class MainaUITests: XCTestCase {
     let record = app.buttons["Record a meeting"]
     XCTAssertTrue(record.waitForExistence(timeout: 5))
     record.tap()
-    XCTAssertTrue(app.staticTexts["Listening"].waitForExistence(timeout: 10))
+    XCTAssertTrue(app.staticTexts["Recording"].waitForExistence(timeout: 10))
     sleep(8)
     attach("recording-listening")
+    let advancedTimer = app.staticTexts.matching(NSPredicate(
+      format: "label != '0:00' AND label MATCHES %@",
+      "([0-9]+:)?[0-9]+:[0-9]{2}"
+    )).firstMatch
+    XCTAssertTrue(advancedTimer.waitForExistence(timeout: 3), "Recording timer did not advance")
 
     XCTAssertTrue(app.buttons["Pause"].waitForExistence(timeout: 5))
     app.buttons["Pause"].tap()
@@ -39,7 +44,7 @@ final class MainaUITests: XCTestCase {
 
     XCTAssertTrue(app.buttons["Resume"].waitForExistence(timeout: 5))
     app.buttons["Resume"].tap()
-    XCTAssertTrue(app.staticTexts["Listening"].waitForExistence(timeout: 5))
+    XCTAssertTrue(app.staticTexts["Recording"].waitForExistence(timeout: 5))
     sleep(8)
 
     XCTAssertTrue(app.buttons["Stop and save"].waitForExistence(timeout: 5))
