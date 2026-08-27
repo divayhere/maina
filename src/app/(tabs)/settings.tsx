@@ -66,7 +66,9 @@ export default function SettingsScreen() {
   const startPairing = async () => {
     setCloudBusy(true); setCloudMessage(null);
     try {
-      const request = await createMainaCloudPairing('Maina Android');
+      const request = await createMainaCloudPairing(
+        Platform.OS === 'ios' ? 'Maina iPhone' : 'Maina Android',
+      );
       setPairing(request);
       setCloudMessage('Approve this phone in Maina Cloud Web, then return here and confirm.');
     } catch (cause) {

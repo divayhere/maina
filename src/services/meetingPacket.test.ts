@@ -77,6 +77,49 @@ describe('meetingPacket cloud broker integration', () => {
     expect(mocks.maybeQueueSource).toHaveBeenCalledWith('m1');
   });
 
+  it('sends only the stable meeting-packet contract with no provider or prompt controls', async () => {
+    mocks.cloudFetch.mockResolvedValue(new Response(JSON.stringify({
+      job_id: 'job-contract', source_key: 'meeting:maina:m1', packet_version: 'meeting-packet-v3', status: 'processing',
+      provider: 'google', model: 'managed-model', progress: { completed_sections: 0, total_sections: 1 },
+    })));
+
+    await runMeetingPacketGeneration('m1');
+
+    const [, request] = mocks.cloudFetch.mock.calls[0] as [string, RequestInit];
+    const payload = JSON.parse(String(request.body)) as Record<string, unknown>;
+    expect(Object.keys(payload).sort()).toEqual([
+      'language', 'occurred_at', 'packet_version', 'schema_version', 'source_key', 'title', 'transcript',
+    ]);
+    expect(payload).toMatchObject({
+      schema_version: 'mkc.meeting-packet.v1',
+      source_key: 'meeting:maina:m1',
+      packet_version: 'meeting-packet-v3',
+    });
+    expect(JSON.stringify(payload)).not.toMatch(/prompt|provider|model|api[_-]?key|token/iu);
+  });
+
+  it('does not create notes or sync from an incomplete local transcript', async () => {
+    meeting = { ...meeting, status: 'transcript_partial' };
+
+    await runMeetingPacketGeneration('m1');
+
+    expect(mocks.cloudFetch).not.toHaveBeenCalled();
+    expect(mocks.maybeQueueSource).not.toHaveBeenCalled();
+  });
+
+  it('resumes an existing server job instead of creating a duplicate', async () => {
+    meeting = { ...meeting, cloudNotesJobId: 'job-existing', summaryStatus: 'running' };
+    mocks.cloudFetch.mockResolvedValue(new Response(JSON.stringify({
+      job_id: 'job-existing', source_key: 'meeting:maina:m1', packet_version: 'meeting-packet-v3', status: 'processing',
+      provider: 'google', model: 'managed-model', progress: { completed_sections: 1, total_sections: 3 },
+    })));
+
+    await runMeetingPacketGeneration('m1');
+
+    expect(mocks.cloudFetch).toHaveBeenCalledTimes(1);
+    expect(mocks.cloudFetch).toHaveBeenCalledWith('/v1/meeting-packets/job-existing');
+  });
+
   it('never calls a direct provider when this phone is not paired', async () => {
     mocks.getSession.mockResolvedValue(null);
     await runMeetingPacketGeneration('m1');
