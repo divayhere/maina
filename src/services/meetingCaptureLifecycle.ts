@@ -10,6 +10,7 @@ import {
 } from '@/data/meetings';
 import { Platform } from 'react-native';
 import { completedCaptureDurationRepair } from '@/core/recording/checkpoint';
+import { materialCaptureGapError } from '@/core/recording/captureGap';
 import { hasCompleteNativeTranscript, terminalNativeMeetingRepair } from '@/core/recording/nativeCaptureReconciliation';
 import {
   acknowledgeNativePostProcessingResult,
@@ -139,7 +140,7 @@ async function launchNativePostProcessing(
     segmentCount: metrics.finalizedUris.length,
     restartCount: metrics.routeRestartCount,
     status: 'transcribing',
-    lastError: metrics.captureGapMs > 0 ? `Capture gap detected: ${metrics.captureGapMs}ms` : null,
+    lastError: materialCaptureGapError(metrics.captureGapMs),
   });
   await updateMeetingPipelineStage({
     meetingId: meeting.id,
