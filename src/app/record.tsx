@@ -19,6 +19,7 @@ import {
 } from '@/core/transcription/nativeSpeech';
 import { appendWithoutOverlap, transcriptWordCount } from '@/core/transcription/transcript';
 import { buildRecordingCheckpoint } from '@/core/recording/checkpoint';
+import { materialCaptureGapError } from '@/core/recording/captureGap';
 import { recordingLevelFromDbfs } from '@/core/recording/audioLevel';
 import {
   canApplyIdleCaptureMetrics,
@@ -853,7 +854,7 @@ export default function RecordScreen() {
                 segmentCount: metrics.finalizedUris.length,
                 restartCount: metrics.routeRestartCount,
                 status: metrics.finalizedUris.length > 0 ? 'transcribing' : 'interrupted',
-                lastError: metrics.captureGapMs > 0 ? `Capture gap detected: ${metrics.captureGapMs}ms` : null,
+                lastError: materialCaptureGapError(metrics.captureGapMs),
               }).catch(() => {});
             }
             await refresh();
@@ -1027,7 +1028,7 @@ export default function RecordScreen() {
             segmentCount: metrics.finalizedUris.length,
             restartCount: metrics.routeRestartCount,
             status: metrics.finalizedUris.length > 0 ? 'transcribing' : 'interrupted',
-            lastError: metrics.captureGapMs > 0 ? `Capture gap detected: ${metrics.captureGapMs}ms` : null,
+            lastError: materialCaptureGapError(metrics.captureGapMs),
           });
         }
       }
