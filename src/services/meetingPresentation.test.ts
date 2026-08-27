@@ -18,6 +18,7 @@ const meeting: Meeting = {
   transcriptionWindowCount: 10,
   transcriptionCompletedWindows: 0,
   transcriptionFailedWindows: 0,
+  transcriptionRecoveryRounds: 0,
   openTodoCount: 0,
   totalTodoCount: 0,
   updatedAt: 1,
@@ -49,11 +50,47 @@ describe('meeting pipeline presentation', () => {
   });
 
   it('offers recovery only for a terminal partial transcript with retained audio', () => {
-    expect(describeMeetingPresentation({ ...meeting, status: 'transcript_partial' })).toMatchObject({
+    expect(describeMeetingPresentation({
+      ...meeting,
+      status: 'transcript_partial',
+      transcriptionWindowCount: 645,
+      transcriptionCompletedWindows: 644,
+      transcriptionFailedWindows: 1,
+      transcriptionRecoveryRounds: 3,
+    })).toMatchObject({
       phase: 'transcript_partial',
       working: false,
       canRetryTranscript: true,
+      label: '99.8% processed',
     });
+  });
+
+  it('shows a terminal no-speech result instead of a permanent queue', () => {
+    expect(describeMeetingPresentation({
+      ...meeting,
+      status: 'recorded',
+      audioUri: '/audio',
+      transcriptionWindowCount: 2,
+      transcriptionCompletedWindows: 2,
+      transcriptionFailedWindows: 0,
+    })).toMatchObject({
+      phase: 'no_speech',
+      label: 'No speech detected',
+      working: false,
+      canRetryTranscript: true,
+    });
+  });
+
+  it('keeps notes independent while a terminal partial transcript is summarized', () => {
+    expect(describeMeetingPresentation({
+      ...meeting,
+      status: 'transcript_partial',
+      summaryStatus: 'running',
+      transcriptionCompletedWindows: 644,
+      transcriptionFailedWindows: 1,
+      transcriptionWindowCount: 645,
+      transcriptionRecoveryRounds: 3,
+    })).toMatchObject({ phase: 'summary', label: 'Writing your notes', working: true });
   });
 
   it('keeps cloud note failure independent from a successful transcript', () => {

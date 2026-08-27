@@ -46,6 +46,7 @@ import {
 } from '@/services/mainaKnowledgeCloudCorrections';
 import { maybeQueueMeetingPacket, runMeetingPacketGeneration } from '@/services/meetingPacket';
 import { describeMeetingPresentation } from '@/services/meetingPresentation';
+import { formatCoveragePercent, transcriptCoverage } from '@/services/transcriptCoverage';
 import { log } from '@/services/logger';
 import { ensureStorageBudget } from '@/services/storageBudget';
 import { retryNativeMeetingTranscription } from '@/services/meetingCaptureLifecycle';
@@ -883,7 +884,10 @@ export default function MeetingDetail() {
   if (tab === 'transcript') {
     const hasText = transcriptSummary?.hasText ?? false;
     const hasAudio = !!meeting?.audioUri && meeting.segmentCount > 0 && audioAvailable;
-    const transcriptionActive = presentation?.phase === 'transcribing';
+    const transcriptionActive = presentation?.phase === 'transcribing'
+      || (presentation?.phase === 'transcript_partial' && presentation.working);
+    const coverage = meeting ? transcriptCoverage(meeting) : null;
+    const coverageLabel = formatCoveragePercent(coverage?.ratio ?? null);
     return (
       <>
         <KeyboardAvoidingView
@@ -950,7 +954,7 @@ export default function MeetingDetail() {
                     </Banner>
                   ) : hasAudio && !transcriptionActive ? (
                     <ActionLink
-                      label={hasText ? 'Re-transcribe from saved audio' : presentation?.canRetryTranscript ? 'Retry transcription' : 'Transcribe from saved audio'}
+                      label="Re-transcribe from saved audio"
                       color={theme.primary}
                       onPress={() => void startRepass()}
                     />
@@ -967,7 +971,7 @@ export default function MeetingDetail() {
                     />
                     <AppText variant="meta" muted>
                       {hasText
-                        ? `${transcriptSummary?.blockCount ?? blocks.length} transcript blocks`
+                        ? `${transcriptSummary?.blockCount ?? blocks.length} transcript blocks${meeting?.status === 'transcript_partial' && coverageLabel ? ` · ${coverageLabel} audio coverage` : ''}`
                         : transcriptionActive
                           ? 'Transcription in progress'
                           : 'No transcript'}

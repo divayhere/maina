@@ -31,16 +31,24 @@ internal object MainaPostProcessingRecoveryScheduler {
     private const val CHANNEL_ID = "maina_asr_recovery"
     private const val NOTIFICATION_BASE_ID = 7100
     const val EXTRA_MEETING_ID = "meetingId"
+    const val EXTRA_RECOVERY_ROUND = "recoveryRound"
 
-    fun enqueue(context: Context, meetingId: String) {
+    fun enqueue(context: Context, meetingId: String, requestedRecoveryRound: Int? = null) {
         if (meetingId.isBlank()) return
-        val request = OneTimeWorkRequestBuilder<MainaPostProcessingRecoveryWorker>()
-            .setInputData(workDataOf(EXTRA_MEETING_ID to meetingId))
+        val recoveryRound = requestedRecoveryRound
+            ?: ((MainaPostProcessingOutbox.shared(context.applicationContext).read(meetingId)?.get("recoveryRounds") as? Int) ?: 0)
+        val builder = OneTimeWorkRequestBuilder<MainaPostProcessingRecoveryWorker>()
+            .setInputData(workDataOf(
+                EXTRA_MEETING_ID to meetingId,
+                EXTRA_RECOVERY_ROUND to recoveryRound,
+            ))
             .setBackoffCriteria(BackoffPolicy.EXPONENTIAL, 30, TimeUnit.SECONDS)
             .addTag("maina-asr-recovery")
-            .build()
+        val delayMs = MainaPostProcessingRecoveryPolicy.scheduledRetryDelayMs(recoveryRound)
+        if (delayMs > 0L) builder.setInitialDelay(delayMs, TimeUnit.MILLISECONDS)
+        val request = builder.build()
         WorkManager.getInstance(context.applicationContext).enqueueUniqueWork(
-            "maina-asr-recovery-$meetingId",
+            MainaPostProcessingRecoveryPolicy.uniqueWorkName(meetingId, recoveryRound),
             ExistingWorkPolicy.KEEP,
             request,
         )
@@ -84,6 +92,7 @@ internal class MainaPostProcessingRecoveryWorker(
 ) : CoroutineWorker(appContext, params) {
     override suspend fun doWork(): Result {
         val meetingId = inputData.getString(MainaPostProcessingRecoveryScheduler.EXTRA_MEETING_ID).orEmpty()
+        val scheduledRecoveryRound = inputData.getInt(MainaPostProcessingRecoveryScheduler.EXTRA_RECOVERY_ROUND, 0)
         if (meetingId.isBlank()) return Result.failure()
         // A fresh meeting always wins over deferred ASR. The recording service
         // checkpoints the old ASR at a window boundary; WorkManager will retry
@@ -96,6 +105,12 @@ internal class MainaPostProcessingRecoveryWorker(
             MainaPostProcessingOutbox.STATE_RUNNING -> Result.retry()
             else -> {
                 val recoveryRounds = run["recoveryRounds"] as? Int ?: 0
+                // Foreground reconciliation may have already advanced this
+                // meeting. A stale delayed request must not consume another
+                // retry round or collapse the intended 20/60 minute spacing.
+                if (!MainaPostProcessingRecoveryPolicy.isCurrentScheduledRound(scheduledRecoveryRound, recoveryRounds)) {
+                    return Result.success()
+                }
                 val directory = run["captureDirectory"] as? String
                 if (directory.isNullOrBlank() || !MainaPostProcessingRecoveryPolicy.shouldScheduleAnotherRound(recoveryRounds)) {
                     MainaPostProcessingRecoveryScheduler.notifyResume(applicationContext, meetingId)

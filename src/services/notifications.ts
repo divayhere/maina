@@ -64,20 +64,6 @@ export function buildMainaNotifications(meetings: Meeting[]): MainaNotification[
       });
     }
 
-    if (meeting.status === 'transcript_partial') {
-      notifications.push({
-        id: `transcript-partial:${meeting.id}`,
-        meetingId: meeting.id,
-        title: 'Some audio needs another pass',
-        body: 'Maina kept the saved audio and will retry when you choose.',
-        tone: 'warn',
-        createdAt: meeting.updatedAt ?? meeting.startedAt,
-        href: `/meeting/${meeting.id}`,
-        actionLabel: 'Retry now',
-        action: 'retry_transcript',
-      });
-    }
-
     if (meeting.summaryStatus === 'failed') {
       notifications.push({
         id: `summary-failed:${meeting.id}`,

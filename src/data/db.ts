@@ -215,6 +215,25 @@ const MIGRATIONS: Migration[] = [
     await addColumnIfMissing(db, 'meetings', 'cloud_notes_retry_count', 'INTEGER NOT NULL DEFAULT 0');
     await addColumnIfMissing(db, 'meetings', 'cloud_notes_last_retry_at', 'INTEGER');
   },
+  // v13 — bounded native-ASR recovery progress. This counter is copied from
+  // the native outbox so the UI and notes queue can distinguish "retrying"
+  // from a terminal, usable partial transcript after the retry budget ends.
+  async (db) => {
+    await addColumnIfMissing(db, 'meetings', 'transcription_recovery_rounds', 'INTEGER NOT NULL DEFAULT 0');
+    await db.execAsync(`CREATE TABLE IF NOT EXISTS local_asr_windows (
+      meeting_id TEXT NOT NULL,
+      window_key TEXT NOT NULL,
+      chunk_index INTEGER NOT NULL,
+      window_index INTEGER NOT NULL,
+      started_ms INTEGER NOT NULL,
+      ended_ms INTEGER NOT NULL,
+      completed_at INTEGER NOT NULL,
+      PRIMARY KEY (meeting_id, window_key),
+      FOREIGN KEY (meeting_id) REFERENCES meetings(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_local_asr_windows_meeting
+      ON local_asr_windows(meeting_id, chunk_index, window_index);`);
+  },
 ];
 
 export async function initDb(): Promise<void> {

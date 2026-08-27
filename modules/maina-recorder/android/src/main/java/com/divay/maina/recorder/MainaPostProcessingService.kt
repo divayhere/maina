@@ -11,6 +11,7 @@ import android.os.Build
 import android.os.Debug
 import android.os.IBinder
 import android.os.PowerManager
+import android.os.SystemClock
 import android.util.Log
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
@@ -26,6 +27,8 @@ internal class MainaPostProcessingService : Service() {
     private val activeMeetingId = AtomicReference<String?>(null)
     private val latestStartId = AtomicInteger(0)
     private var wakeLock: PowerManager.WakeLock? = null
+    private var lastProgressNotificationAtElapsedMs = 0L
+    private var lastProgressNotificationTitle = ""
 
     companion object {
         const val CHANNEL_ID = "maina_post_processing"
@@ -44,6 +47,7 @@ internal class MainaPostProcessingService : Service() {
         private const val WAKE_LOCK_TIMEOUT_MS = 6L * 60L * 60L * 1000L
         private const val MAX_RECOVERY_DEPTH = 2
         private const val MAX_RECOVERY_PIECES = 4
+        private const val PROGRESS_NOTIFICATION_MIN_INTERVAL_MS = 5_000L
 
         @Volatile private var currentlyProcessingMeetingId: String? = null
 
@@ -120,8 +124,9 @@ internal class MainaPostProcessingService : Service() {
                 if (!completed) {
                     val recoveryRounds = MainaPostProcessingOutbox.shared(applicationContext)
                         .incrementRecoveryRounds(meetingId)
+                    notifyResultChanged(meetingId, MainaPostProcessingOutbox.STATE_PARTIAL)
                     if (MainaPostProcessingRecoveryPolicy.shouldScheduleAnotherRound(recoveryRounds)) {
-                        MainaPostProcessingRecoveryScheduler.enqueue(applicationContext, meetingId)
+                        MainaPostProcessingRecoveryScheduler.enqueue(applicationContext, meetingId, recoveryRounds)
                     } else {
                         MainaPostProcessingRecoveryScheduler.notifyResume(applicationContext, meetingId)
                     }
@@ -684,6 +689,14 @@ internal class MainaPostProcessingService : Service() {
     }
 
     private fun updateProgress(title: String, progress: Int, max: Int) {
+        val now = SystemClock.elapsedRealtime()
+        val terminal = max > 0 && progress >= max
+        val titleChanged = title != lastProgressNotificationTitle
+        if (!terminal && !titleChanged && now - lastProgressNotificationAtElapsedMs < PROGRESS_NOTIFICATION_MIN_INTERVAL_MS) {
+            return
+        }
+        lastProgressNotificationAtElapsedMs = now
+        lastProgressNotificationTitle = title
         val detail = if (max > 0) "$progress of $max audio windows processed" else "Continuing on-device transcription"
         getSystemService(NotificationManager::class.java)
             .notify(NOTIFICATION_ID, buildNotification(title, detail, progress, max))

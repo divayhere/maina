@@ -21,6 +21,7 @@ const baseMeeting = (overrides: Partial<Meeting> = {}): Meeting => ({
   transcriptionWindowCount: 1,
   transcriptionCompletedWindows: 1,
   transcriptionFailedWindows: 0,
+  transcriptionRecoveryRounds: 0,
   openTodoCount: 0,
   totalTodoCount: 0,
   updatedAt: 1_700_000_060_000,
@@ -56,7 +57,7 @@ describe('buildMainaNotifications', () => {
       summaryStatus: 'idle',
       summary: null,
       knowledgeCloudSyncStatus: 'local_only',
-    })])[0]).toMatchObject({ action: 'retry_transcript', actionLabel: 'Retry now' });
+    })])).toEqual([]);
 
     expect(buildMainaNotifications([baseMeeting({
       summaryStatus: 'failed',

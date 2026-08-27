@@ -110,6 +110,7 @@ export interface NativePostProcessingResult {
   windowCount: number;
   completedWindows: number;
   failedWindows: number;
+  recoveryRounds: number;
   routeRestartCount: number;
   captureGapMs: number;
   lastError?: string | null;

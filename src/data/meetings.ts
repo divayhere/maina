@@ -11,6 +11,7 @@ import {
   shouldImportNativePostProcessingResult,
   shouldRepairNativeTranscriptStatus,
 } from '../services/nativePostProcessingCore';
+import { didTranscriptCoverageImprove } from '../services/transcriptCoverage';
 import { deriveStageTransition } from '../core/pipeline/stageState';
 
 export type MeetingStatus =
@@ -138,6 +139,7 @@ export interface Meeting {
   transcriptionWindowCount: number;
   transcriptionCompletedWindows: number;
   transcriptionFailedWindows: number;
+  transcriptionRecoveryRounds: number;
   openTodoCount: number;
   totalTodoCount: number;
   updatedAt: number;
@@ -181,6 +183,7 @@ interface Row {
   transcription_window_count: number;
   transcription_completed_windows: number;
   transcription_failed_windows: number;
+  transcription_recovery_rounds: number;
   open_todo_count?: number | null;
   total_todo_count?: number | null;
   updated_at: number;
@@ -246,6 +249,7 @@ const toMeeting = (r: Row): Meeting => ({
   transcriptionWindowCount: r.transcription_window_count ?? 0,
   transcriptionCompletedWindows: r.transcription_completed_windows ?? 0,
   transcriptionFailedWindows: r.transcription_failed_windows ?? 0,
+  transcriptionRecoveryRounds: r.transcription_recovery_rounds ?? 0,
   openTodoCount: r.open_todo_count ?? 0,
   totalTodoCount: r.total_todo_count ?? 0,
   updatedAt: r.updated_at || r.started_at,
@@ -730,6 +734,7 @@ export async function updateMeeting(id: string, patch: Partial<Meeting>): Promis
     transcriptionWindowCount: 'transcription_window_count',
     transcriptionCompletedWindows: 'transcription_completed_windows',
     transcriptionFailedWindows: 'transcription_failed_windows',
+    transcriptionRecoveryRounds: 'transcription_recovery_rounds',
     updatedAt: 'updated_at',
     lastError: 'last_error',
     restartCount: 'restart_count',
@@ -1205,6 +1210,7 @@ export async function importNativePostProcessingResult(input: {
   windowCount: number;
   completedWindows: number;
   failedWindows: number;
+  recoveryRounds?: number;
   routeRestartCount: number;
   lastError?: string | null;
   blocks: {
@@ -1224,9 +1230,12 @@ export async function importNativePostProcessingResult(input: {
     transcription_window_count: number;
     transcription_completed_windows: number;
     transcription_failed_windows: number;
+    transcription_recovery_rounds: number;
+    summary_status: SummaryStatus;
   }>(
-    `SELECT native_postprocess_run_id, status, started_at,
-            transcription_window_count, transcription_completed_windows, transcription_failed_windows
+    `SELECT native_postprocess_run_id, status, started_at, summary_status,
+            transcription_window_count, transcription_completed_windows, transcription_failed_windows,
+            transcription_recovery_rounds
      FROM meetings WHERE id = ?`,
     [input.meetingId],
   );
@@ -1250,16 +1259,17 @@ export async function importNativePostProcessingResult(input: {
     incomingCompletedWindows: input.completedWindows,
     incomingFailedWindows: input.failedWindows,
   })) {
+    const recoveryAdvanced = Math.max(0, input.recoveryRounds ?? 0) > (current.transcription_recovery_rounds ?? 0);
     if (shouldRepairNativeTranscriptStatus({
       persistedStatus: current.status,
       incomingStatus: incomingOutcome.status,
     })) {
       await db.runAsync(
         `UPDATE meetings
-         SET status = ?, last_error = ?, updated_at = ?
+         SET status = ?, last_error = ?, transcription_recovery_rounds = ?, updated_at = ?
          WHERE id = ?
            AND status IN ('recording', 'interrupted', 'recorded', 'transcribing', 'transcript_partial', 'audio_expired_incomplete')`,
-        [incomingOutcome.status, incomingOutcome.error, Date.now(), input.meetingId],
+        [incomingOutcome.status, incomingOutcome.error, Math.max(0, input.recoveryRounds ?? 0), Date.now(), input.meetingId],
       );
       log.warn('meetings', 'repaired stale native transcript status from durable outbox', {
         meetingId: input.meetingId,
@@ -1267,6 +1277,13 @@ export async function importNativePostProcessingResult(input: {
         from: current.status,
         to: incomingOutcome.status,
       });
+      return 'imported';
+    }
+    if (recoveryAdvanced) {
+      await db.runAsync(
+        `UPDATE meetings SET transcription_recovery_rounds = ?, updated_at = ? WHERE id = ?`,
+        [Math.max(0, input.recoveryRounds ?? 0), Date.now(), input.meetingId],
+      );
       return 'imported';
     }
     return 'already_imported';
@@ -1286,9 +1303,12 @@ export async function importNativePostProcessingResult(input: {
       transcription_window_count: number;
       transcription_completed_windows: number;
       transcription_failed_windows: number;
+      transcription_recovery_rounds: number;
+      summary_status: SummaryStatus;
     }>(
-      `SELECT native_postprocess_run_id,
-              transcription_window_count, transcription_completed_windows, transcription_failed_windows
+      `SELECT native_postprocess_run_id, summary_status,
+              transcription_window_count, transcription_completed_windows, transcription_failed_windows,
+              transcription_recovery_rounds
        FROM meetings WHERE id = ?`,
       [input.meetingId],
     );
@@ -1303,14 +1323,26 @@ export async function importNativePostProcessingResult(input: {
       incomingFailedWindows: input.failedWindows,
     })) return;
 
+    const coverageImproved = didTranscriptCoverageImprove({
+      transcriptionWindowCount: inTransaction.transcription_window_count,
+      transcriptionCompletedWindows: inTransaction.transcription_completed_windows,
+      transcriptionFailedWindows: inTransaction.transcription_failed_windows,
+    }, {
+      transcriptionWindowCount: input.windowCount,
+      transcriptionCompletedWindows: input.completedWindows,
+      transcriptionFailedWindows: input.failedWindows,
+    });
+
     await transaction.runAsync('DELETE FROM transcript_blocks WHERE meeting_id = ?', [input.meetingId]);
     // AI-derived packet content must not pretend it describes a changed raw
     // transcript. Keep manually-created tasks, but clear machine-generated
     // tasks so the normal auto-summary path can recreate them truthfully.
-    await transaction.runAsync(
-      "DELETE FROM todo_items WHERE meeting_id = ? AND origin = 'ai'",
-      [input.meetingId],
-    );
+    if (coverageImproved) {
+      await transaction.runAsync(
+        "DELETE FROM todo_items WHERE meeting_id = ? AND origin = 'ai'",
+        [input.meetingId],
+      );
+    }
     for (const block of blocks) {
       await transaction.runAsync(
         `INSERT INTO transcript_blocks
@@ -1337,10 +1369,20 @@ export async function importNativePostProcessingResult(input: {
        SET duration_ms = ?, audio_duration_ms = ?, capture_ended_at = ?,
            segment_count = ?, transcribed_segments = ?,
            transcription_window_count = ?, transcription_completed_windows = ?,
-           transcription_failed_windows = ?, restart_count = ?,
+           transcription_failed_windows = ?, transcription_recovery_rounds = ?, restart_count = ?,
            transcript = NULL, language = 'auto',
-           status = ?, summary = NULL, decisions_json = NULL, open_questions_json = NULL,
-           summary_status = 'idle', summary_provider_id = NULL, summary_model = NULL, summarized_at = NULL,
+           status = ?,
+           summary = CASE WHEN ? = 1 THEN NULL ELSE summary END,
+           decisions_json = CASE WHEN ? = 1 THEN NULL ELSE decisions_json END,
+           open_questions_json = CASE WHEN ? = 1 THEN NULL ELSE open_questions_json END,
+           summary_status = CASE WHEN ? = 1 THEN 'idle' ELSE summary_status END,
+           summary_provider_id = CASE WHEN ? = 1 THEN NULL ELSE summary_provider_id END,
+           summary_model = CASE WHEN ? = 1 THEN NULL ELSE summary_model END,
+           summarized_at = CASE WHEN ? = 1 THEN NULL ELSE summarized_at END,
+           cloud_notes_job_id = CASE WHEN ? = 1 THEN NULL ELSE cloud_notes_job_id END,
+           cloud_notes_last_polled_at = CASE WHEN ? = 1 THEN NULL ELSE cloud_notes_last_polled_at END,
+           cloud_notes_retry_count = CASE WHEN ? = 1 THEN 0 ELSE cloud_notes_retry_count END,
+           cloud_notes_last_retry_at = CASE WHEN ? = 1 THEN NULL ELSE cloud_notes_last_retry_at END,
            last_error = ?, native_postprocess_run_id = ?, native_postprocess_imported_at = ?, updated_at = ?
        WHERE id = ?`,
       [
@@ -1352,8 +1394,10 @@ export async function importNativePostProcessingResult(input: {
         Math.max(0, input.windowCount),
         Math.max(0, input.completedWindows),
         Math.max(0, input.failedWindows),
+        Math.max(0, input.recoveryRounds ?? 0),
         Math.max(0, input.routeRestartCount),
         outcome.status,
+        ...Array(11).fill(coverageImproved ? 1 : 0),
         outcome.error,
         input.runId,
         now,
@@ -1370,6 +1414,16 @@ export async function importNativePostProcessingResult(input: {
     blocks: blocks.length,
     completedWindows: input.completedWindows,
     failedWindows: input.failedWindows,
+    recoveryRounds: input.recoveryRounds ?? 0,
+    coverageImproved: didTranscriptCoverageImprove({
+      transcriptionWindowCount: current.transcription_window_count,
+      transcriptionCompletedWindows: current.transcription_completed_windows,
+      transcriptionFailedWindows: current.transcription_failed_windows,
+    }, {
+      transcriptionWindowCount: input.windowCount,
+      transcriptionCompletedWindows: input.completedWindows,
+      transcriptionFailedWindows: input.failedWindows,
+    }),
   });
   return 'imported';
 }
@@ -1379,6 +1433,7 @@ export async function updateNativePostProcessingProgress(input: {
   windowCount: number;
   completedWindows: number;
   failedWindows: number;
+  recoveryRounds?: number;
   processedSegments: number;
   lastError?: string | null;
 }): Promise<void> {
@@ -1390,13 +1445,14 @@ export async function updateNativePostProcessingProgress(input: {
            ELSE status
          END,
          transcription_window_count = ?, transcription_completed_windows = ?,
-         transcription_failed_windows = ?, transcribed_segments = ?,
+         transcription_failed_windows = ?, transcription_recovery_rounds = ?, transcribed_segments = ?,
          last_error = ?, updated_at = ?
      WHERE id = ?`,
     [
       Math.max(0, input.windowCount),
       Math.max(0, input.completedWindows),
       Math.max(0, input.failedWindows),
+      Math.max(0, input.recoveryRounds ?? 0),
       Math.max(0, input.processedSegments),
       input.lastError?.trim() || null,
       Date.now(),
@@ -1558,6 +1614,8 @@ export async function saveMeetingPacket(input: {
   model?: string | null;
   summarizedAt?: number | null;
 }): Promise<void> {
+  const meeting = await getMeeting(input.meetingId);
+  const nextStatus: MeetingStatus = meeting?.status === 'transcript_partial' ? 'transcript_partial' : 'summarized';
   await updateMeeting(input.meetingId, {
     title: input.title?.trim() || undefined,
     summary: input.summary?.trim() || null,
@@ -1567,7 +1625,7 @@ export async function saveMeetingPacket(input: {
     summaryProviderId: input.providerId ?? null,
     summaryModel: input.model ?? null,
     summarizedAt: input.summarizedAt ?? Date.now(),
-    status: 'summarized',
+    status: nextStatus,
     lastError: null,
   });
   await updateMeetingPipelineStage({
@@ -1618,8 +1676,11 @@ export async function setMeetingSummaryState(
   status: SummaryStatus,
   options?: { providerId?: string | null; model?: string | null; error?: string | null },
 ): Promise<void> {
+  const meeting = await getMeeting(meetingId);
   const nextMeetingStatus: MeetingStatus =
-    status === 'ready'
+    meeting?.status === 'transcript_partial'
+      ? 'transcript_partial'
+      : status === 'ready'
       ? 'summarized'
       : status === 'running' || status === 'queued'
         ? 'summarizing'

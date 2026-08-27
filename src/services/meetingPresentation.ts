@@ -1,9 +1,17 @@
 import type { Meeting } from '@/data/meetings';
+import {
+  formatCoveragePercent,
+  isTerminalNoSpeechMeeting,
+  isTerminalPartialTranscript,
+  isRecoveryBudgetExhausted,
+  transcriptCoverage,
+} from '@/services/transcriptCoverage';
 
 export type MeetingPresentationPhase =
   | 'recording'
   | 'recovery'
   | 'transcribing'
+  | 'no_speech'
   | 'transcript_partial'
   | 'summary'
   | 'summary_failed'
@@ -62,13 +70,51 @@ export function describeMeetingPresentation(meeting: Meeting): MeetingPresentati
     };
   }
   if (meeting.status === 'transcript_partial') {
+    const coverage = transcriptCoverage(meeting);
+    const percent = formatCoveragePercent(coverage.ratio) ?? 'Partial';
+    const terminal = isTerminalPartialTranscript(meeting);
+    const recoveryExhausted = isRecoveryBudgetExhausted(meeting);
+    if (meeting.summaryStatus === 'queued' || meeting.summaryStatus === 'running') {
+      return {
+        phase: 'summary',
+        label: 'Writing your notes',
+        tone: 'primary',
+        detail: `${percent} audio coverage`,
+        working: true,
+        progress: coverage.ratio ?? undefined,
+        canRetryTranscript: false,
+      };
+    }
+    if (meeting.summaryStatus === 'ready') {
+      return {
+        phase: 'complete',
+        label: 'Notes ready',
+        tone: 'primary',
+        detail: `${percent} audio coverage`,
+        working: false,
+        canRetryTranscript: true,
+      };
+    }
+    if (meeting.summaryStatus === 'failed' && terminal) {
+      return {
+        phase: 'summary_failed',
+        label: "Notes didn't come through",
+        tone: 'warn',
+        detail: `Transcript saved with ${percent} audio coverage.`,
+        working: false,
+        canRetryTranscript: true,
+      };
+    }
     return {
       phase: 'transcript_partial',
-      label: 'Transcript needs recovery',
-      tone: 'warn',
-      detail: 'Some saved audio needs another transcription pass.',
-      working: false,
-      canRetryTranscript: true,
+      label: terminal ? `${percent} processed` : recoveryExhausted ? 'Partial transcript saved' : 'Recovering transcript',
+      tone: terminal ? 'muted' : recoveryExhausted ? 'warn' : 'primary',
+      detail: recoveryExhausted
+        ? `${coverage.failed} of ${coverage.total} audio sections could not be transcribed.`
+        : `Retry ${Math.min((meeting.transcriptionRecoveryRounds ?? 0) + 1, 3)} of 3 is scheduled.`,
+      working: !recoveryExhausted,
+      progress: coverage.ratio ?? undefined,
+      canRetryTranscript: recoveryExhausted,
     };
   }
   if (meeting.status === 'audio_expired_incomplete') {
@@ -82,6 +128,17 @@ export function describeMeetingPresentation(meeting: Meeting): MeetingPresentati
     };
   }
   if (meeting.status === 'recorded' || meeting.status === 'transcribing') {
+    if (isTerminalNoSpeechMeeting(meeting)) {
+      return {
+        phase: 'no_speech',
+        label: 'No speech detected',
+        tone: 'muted',
+        detail: 'The saved audio was checked, but no speech text was found.',
+        working: false,
+        progress: 1,
+        canRetryTranscript: Boolean(meeting.audioUri),
+      };
+    }
     const progress = transcriptionProgress(meeting);
     return {
       phase: 'transcribing',

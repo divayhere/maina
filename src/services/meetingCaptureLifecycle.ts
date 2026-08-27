@@ -19,6 +19,7 @@ import {
 } from '@/hardware/recording/foreground';
 import { log } from '@/services/logger';
 import { getNativeCaptureMetrics } from '@/services/nativeCaptureMetrics';
+import { TERMINAL_PARTIAL_RECOVERY_ROUNDS } from '@/services/transcriptCoverage';
 
 // Multiple foreground triggers (launch, resume, the meeting screen, and the
 // short foreground poll) can arrive together. Serialize them so only one
@@ -134,6 +135,11 @@ async function reconcilePendingNativeMeetingWorkInternal(): Promise<number> {
       return null;
     });
     if (nativeResult?.state === 'complete' || nativeResult?.state === 'partial') {
+      const terminalPartial = nativeResult.state === 'partial'
+        && nativeResult.windowCount > 0
+        && nativeResult.completedWindows + nativeResult.failedWindows >= nativeResult.windowCount
+        && nativeResult.completedWindows > 0
+        && nativeResult.recoveryRounds >= TERMINAL_PARTIAL_RECOVERY_ROUNDS;
       const imported = await importNativePostProcessingResult({
         meetingId: nativeResult.meetingId,
         runId: nativeResult.runId,
@@ -145,6 +151,7 @@ async function reconcilePendingNativeMeetingWorkInternal(): Promise<number> {
         windowCount: nativeResult.windowCount,
         completedWindows: nativeResult.completedWindows,
         failedWindows: nativeResult.failedWindows,
+        recoveryRounds: nativeResult.recoveryRounds,
         routeRestartCount: nativeResult.routeRestartCount,
         lastError: nativeResult.lastError,
         blocks: nativeResult.blocks,
@@ -171,7 +178,7 @@ async function reconcilePendingNativeMeetingWorkInternal(): Promise<number> {
       await updateMeetingPipelineStage({
         meetingId: nativeResult.meetingId,
         stage: 'asr',
-        state: nativeResult.state === 'complete' ? 'ready' : 'failed',
+        state: nativeResult.state === 'complete' || terminalPartial ? 'ready' : 'deferred',
         completedUnits: nativeResult.completedWindows + nativeResult.failedWindows,
         totalUnits: nativeResult.windowCount,
         error: nativeResult.lastError,
@@ -179,16 +186,23 @@ async function reconcilePendingNativeMeetingWorkInternal(): Promise<number> {
           runId: nativeResult.runId,
           processedSegments: nativeResult.processedSegments,
           failedWindows: nativeResult.failedWindows,
+          partialCoverage: nativeResult.state === 'partial',
+          recoveryRounds: nativeResult.recoveryRounds,
         },
       });
       await updateMeetingPipelineStage({
         meetingId: nativeResult.meetingId,
         stage: 'transcript_durable',
-        state: nativeResult.state === 'complete' ? 'ready' : 'failed',
+        state: nativeResult.state === 'complete' || terminalPartial ? 'ready' : 'deferred',
         completedUnits: nativeResult.completedWindows,
         totalUnits: nativeResult.windowCount,
         error: nativeResult.lastError,
-        metadata: { runId: nativeResult.runId, blocks: nativeResult.blocks.length },
+        metadata: {
+          runId: nativeResult.runId,
+          blocks: nativeResult.blocks.length,
+          partialCoverage: nativeResult.state === 'partial',
+          recoveryRounds: nativeResult.recoveryRounds,
+        },
       });
       log.info('recovery', 'native post-processing outbox reconciled', {
         meetingId: meeting.id,
@@ -205,6 +219,7 @@ async function reconcilePendingNativeMeetingWorkInternal(): Promise<number> {
         windowCount: nativeResult.windowCount,
         completedWindows: nativeResult.completedWindows,
         failedWindows: nativeResult.failedWindows,
+        recoveryRounds: nativeResult.recoveryRounds,
         processedSegments: nativeResult.processedSegments,
         lastError: nativeResult.state === 'deferred' ? nativeResult.lastError : null,
       });
@@ -269,6 +284,8 @@ async function reconcilePendingNativeMeetingWorkInternal(): Promise<number> {
       && (
         meeting.transcriptionWindowCount === 0
         || (meeting.transcriptionCompletedWindows + meeting.transcriptionFailedWindows) < meeting.transcriptionWindowCount
+        || (meeting.status === 'transcript_partial'
+          && meeting.transcriptionRecoveryRounds < TERMINAL_PARTIAL_RECOVERY_ROUNDS)
       )
     ) {
       if (await launchNativePostProcessing(meeting, { forceRetry: meeting.status === 'transcript_partial' })) resumed += 1;

@@ -47,6 +47,8 @@ describe('meetingPacket cloud broker integration', () => {
     meeting = {
       id: 'm1', title: 'Launch review', startedAt: Date.parse('2026-08-26T09:00:00Z'), language: 'en-IN',
       status: 'transcribed', summaryStatus: 'idle', cloudNotesJobId: null, cloudNotesRetryCount: 0,
+      transcriptionWindowCount: 1, transcriptionCompletedWindows: 1, transcriptionFailedWindows: 0,
+      transcriptionRecoveryRounds: 0,
       knowledgeCloudSyncStatus: 'local_only', decisions: [], openQuestions: [],
     };
     mocks.getMeeting.mockImplementation(async () => meeting);
@@ -99,13 +101,21 @@ describe('meetingPacket cloud broker integration', () => {
   });
 
   it('does not create notes or sync from an incomplete local transcript', async () => {
-    meeting = { ...meeting, status: 'transcript_partial' };
+    meeting = {
+      ...meeting,
+      status: 'transcript_partial',
+      transcriptionWindowCount: 10,
+      transcriptionCompletedWindows: 9,
+      transcriptionFailedWindows: 1,
+      transcriptionRecoveryRounds: 2,
+    };
 
     await runMeetingPacketGeneration('m1');
 
     expect(mocks.cloudFetch).not.toHaveBeenCalled();
     expect(mocks.maybeQueueSource).not.toHaveBeenCalled();
   });
+
 
   it('resumes an existing server job instead of creating a duplicate', async () => {
     meeting = { ...meeting, cloudNotesJobId: 'job-existing', summaryStatus: 'running' };

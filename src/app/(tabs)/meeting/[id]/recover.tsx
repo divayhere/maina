@@ -105,7 +105,7 @@ export default function MeetingRecoveryScreen() {
         <View style={{ gap: space.md }}>
           {audioAvailable ? (
             <PrimaryButton
-              label="Retry transcription"
+              label="Re-transcribe from saved audio"
               onPress={() => router.push(`/meeting/${id}?allowInterrupted=1&startRepass=1`)}
             />
           ) : null}
