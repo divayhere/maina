@@ -15,6 +15,7 @@ vi.mock('@/services/logger', () => ({ log: { info: vi.fn(), warn: vi.fn(), error
 import {
   MainaCloudApiError,
   clearMainaCloudSession,
+  formatMainaCloudPairingCode,
   getMainaCloudSession,
   mainaCloudFetch,
   saveMainaCloudSession,
@@ -37,6 +38,11 @@ describe('mainaCloudSession', () => {
     await saveMainaCloudSession(validSession);
     expect(await getMainaCloudSession()).toEqual(validSession);
     expect([...store.values()].join('')).not.toContain('provider');
+  });
+
+  it('displays the case-sensitive pairing credential byte-for-byte', () => {
+    const code = 'mp_aB9z_Xy-17Q';
+    expect(formatMainaCloudPairingCode(code)).toBe(code);
   });
 
   it('removes an expired session before any cloud call', async () => {

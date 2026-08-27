@@ -14,7 +14,7 @@ import { getRemoteControlStatus, openRemoteAccessibilitySettings } from '@/hardw
 import { describeRemoteHealth } from '@/hardware/trigger/remoteHealth';
 import type { RemoteControlStatus } from '../../../modules/maina-recorder/src';
 import { DEFAULT_CONFIG, getAppConfig, saveAppConfig, type AppConfig } from '@/services/config';
-import { createMainaCloudPairing, exchangeMainaCloudPairing, getMainaCloudConnection, signOutMainaCloud, type MainaCloudPairingRequest, type MainaCloudSession } from '@/services/mainaCloudSession';
+import { createMainaCloudPairing, exchangeMainaCloudPairing, formatMainaCloudPairingCode, getMainaCloudConnection, signOutMainaCloud, type MainaCloudPairingRequest, type MainaCloudSession } from '@/services/mainaCloudSession';
 import { queueEligibleMainaKnowledgeCloudSyncs } from '@/services/mainaKnowledgeCloud';
 import { queueEligibleMainaKnowledgeCloudCorrections } from '@/services/mainaKnowledgeCloudCorrections';
 import { queueEligibleMeetingPackets } from '@/services/meetingPacket';
@@ -29,11 +29,6 @@ function SettingsRow({ label, value, helper }: { label: string; value: string; h
       {helper ? <AppText variant="meta" muted>{helper}</AppText> : null}
     </View>
   );
-}
-
-function pairingCodeLabel(value: string) {
-  const compact = value.replace(/^mp_/u, '').toUpperCase();
-  return compact.match(/.{1,4}/gu)?.join(' ') ?? compact;
 }
 
 export default function SettingsScreen() {
@@ -125,7 +120,7 @@ export default function SettingsScreen() {
             <View style={{ gap: space.md }}>
               <View style={{ padding: 16, borderRadius: 16, backgroundColor: theme.accent, gap: 4 }}>
                 <AppText variant="meta" color={theme.accentText}>PAIRING CODE</AppText>
-                <AppText variant="title" color={theme.accentText}>{pairingCodeLabel(pairing.verificationCode)}</AppText>
+                <AppText variant="title" color={theme.accentText}>{formatMainaCloudPairingCode(pairing.verificationCode)}</AppText>
                 <AppText variant="meta" color={theme.accentText}>Expires {new Date(pairing.expiresAt).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}</AppText>
               </View>
               <SettingsRow label="Pairing request" value={pairing.pairingId} helper="Use this only if Maina Cloud Web asks which phone to approve." />
