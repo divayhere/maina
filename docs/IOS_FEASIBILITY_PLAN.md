@@ -79,3 +79,21 @@ The iOS branch is qualified in this order. A later gate cannot hide an earlier f
 ## Toolchain rule
 
 Use the isolated `codex/ios-feasibility` worktree. Build only after Xcode and sufficient free disk space are available. Do not build from the old Desktop checkout.
+
+## P0 before the next iOS installation
+
+The current five-test physical qualification may run unchanged on the installed
+build. Before the *next* iOS build is installed, complete the release blocker in
+`docs/PERSONAL_SIGNING_RENEWAL_AND_DATA_PRESERVATION.md`:
+
+1. Rebase historical iOS recording URIs to the current app container and make
+   future persisted recording references container-portable.
+2. Add a first-party weekly Personal Team renewal command with idle-state
+   refusal, full local backup, signing/entitlement verification, in-place
+   installation, and post-install data checks.
+3. Preserve and pin Android's existing signing identity and add equivalent
+   in-place update safeguards without enabling Android cloud/device backup.
+
+This item is a hard release prerequisite, not a prerequisite for the five
+currently planned capture/recovery tests. Any evidence discovered by those
+tests must be folded into the implementation before the next installation.
