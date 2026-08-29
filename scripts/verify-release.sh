@@ -8,6 +8,7 @@ source "$PROJECT_DIR/scripts/maina-env.sh"
 cd "$PROJECT_DIR"
 "$PROJECT_DIR/scripts/verify-toolchain.sh"
 npm run verify:coordination
+npm run verify:mkc-release-a
 npm run verify:native-recorder
 npm run typecheck
 npm test

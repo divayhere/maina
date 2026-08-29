@@ -61,6 +61,8 @@
     "check": "npm run typecheck && npm run test && npm run lint && npx expo-doctor@latest",
     "verify:toolchain": "bash scripts/verify-toolchain.sh",
     "verify:coordination": "node coordination/scripts/verify.mjs",
+    "import:mkc-release-a": "node scripts/import-mkc-release-a-contracts.mjs",
+    "verify:mkc-release-a": "node scripts/import-mkc-release-a-contracts.mjs --check",
     "verify:native-recorder": "node scripts/verify-native-recorder.mjs",
     "verify:ios-native": "node scripts/verify-ios-native-recorder.mjs",
     "ios:runtime": "bash scripts/prepare-ios-sherpa-runtime.sh",

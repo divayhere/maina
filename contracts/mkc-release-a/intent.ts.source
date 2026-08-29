@@ -1,0 +1,62 @@
+export type RecallIntent = "decision" | "task" | "question" | "timeline" | "general";
+
+export type RecallQueryType = "evidence" | "collection";
+
+type IntentProfile = {
+  intent: RecallIntent;
+  preferredEvidenceKinds: string[];
+  label: string;
+};
+
+const intentProfiles: Record<RecallIntent, Omit<IntentProfile, "intent">> = {
+  decision: {
+    preferredEvidenceKinds: ["decision", "important_point", "claim", "summary"],
+    label: "decision"
+  },
+  task: {
+    preferredEvidenceKinds: ["todo", "decision", "summary"],
+    label: "task or commitment"
+  },
+  question: {
+    preferredEvidenceKinds: ["question", "decision", "summary"],
+    label: "open question"
+  },
+  timeline: {
+    preferredEvidenceKinds: ["correction", "decision", "summary", "block"],
+    label: "change over time"
+  },
+  general: {
+    preferredEvidenceKinds: ["summary", "important_point", "claim", "block"],
+    label: "general knowledge"
+  }
+};
+
+const intentMatchers: Array<{ intent: RecallIntent; pattern: RegExp }> = [
+  { intent: "decision", pattern: /\b(decide|decided|decision|conclude|concluded|agree|agreed|choose|chosen)\b/i },
+  { intent: "task", pattern: /\b(todo|task|action item|commit|committed|owner|deadline|due|follow[- ]?up)\b/i },
+  { intent: "question", pattern: /\b(question|ask|asked|unknown|unresolved|open question|can we|should we)\b/i },
+  { intent: "timeline", pattern: /\b(changed|change|after|before|when|timeline|latest|previous|since|between)\b/i }
+];
+
+export function detectRecallIntent(query: string): IntentProfile {
+  if (/\b(?:remains? unresolved|remained open|still open|open question)\b/i.test(query)) {
+    return { intent: "question", ...intentProfiles.question };
+  }
+  const match = intentMatchers.find(({ pattern }) => pattern.test(query));
+  const intent = match?.intent ?? "general";
+  return { intent, ...intentProfiles[intent] };
+}
+
+export function evidenceBoostsFor(intent: RecallIntent) {
+  const boosts: Record<string, number> = {};
+  for (const [index, kind] of intentProfiles[intent].preferredEvidenceKinds.entries()) {
+    boosts[kind] = 1.55 - index * 0.15;
+  }
+  return boosts;
+}
+
+export function detectRecallQueryType(query: string): RecallQueryType {
+  return /\b(projects?|topics?|collections?|categories|workspaces?|classified|classification|organised|organized)\b/i.test(query)
+    ? "collection"
+    : "evidence";
+}
