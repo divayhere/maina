@@ -150,4 +150,32 @@ describe('meetingPacket cloud broker integration', () => {
       meetingId: 'm1', stage: 'summary', state: 'running', completedUnits: 2, totalUnits: 5,
     }));
   });
+
+  it('defers a transport failure durably instead of declaring notes failed', async () => {
+    const TransportError = (await import('@/services/mainaCloudSession')).MainaCloudApiError;
+    mocks.cloudFetch.mockRejectedValue(new TransportError('offline', 0, 'network_error'));
+
+    await runMeetingPacketGeneration('m1');
+
+    expect(mocks.setMeetingSummaryState).toHaveBeenCalledWith('m1', 'retryable', expect.objectContaining({
+      error: expect.stringContaining('continue automatically'),
+    }));
+    expect(mocks.updateMeeting).toHaveBeenCalledWith('m1', expect.objectContaining({
+      cloudNotesRetryCount: 1,
+      cloudNotesNextRetryAt: expect.any(Number),
+    }));
+    expect(mocks.maybeQueueSource).not.toHaveBeenCalled();
+  });
+
+  it('keeps authentication failure terminal and preserves the local transcript', async () => {
+    const CloudError = (await import('@/services/mainaCloudSession')).MainaCloudApiError;
+    mocks.cloudFetch.mockRejectedValue(new CloudError('expired', 401, 'unauthorized'));
+
+    await runMeetingPacketGeneration('m1');
+
+    expect(mocks.setMeetingSummaryState).toHaveBeenCalledWith('m1', 'failed', expect.objectContaining({
+      error: expect.stringContaining('reconnected'),
+    }));
+    expect(mocks.saveMeetingPacket).not.toHaveBeenCalled();
+  });
 });

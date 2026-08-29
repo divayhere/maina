@@ -19,11 +19,15 @@ import { maybeQueueMainaKnowledgeCloudSync } from '@/services/mainaKnowledgeClou
 import { maybeQueueMainaKnowledgeCloudPacketCorrections } from '@/services/mainaKnowledgeCloudCorrections';
 import { mainaKnowledgeCloudSourceKey } from '@/services/mainaKnowledgeCloudCore';
 import { MainaCloudApiError, getMainaCloudSession, mainaCloudFetch } from '@/services/mainaCloudSession';
+import {
+  cloudRetryDue,
+  isRetryableCloudFailure,
+  nextCloudRetry,
+} from '@/services/cloudRetryPolicy';
 
 const inflight = new Map<string, Promise<void>>();
 const TRANSCRIPT_PAGE_SIZE = 100;
-const MAX_AUTOMATIC_RETRIES = 3;
-const RETRY_COOLDOWN_MS = 15 * 60 * 1000;
+const RETRYABLE_MESSAGE = 'Waiting for internet. Maina will continue automatically.';
 
 type CloudPacketTodo = { text: string; source_quote?: string; source_timestamp?: string };
 type CloudPacket = {
@@ -112,6 +116,7 @@ async function setJobState(meetingId: string, job: CloudPacketJob, error?: strin
     cloudNotesLastPolledAt: Date.now(),
     summaryProviderId: job.provider ?? null,
     summaryModel: job.model ?? null,
+    cloudNotesNextRetryAt: null,
   });
   await setMeetingSummaryState(
     meetingId,
@@ -146,6 +151,46 @@ async function setJobState(meetingId: string, job: CloudPacketJob, error?: strin
   });
 }
 
+async function setRetryableState(meeting: Meeting, cause: unknown, job?: CloudPacketJob) {
+  const existingDueAt = meeting.cloudNotesNextRetryAt ?? null;
+  if (meeting.summaryStatus === 'retryable' && !cloudRetryDue(existingDueAt)) return;
+  const retry = nextCloudRetry({ attemptCount: meeting.cloudNotesRetryCount ?? 0 });
+  await updateMeeting(meeting.id, {
+    cloudNotesJobId: job?.job_id ?? meeting.cloudNotesJobId ?? null,
+    cloudNotesLastPolledAt: Date.now(),
+    cloudNotesRetryCount: retry.attemptCount,
+    cloudNotesLastRetryAt: retry.lastRetryAt,
+    cloudNotesNextRetryAt: retry.nextRetryAt,
+    summaryProviderId: job?.provider ?? meeting.summaryProviderId ?? null,
+    summaryModel: job?.model ?? meeting.summaryModel ?? null,
+  });
+  await setMeetingSummaryState(meeting.id, 'retryable', {
+    providerId: job?.provider ?? meeting.summaryProviderId ?? null,
+    model: job?.model ?? meeting.summaryModel ?? null,
+    error: RETRYABLE_MESSAGE,
+  });
+  const completedSections = Math.max(0, Number(job?.progress?.completed_sections ?? 0));
+  const totalSections = Math.max(1, Number(job?.progress?.total_sections ?? 1));
+  await updateMeetingPipelineStage({
+    meetingId: meeting.id,
+    stage: 'summary',
+    state: 'deferred',
+    completedUnits: completedSections,
+    totalUnits: totalSections,
+    error: RETRYABLE_MESSAGE,
+    metadata: {
+      cloudJobId: job?.job_id ?? meeting.cloudNotesJobId ?? null,
+      retryAt: retry.nextRetryAt,
+      failureClass: cause instanceof MainaCloudApiError ? cause.code ?? cause.status : 'retryable',
+    },
+  });
+  log.warn('summary', 'cloud meeting packet deferred for automatic retry', {
+    meetingId: meeting.id,
+    retryCount: retry.attemptCount,
+    retryAt: retry.nextRetryAt,
+  });
+}
+
 async function saveReadyPacket(meeting: Meeting, job: CloudPacketJob) {
   const packet = job.packet;
   if (!packet) throw new Error('Maina Cloud marked notes ready but returned no packet. Maina will retry safely.');
@@ -171,6 +216,7 @@ async function saveReadyPacket(meeting: Meeting, job: CloudPacketJob) {
     cloudNotesLastPolledAt: Date.now(),
     cloudNotesRetryCount: 0,
     cloudNotesLastRetryAt: null,
+    cloudNotesNextRetryAt: null,
   });
 
   const todos = await listMeetingTodos(meeting.id);
@@ -254,19 +300,25 @@ async function reconcileMeetingPacket(meetingId: string, options?: { regenerate?
       return;
     }
     if (job.status === 'failed_retryable') {
-      const now = Date.now();
-      const retryCount = meeting.cloudNotesRetryCount ?? 0;
-      const retryEligible = retryCount < MAX_AUTOMATIC_RETRIES
-        && (!meeting.cloudNotesLastRetryAt || now - meeting.cloudNotesLastRetryAt >= RETRY_COOLDOWN_MS);
-      if (retryEligible) {
-        await updateMeeting(meetingId, { cloudNotesRetryCount: retryCount + 1, cloudNotesLastRetryAt: now });
+      if (meeting.summaryStatus === 'retryable' && cloudRetryDue(meeting.cloudNotesNextRetryAt)) {
         job = await retryCloudJob(job.job_id);
+        if (job.status !== 'failed_retryable') {
+          await updateMeeting(meetingId, { cloudNotesNextRetryAt: null });
+        }
+      }
+      if (job.status === 'failed_retryable') {
+        await setRetryableState(meeting, job.error?.message ?? 'server_retryable', job);
+        return;
       }
     }
     await setJobState(meetingId, job);
   } catch (cause) {
     const error = formatCloudError(cause);
     const authFailure = cause instanceof MainaCloudApiError && (cause.status === 401 || cause.status === 403);
+    if (!authFailure && isRetryableCloudFailure(cause)) {
+      await setRetryableState(meeting, cause);
+      return;
+    }
     await setMeetingSummaryState(meetingId, 'failed', {
       error: authFailure ? 'Maina Cloud needs to be reconnected. Your transcript is safe on this phone.' : error,
     });
@@ -294,7 +346,7 @@ export async function maybeQueueMeetingPacket(meetingId: string): Promise<void> 
 
 export async function reconcilePendingMeetingPackets(): Promise<number> {
   if (!await getMainaCloudSession()) return 0;
-  const meetings = await listMeetingsNeedingSummary();
+  const meetings = await listMeetingsNeedingSummary(Date.now());
   for (const meeting of meetings) void runMeetingPacketGeneration(meeting.id);
   return meetings.length;
 }

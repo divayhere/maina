@@ -37,10 +37,9 @@ function syncFailureCopy(status: KnowledgeCloudSyncStatus, error?: string | null
         body: error ?? 'Cloud sync is blocked by plan or budget rules.',
       };
     case 'sync_failed_retryable':
-      return {
-        title: 'Cloud sync will need a retry',
-        body: error ?? 'Maina kept the frozen meeting package and can retry it.',
-      };
+      // A temporary network/server interruption is self-healing outbox state,
+      // not a notification requiring the user to operate the pipeline.
+      return null;
     default:
       return null;
   }

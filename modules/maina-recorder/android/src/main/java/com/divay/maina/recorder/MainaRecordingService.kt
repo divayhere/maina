@@ -46,12 +46,21 @@ class MainaRecordingService : Service() {
     @Volatile private var lastCaptureDirectory: String? = null
     @Volatile private var lastCaptureStartedAt: Long = 0L
     @Volatile private var postProcessingHandledMeetingId: String? = null
+    @Volatile private var clientSilenced = false
+    @Volatile private var pausedForCommunication = false
     private val serviceStartedAtMs = SystemClock.elapsedRealtime()
     private val heartbeatRunnable = object : Runnable {
         override fun run() {
             if (!isRunning) return
             if (captureState != "idle") emitServiceHeartbeat()
             heartbeatHandler.postDelayed(this, 60_000)
+        }
+    }
+    private val communicationWatchRunnable = object : Runnable {
+        override fun run() {
+            if (!isRunning) return
+            reconcileCommunicationInterruption()
+            heartbeatHandler.postDelayed(this, 500)
         }
     }
 
@@ -76,6 +85,10 @@ class MainaRecordingService : Service() {
             }
             if (signature == lastRecordingSignature) return
             lastRecordingSignature = signature
+            clientSilenced = candidates.any {
+                Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && it.isClientSilenced
+            }
+            reconcileCommunicationInterruption()
             candidates.forEach { config -> reportActiveRecording(config) }
         }
     }
@@ -138,7 +151,7 @@ class MainaRecordingService : Service() {
                     message = "Native capture event: $eventName",
                     payload = payload,
                 )
-                if (eventName == "native-capture-route-recovery-exhausted") {
+                if (eventName == "native-capture-route-recovery-exhausted" || eventName == "native-capture-storage-reserve-reached") {
                     // The capture thread has already finalized the last WAV chunk.
                     // Queue the normal stop path on the service executor so it starts
                     // post-processing exactly once; never leave a silent recorder
@@ -225,6 +238,8 @@ class MainaRecordingService : Service() {
         updateMediaState()
         heartbeatHandler.removeCallbacks(heartbeatRunnable)
         heartbeatHandler.postDelayed(heartbeatRunnable, 60_000)
+        heartbeatHandler.removeCallbacks(communicationWatchRunnable)
+        heartbeatHandler.post(communicationWatchRunnable)
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -335,6 +350,7 @@ class MainaRecordingService : Service() {
                 }
             }
             ACTION_PAUSE_NATIVE_CAPTURE -> {
+                pausedForCommunication = false
                 submitCaptureCommand(
                     pendingState = "pausing",
                     successfulCaptureState = "paused",
@@ -342,6 +358,7 @@ class MainaRecordingService : Service() {
                 )
             }
             ACTION_RESUME_NATIVE_CAPTURE -> {
+                pausedForCommunication = false
                 submitCaptureCommand(
                     pendingState = "resuming",
                     successfulCaptureState = "recording",
@@ -349,6 +366,7 @@ class MainaRecordingService : Service() {
                 )
             }
             ACTION_STOP_NATIVE_CAPTURE -> {
+                pausedForCommunication = false
                 setCaptureState("finalizing")
                 submitCaptureCommand(
                     pendingState = "finalizing",
@@ -458,6 +476,7 @@ class MainaRecordingService : Service() {
         }
         captureExecutor.shutdown()
         heartbeatHandler.removeCallbacks(heartbeatRunnable)
+        heartbeatHandler.removeCallbacks(communicationWatchRunnable)
         runCatching { audioManager.unregisterAudioRecordingCallback(recordingCallback) }
         runCatching { audioManager.unregisterAudioDeviceCallback(deviceCallback) }
         runCatching { mediaSession.release() }
@@ -722,6 +741,42 @@ class MainaRecordingService : Service() {
                 "silenced" to if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) config.isClientSilenced else false,
             ),
         )
+    }
+
+    private fun reconcileCommunicationInterruption() {
+        if (!::nativeCapture.isInitialized) return
+        val communicationActive = MainaCallInterruptionPolicy.communicationActive(
+            audioMode = audioManager.mode,
+            clientSilenced = clientSilenced,
+        )
+        when {
+            MainaCallInterruptionPolicy.shouldPause(captureState, pausedForCommunication, communicationActive) -> {
+                pausedForCommunication = true
+                recordNativeEvent(
+                    level = "info",
+                    category = "native-capture",
+                    eventName = "native-capture-auto-paused-for-communication",
+                    message = "Capture paused while another communication session owns the microphone",
+                    payload = mapOf("audioMode" to audioManager.mode, "clientSilenced" to clientSilenced),
+                )
+                captureExecutor.execute {
+                    runCatching { nativeCaptureStatus = nativeCapture.pause().asMap() + mapOf("interruption" to "communication") }
+                }
+            }
+            MainaCallInterruptionPolicy.shouldResume(captureState, pausedForCommunication, communicationActive) -> {
+                pausedForCommunication = false
+                recordNativeEvent(
+                    level = "info",
+                    category = "native-capture",
+                    eventName = "native-capture-auto-resumed-after-communication",
+                    message = "Capture resumed after the communication session ended",
+                    payload = mapOf("audioMode" to audioManager.mode),
+                )
+                captureExecutor.execute {
+                    runCatching { nativeCaptureStatus = nativeCapture.resume().asMap() }
+                }
+            }
+        }
     }
 
     private fun emitServiceHeartbeat() {

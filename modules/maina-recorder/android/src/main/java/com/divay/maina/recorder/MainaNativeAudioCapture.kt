@@ -263,6 +263,7 @@ internal class MainaNativeAudioCapture(
     private fun recordLoop(directory: File, bufferBytes: Int) {
         val buffer = ByteArray(bufferBytes)
         var activeChunk: ActiveChunk? = null
+        var lastStorageCheckElapsedMs = 0L
         try {
             while (running.get()) {
                 if (paused.get()) {
@@ -291,6 +292,23 @@ internal class MainaNativeAudioCapture(
                     continue
                 }
                 if (activeChunk == null) activeChunk = openChunk(directory)
+                val storageCheckNow = SystemClock.elapsedRealtime()
+                if (storageCheckNow - lastStorageCheckElapsedMs >= STORAGE_CHECK_INTERVAL_MS) {
+                    lastStorageCheckElapsedMs = storageCheckNow
+                    val availableBytes = directory.usableSpace
+                    if (availableBytes in 1 until MIN_CAPTURE_FREE_BYTES) {
+                        running.set(false)
+                        onEvent(
+                            "warn",
+                            "native-capture-storage-reserve-reached",
+                            snapshot().asMap() + mapOf(
+                                "availableBytes" to availableBytes,
+                                "minimumBytes" to MIN_CAPTURE_FREE_BYTES,
+                            ),
+                        )
+                        break
+                    }
+                }
                 val read = recorder?.read(buffer, 0, buffer.size, AudioRecord.READ_BLOCKING) ?: AudioRecord.ERROR_INVALID_OPERATION
                 when {
                     read > 0 -> {
@@ -620,6 +638,8 @@ internal class MainaNativeAudioCapture(
         const val STATUS_PUBLISH_INTERVAL_MS = 250L
         const val STOP_JOIN_TIMEOUT_MS = 15_000L
         const val JOURNAL_NAME = "capture-journal.jsonl"
+        private const val STORAGE_CHECK_INTERVAL_MS = 5_000L
+        private const val MIN_CAPTURE_FREE_BYTES = 256L * 1024L * 1024L
 
         fun inspectDirectory(uriOrPath: String, recoverPartials: Boolean): DirectoryInspection {
             val directory = directoryFrom(uriOrPath)

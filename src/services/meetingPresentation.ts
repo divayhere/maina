@@ -74,12 +74,12 @@ export function describeMeetingPresentation(meeting: Meeting): MeetingPresentati
     const percent = formatCoveragePercent(coverage.ratio) ?? 'Partial';
     const terminal = isTerminalPartialTranscript(meeting);
     const recoveryExhausted = isRecoveryBudgetExhausted(meeting);
-    if (meeting.summaryStatus === 'queued' || meeting.summaryStatus === 'running') {
+    if (meeting.summaryStatus === 'queued' || meeting.summaryStatus === 'running' || meeting.summaryStatus === 'retryable') {
       return {
         phase: 'summary',
-        label: 'Writing your notes',
+        label: meeting.summaryStatus === 'retryable' ? 'Notes will continue automatically' : 'Writing your notes',
         tone: 'primary',
-        detail: `${percent} audio coverage`,
+        detail: meeting.summaryStatus === 'retryable' ? `Transcript saved with ${percent} audio coverage.` : `${percent} audio coverage`,
         working: true,
         progress: coverage.ratio ?? undefined,
         canRetryTranscript: false,
@@ -157,6 +157,16 @@ export function describeMeetingPresentation(meeting: Meeting): MeetingPresentati
       tone: 'warn',
       detail: 'Your transcript is safe.',
       working: false,
+      canRetryTranscript: false,
+    };
+  }
+  if (meeting.summaryStatus === 'retryable') {
+    return {
+      phase: 'summary',
+      label: 'Notes will continue automatically',
+      tone: 'muted',
+      detail: 'Your transcript is safe. Maina is waiting for internet or cloud availability.',
+      working: true,
       canRetryTranscript: false,
     };
   }

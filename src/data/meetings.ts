@@ -25,7 +25,7 @@ export type MeetingStatus =
   | 'summarizing'
   | 'summarized';
 
-export type SummaryStatus = 'idle' | 'queued' | 'running' | 'ready' | 'failed';
+export type SummaryStatus = 'idle' | 'queued' | 'running' | 'retryable' | 'ready' | 'failed';
 export type MeetingPipelineStage =
   | 'recording'
   | 'audio_finalized'
@@ -156,6 +156,7 @@ export interface Meeting {
   cloudNotesLastPolledAt?: number | null;
   cloudNotesRetryCount?: number | null;
   cloudNotesLastRetryAt?: number | null;
+  cloudNotesNextRetryAt?: number | null;
   nativePostprocessRunId?: string | null;
   nativePostprocessImportedAt?: number | null;
 }
@@ -200,6 +201,7 @@ interface Row {
   cloud_notes_last_polled_at: number | null;
   cloud_notes_retry_count: number | null;
   cloud_notes_last_retry_at: number | null;
+  cloud_notes_next_retry_at: number | null;
   native_postprocess_run_id: string | null;
   native_postprocess_imported_at: number | null;
 }
@@ -266,6 +268,7 @@ const toMeeting = (r: Row): Meeting => ({
   cloudNotesLastPolledAt: r.cloud_notes_last_polled_at,
   cloudNotesRetryCount: r.cloud_notes_retry_count ?? 0,
   cloudNotesLastRetryAt: r.cloud_notes_last_retry_at,
+  cloudNotesNextRetryAt: r.cloud_notes_next_retry_at,
   nativePostprocessRunId: r.native_postprocess_run_id,
   nativePostprocessImportedAt: r.native_postprocess_imported_at,
 });
@@ -490,7 +493,7 @@ export async function getMeeting(id: string): Promise<Meeting | null> {
   return row ? toMeeting(row) : null;
 }
 
-export async function listMeetingsNeedingSummary(): Promise<Meeting[]> {
+export async function listMeetingsNeedingSummary(now = Date.now()): Promise<Meeting[]> {
   const db = await getDb();
   const rows = await db.getAllAsync<Row>(
     `SELECT m.*,
@@ -498,7 +501,9 @@ export async function listMeetingsNeedingSummary(): Promise<Meeting[]> {
             (SELECT COUNT(*) FROM todo_items t WHERE t.meeting_id = m.id) AS total_todo_count
      FROM meetings m
      WHERE m.summary_status IN ('queued', 'running')
+        OR (m.summary_status = 'retryable' AND (m.cloud_notes_next_retry_at IS NULL OR m.cloud_notes_next_retry_at <= ?))
      ORDER BY m.started_at DESC`,
+    [now],
   );
   return rows.map(toMeeting);
 }
@@ -511,7 +516,7 @@ export async function listMeetingsEligibleForSummaryQueue(): Promise<Meeting[]> 
             (SELECT COUNT(*) FROM todo_items t WHERE t.meeting_id = m.id) AS total_todo_count
      FROM meetings m
      WHERE m.status IN ('transcribed', 'summarizing', 'summarized')
-       AND m.summary_status IN ('idle', 'failed', 'queued', 'running')
+       AND m.summary_status IN ('idle', 'failed', 'queued', 'running', 'retryable')
      ORDER BY m.started_at DESC`,
   );
   return rows.map(toMeeting);
@@ -749,6 +754,7 @@ export async function updateMeeting(id: string, patch: Partial<Meeting>): Promis
     cloudNotesLastPolledAt: 'cloud_notes_last_polled_at',
     cloudNotesRetryCount: 'cloud_notes_retry_count',
     cloudNotesLastRetryAt: 'cloud_notes_last_retry_at',
+    cloudNotesNextRetryAt: 'cloud_notes_next_retry_at',
     nativePostprocessRunId: 'native_postprocess_run_id',
     nativePostprocessImportedAt: 'native_postprocess_imported_at',
   };
@@ -1383,6 +1389,7 @@ export async function importNativePostProcessingResult(input: {
            cloud_notes_last_polled_at = CASE WHEN ? = 1 THEN NULL ELSE cloud_notes_last_polled_at END,
            cloud_notes_retry_count = CASE WHEN ? = 1 THEN 0 ELSE cloud_notes_retry_count END,
            cloud_notes_last_retry_at = CASE WHEN ? = 1 THEN NULL ELSE cloud_notes_last_retry_at END,
+           cloud_notes_next_retry_at = CASE WHEN ? = 1 THEN NULL ELSE cloud_notes_next_retry_at END,
            last_error = ?, native_postprocess_run_id = ?, native_postprocess_imported_at = ?, updated_at = ?
        WHERE id = ?`,
       [
@@ -1397,7 +1404,7 @@ export async function importNativePostProcessingResult(input: {
         Math.max(0, input.recoveryRounds ?? 0),
         Math.max(0, input.routeRestartCount),
         outcome.status,
-        ...Array(11).fill(coverageImproved ? 1 : 0),
+        ...Array(12).fill(coverageImproved ? 1 : 0),
         outcome.error,
         input.runId,
         now,
@@ -1682,7 +1689,7 @@ export async function setMeetingSummaryState(
       ? 'transcript_partial'
       : status === 'ready'
       ? 'summarized'
-      : status === 'running' || status === 'queued'
+      : status === 'running' || status === 'queued' || status === 'retryable'
         ? 'summarizing'
         : 'transcribed';
   await updateMeeting(meetingId, {
@@ -1699,6 +1706,8 @@ export async function setMeetingSummaryState(
       ? 'queued'
       : status === 'running'
         ? 'running'
+        : status === 'retryable'
+          ? 'deferred'
         : status === 'ready'
           ? 'ready'
           : 'failed';

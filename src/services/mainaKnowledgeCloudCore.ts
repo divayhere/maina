@@ -275,7 +275,7 @@ export function describeMainaKnowledgeCloudSyncStatus(input: {
     case 'sync_blocked_budget':
       return { label: 'Cloud sync paused', detail: input.error ?? 'Maina Knowledge Cloud budget guardrails blocked sync for now.', tone: 'warn' as MainaKnowledgeCloudTone };
     case 'sync_failed_retryable':
-      return { label: 'Cloud sync failed', detail: input.error ?? 'Maina will retry when the app is active again.', tone: 'warn' as MainaKnowledgeCloudTone };
+      return { label: 'Cloud sync waiting', detail: 'Maina will continue automatically when the cloud is reachable.', tone: 'muted' as MainaKnowledgeCloudTone };
     case 'local_only':
     default:
       return { label: 'Only on this phone', detail: 'This meeting has not been sent to Maina Knowledge Cloud yet.', tone: 'muted' as MainaKnowledgeCloudTone };

@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react';
 import { ActivityIndicator, AppState, PermissionsAndroid, Platform, View } from 'react-native';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
+import NetInfo from '@react-native-community/netinfo';
 
 import { provisionCoreLanguages, requestSpeechPermissions } from '@/core/transcription/nativeSpeech';
 import { nextPacketPollDelay } from '@/core/pipeline/pipelineScheduling';
@@ -42,12 +43,14 @@ import {
   installRemoteLog,
   queueAudioArtifact,
 } from '@/services/remoteLog';
-import { reconcilePendingMainaKnowledgeCloudSyncs } from '@/services/mainaKnowledgeCloud';
-import { reconcilePendingMainaKnowledgeCloudCorrections } from '@/services/mainaKnowledgeCloudCorrections';
-import { reconcileAutoSummaryEligibility, reconcilePendingMeetingPackets } from '@/services/meetingPacket';
+import { reconcilePendingMeetingPackets } from '@/services/meetingPacket';
 import { initSentry, Sentry } from '@/services/sentry';
 import { installWatchdog } from '@/services/watchdog';
 import { clearLegacyDirectAiConfiguration } from '@/services/config';
+import {
+  registerBackgroundPipelineRecovery,
+  runPipelineRecoveryCycle,
+} from '@/services/backgroundPipeline';
 
 initSentry();
 
@@ -87,6 +90,13 @@ function RootLayout() {
         // Previous staging builds stored direct provider and MKC values in
         // SQLite. Cloud notes now use a scoped SecureStore session only.
         await clearLegacyDirectAiConfiguration();
+        const backgroundRecoveryRegistered = await registerBackgroundPipelineRecovery().catch((cause) => {
+          log.warn('background-pipeline', 'background recovery registration unavailable', { err: String(cause) });
+          return false;
+        });
+        log.info('background-pipeline', 'background recovery registration checked', {
+          registered: backgroundRecoveryRegistered,
+        });
 
         // A process death can leave the active native WAV as *.partial. Finalize
         // it before trying to resume native post-processing from durable audio.
@@ -230,23 +240,10 @@ function RootLayout() {
     let packetPollInFlight: Promise<void> | null = null;
     let packetPollTimer: ReturnType<typeof setTimeout> | null = null;
     let stopped = false;
-    const syncAudioCleanup = async () => {
-      const meetingIds = await getMeetingsWithDeletedAudio();
-      await markMeetingsAudioDeleted(meetingIds);
-      await reconcilePendingNativeMeetingWork();
-      // Completed audio is disposable only after native result import and
-      // acknowledgement have committed. Incomplete/active audio remains under
-      // the seven-day/1 GB recovery policy.
-      await enforceAudioRetentionPolicy();
-      await reconcileAutoSummaryEligibility();
-      await reconcilePendingMainaKnowledgeCloudSyncs();
-      await reconcilePendingMainaKnowledgeCloudCorrections();
-      await flushDiagnostics().catch(() => {});
-    };
     const schedulePipelineSync = () => {
       if (pipelineInFlight) return pipelineInFlight;
       let work: Promise<void>;
-      work = syncAudioCleanup().finally(() => {
+      work = runPipelineRecoveryCycle().then(() => undefined).finally(() => {
         if (pipelineInFlight === work) pipelineInFlight = null;
       });
       pipelineInFlight = work;
@@ -286,6 +283,15 @@ function RootLayout() {
       if (state !== 'active') return;
       runPipelineFromSignal();
     });
+    let wasConnected: boolean | null = null;
+    const unsubscribeNetwork = NetInfo.addEventListener((state) => {
+      const connected = state.isConnected === true && state.isInternetReachable !== false;
+      if (connected && wasConnected === false) {
+        log.info('background-pipeline', 'connectivity restored; draining durable pipeline');
+        runPipelineFromSignal();
+      }
+      wasConnected = connected;
+    });
     const unsubscribeNative = subscribeNativePostProcessingChanges((event) => {
       log.info('recovery', 'native post-processing state changed', {
         meetingId: event.meetingId,
@@ -296,6 +302,7 @@ function RootLayout() {
     return () => {
       stopped = true;
       subscription.remove();
+      unsubscribeNetwork();
       unsubscribeNative();
       if (packetPollTimer) clearTimeout(packetPollTimer);
     };
