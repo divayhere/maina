@@ -14,6 +14,7 @@ import {
 } from '@/services/config';
 import { log } from '@/services/logger';
 import { clearMainaCloudSession } from '@/services/mainaCloudSession';
+import { notifyMeetingPipelineChanged } from '@/services/meetingPipelineSignals';
 import {
   buildMainaKnowledgeCloudSourcePackage,
   classifyMainaKnowledgeCloudResponse,
@@ -52,6 +53,7 @@ async function setCloudSyncState(
     totalUnits: 1,
     error: patch.knowledgeCloudError,
   });
+  notifyMeetingPipelineChanged(meetingId);
 }
 
 function parseStoredPayload(payloadJson: string): MainaKnowledgeCloudSourcePackage | null {
@@ -298,8 +300,8 @@ export async function reconcilePendingMainaKnowledgeCloudSyncs(): Promise<void> 
   if (!settings.enabled || !settings.baseUrl.trim() || !settings.token.trim()) return;
 
   const pending = await listMeetingsNeedingKnowledgeCloudSync();
-  for (const meeting of pending) {
-    void runMainaKnowledgeCloudSync(meeting.id);
-  }
+  await Promise.all(pending.map((meeting) => runMainaKnowledgeCloudSync(meeting.id)));
   await queueEligibleMainaKnowledgeCloudSyncs();
+  const newlyQueued = await listMeetingsNeedingKnowledgeCloudSync();
+  await Promise.all(newlyQueued.map((meeting) => runMainaKnowledgeCloudSync(meeting.id)));
 }

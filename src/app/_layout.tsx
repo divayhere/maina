@@ -46,6 +46,7 @@ import {
   queueAudioArtifact,
 } from '@/services/remoteLog';
 import { reconcilePendingMeetingPackets } from '@/services/meetingPacket';
+import { subscribeMeetingPipelineChanges } from '@/services/meetingPipelineSignals';
 import { initSentry, Sentry } from '@/services/sentry';
 import { installWatchdog } from '@/services/watchdog';
 import { clearLegacyDirectAiConfiguration } from '@/services/config';
@@ -307,11 +308,20 @@ function RootLayout() {
       });
       runPipelineFromSignal();
     });
+    const unsubscribePipeline = subscribeMeetingPipelineChanges((meetingId) => {
+      log.info('summary', 'meeting pipeline state changed; waking poller', { meetingId });
+      if (packetPollTimer) clearTimeout(packetPollTimer);
+      packetPollTimer = setTimeout(() => {
+        packetPollTimer = null;
+        void schedulePacketPoll();
+      }, 1_000);
+    });
     return () => {
       stopped = true;
       subscription.remove();
       unsubscribeNetwork();
       unsubscribeNative();
+      unsubscribePipeline();
       if (packetPollTimer) clearTimeout(packetPollTimer);
     };
   }, [ready]);

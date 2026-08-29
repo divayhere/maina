@@ -19,14 +19,16 @@ import { maybeQueueMainaKnowledgeCloudSync } from '@/services/mainaKnowledgeClou
 import { maybeQueueMainaKnowledgeCloudPacketCorrections } from '@/services/mainaKnowledgeCloudCorrections';
 import { mainaKnowledgeCloudSourceKey } from '@/services/mainaKnowledgeCloudCore';
 import { MainaCloudApiError, getMainaCloudSession, mainaCloudFetch } from '@/services/mainaCloudSession';
+import { notifyMeetingPipelineChanged } from '@/services/meetingPipelineSignals';
+import { isTerminalPartialTranscript } from '@/services/transcriptCoverage';
 import {
   cloudRetryDue,
   isRetryableCloudFailure,
   nextCloudRetry,
 } from '@/services/cloudRetryPolicy';
-import { isTerminalPartialTranscript } from '@/services/transcriptCoverage';
 
 const inflight = new Map<string, Promise<void>>();
+let executionTail: Promise<void> = Promise.resolve();
 const TRANSCRIPT_PAGE_SIZE = 100;
 const RETRYABLE_MESSAGE = 'Waiting for internet. Maina will continue automatically.';
 
@@ -338,7 +340,17 @@ export function runMeetingPacketGeneration(meetingId: string, options?: { regene
   const key = `${meetingId}:${options?.regenerate ? 'regenerate' : 'normal'}`;
   const existing = inflight.get(key);
   if (existing) return existing;
-  const task = reconcileMeetingPacket(meetingId, options).finally(() => inflight.delete(key));
+  // Expo SQLite exposes one shared native connection. Applying multiple ready
+  // packets concurrently can overlap todo replacement transactions. Keep
+  // network/status/application work ordered; meetings still queue instantly.
+  const task = executionTail
+    .catch(() => {})
+    .then(() => reconcileMeetingPacket(meetingId, options))
+    .finally(() => {
+      inflight.delete(key);
+      notifyMeetingPipelineChanged(meetingId);
+    });
+  executionTail = task.then(() => {}, () => {});
   inflight.set(key, task);
   return task;
 }
@@ -355,8 +367,27 @@ export async function maybeQueueMeetingPacket(meetingId: string): Promise<void> 
 export async function reconcilePendingMeetingPackets(): Promise<number> {
   if (!await getMainaCloudSession()) return 0;
   const meetings = await listMeetingsNeedingSummary(Date.now());
-  for (const meeting of meetings) void runMeetingPacketGeneration(meeting.id);
+  await Promise.all(meetings.map((meeting) => runMeetingPacketGeneration(meeting.id)));
   return meetings.length;
+}
+
+export async function drainMeetingPacketUntilSettled(
+  meetingId: string,
+  options: { maxPolls?: number; pollIntervalMs?: number; wait?: (durationMs: number) => Promise<void> } = {},
+): Promise<Meeting['summaryStatus'] | null> {
+  const maxPolls = Math.max(1, options.maxPolls ?? 13);
+  const pollIntervalMs = Math.max(0, options.pollIntervalMs ?? 5_000);
+  const wait = options.wait ?? ((durationMs: number) => new Promise<void>((resolve) => setTimeout(resolve, durationMs)));
+  for (let poll = 0; poll < maxPolls; poll += 1) {
+    await runMeetingPacketGeneration(meetingId);
+    const current = await getMeeting(meetingId);
+    if (!current) return null;
+    if (current.summaryStatus === 'ready' || current.summaryStatus === 'retryable' || current.summaryStatus === 'failed') {
+      return current.summaryStatus;
+    }
+    if (poll + 1 < maxPolls) await wait(pollIntervalMs);
+  }
+  return (await getMeeting(meetingId))?.summaryStatus ?? null;
 }
 
 export async function reconcileAutoSummaryEligibility(): Promise<number> {
