@@ -14,6 +14,7 @@ import { hasCompleteNativeTranscript, terminalNativeMeetingRepair } from '@/core
 import {
   acknowledgeNativePostProcessingResult,
   getNativeCaptureStatus,
+  isNativePostProcessingServiceRunning,
   readNativePostProcessingResult,
   startNativePostProcessing,
 } from '@/hardware/recording/foreground';
@@ -123,6 +124,11 @@ async function launchNativePostProcessing(
 
 async function reconcilePendingNativeMeetingWorkInternal(): Promise<number> {
   const nativeStatus = getNativeCaptureStatus();
+  // The native outbox heartbeat is durable, so it can still look active for
+  // up to two minutes after Android kills the isolated ASR process. Trust that
+  // heartbeat only while Maina's own post-processing service actually exists.
+  // This makes foreground recovery immediate without starting duplicate ASR.
+  const nativePostProcessingServiceRunning = isNativePostProcessingServiceRunning();
   const meetings = await listMeetings();
   let resumed = 0;
 
@@ -271,7 +277,7 @@ async function reconcilePendingNativeMeetingWorkInternal(): Promise<number> {
       && nativeStatus.state !== 'idle'
       && nativeStatus.state !== 'error';
     if (isLiveNativeMeeting) continue;
-    if (nativeResult?.active) continue;
+    if (nativeResult?.active && nativePostProcessingServiceRunning) continue;
     if (!meeting.audioUri) continue;
 
     if (meeting.status === 'recording') {

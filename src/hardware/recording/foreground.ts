@@ -82,6 +82,11 @@ export async function startNativePostProcessing(request: NativePostProcessingReq
   await requireAndroidModule().startNativePostProcessing(request);
 }
 
+export function isNativePostProcessingServiceRunning(): boolean {
+  return Platform.OS === 'android'
+    && !!MainaRecorder?.isNativePostProcessingServiceRunning();
+}
+
 export async function readNativePostProcessingResult(meetingId: string): Promise<NativePostProcessingResult | null> {
   if (Platform.OS !== 'android' || !MainaRecorder) return null;
   return MainaRecorder.readNativePostProcessingResult(meetingId);

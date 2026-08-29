@@ -1,5 +1,6 @@
 package com.divay.maina.recorder
 
+import android.app.ActivityManager
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
@@ -201,6 +202,14 @@ class MainaRecorderModule : Module() {
 
         AsyncFunction("readNativePostProcessingResult") { meetingId: String ->
             MainaPostProcessingOutbox.shared(requireContext()).read(meetingId)
+        }
+
+        Function("isNativePostProcessingServiceRunning") {
+            val manager = requireContext().getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
+            @Suppress("DEPRECATION")
+            manager.getRunningServices(Int.MAX_VALUE).any {
+                it.service.className == MainaPostProcessingService::class.java.name
+            }
         }
 
         AsyncFunction("acknowledgeNativePostProcessingResult") { meetingId: String, runId: String ->
