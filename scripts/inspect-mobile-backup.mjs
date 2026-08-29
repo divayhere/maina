@@ -22,8 +22,11 @@ if (!db) throw new Error('maina.db is missing from copied app data.');
 const sqlite = (sql) => execFileSync('/usr/bin/sqlite3', [db, sql], { encoding: 'utf8' }).trim();
 if (sqlite('PRAGMA integrity_check;') !== 'ok') throw new Error('Copied Maina database failed integrity_check.');
 const count = (table) => Number(sqlite(`SELECT COUNT(*) FROM ${table};`));
-const activeMeetings = Number(sqlite(
-  `SELECT COUNT(*) FROM meetings WHERE status IN ('recording','transcribing','summarizing');`,
+const activeRecordings = Number(sqlite(
+  `SELECT COUNT(*) FROM meetings WHERE status = 'recording';`,
+));
+const recoverableProcessingMeetings = Number(sqlite(
+  `SELECT COUNT(*) FROM meetings WHERE status IN ('transcribing','summarizing');`,
 ));
 const activeStages = Number(sqlite(
   `SELECT COUNT(*) FROM meeting_pipeline_stages WHERE state = 'running';`,
@@ -36,7 +39,12 @@ process.stdout.write(JSON.stringify({
   transcriptBlocks: count('transcript_blocks'),
   todos: count('todo_items'),
   pipelineStages: count('meeting_pipeline_stages'),
-  activeMeetings,
+  // Keep activeMeetings as a compatibility alias, but define "active" as an
+  // open microphone session. Transcription and summary work are durable and
+  // deliberately safe to interrupt during an in-place certificate renewal.
+  activeMeetings: activeRecordings,
+  activeRecordings,
+  recoverableProcessingMeetings,
   activeStages,
   hasDurableLog,
   hasQwenModel,

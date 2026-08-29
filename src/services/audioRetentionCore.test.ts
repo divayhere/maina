@@ -12,11 +12,12 @@ describe('audio retention policy', () => {
       maxBytes: 1_000,
       items: [
         { id: 'done', startedAt: 9 * DAY, status: 'transcribed', bytes: 400 },
+        { id: 'notes-running', startedAt: 9 * DAY, status: 'summarizing', bytes: 300 },
         { id: 'recording', startedAt: 0, status: 'recording', bytes: 900 },
         { id: 'asr', startedAt: 0, status: 'transcribing', bytes: 900 },
       ],
     });
-    expect(result.deleteIds).toEqual(['done']);
+    expect(result.deleteIds).toEqual(['done', 'notes-running']);
     expect(result.expiredIncompleteIds).toEqual([]);
   });
 

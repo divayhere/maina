@@ -10,11 +10,12 @@ const capture = path.join(moduleRoot, 'ios', 'MainaIOSNativeAudioCapture.swift')
 const module = path.join(moduleRoot, 'ios', 'MainaRecorderModule.swift');
 const qwen = path.join(moduleRoot, 'ios', 'MainaQwenAsr.swift');
 const continuedProcessing = path.join(moduleRoot, 'ios', 'MainaIOSContinuedProcessing.swift');
+const continuedProcessingPlugin = path.join(project, 'plugins', 'withMainaIOSContinuedProcessing.js');
 const sherpaHeaders = path.join(moduleRoot, 'ios', 'vendor', 'sherpa-onnx.xcframework', 'ios-arm64', 'Headers');
 const config = JSON.parse(readFileSync(path.join(moduleRoot, 'expo-module.config.json'), 'utf8'));
 const appConfig = JSON.parse(readFileSync(path.join(project, 'app.json'), 'utf8'));
 
-for (const file of [capture, module, qwen, continuedProcessing]) {
+for (const file of [capture, module, qwen, continuedProcessing, continuedProcessingPlugin]) {
   if (!existsSync(file) || readFileSync(file, 'utf8').trim().length === 0) {
     throw new Error(`Required iOS recorder source is missing: ${file}`);
   }
@@ -30,6 +31,9 @@ if (!appConfig.expo.ios?.infoPlist?.UIBackgroundModes?.includes('processing')) {
 }
 if (!appConfig.expo.ios?.infoPlist?.BGTaskSchedulerPermittedIdentifiers?.includes('com.divay.maina.staging.continued-processing.*')) {
   throw new Error('Maina iOS continued-processing task identifier is not permitted.');
+}
+if (!appConfig.expo.plugins?.includes('./plugins/withMainaIOSContinuedProcessing')) {
+  throw new Error('Maina iOS must install its continued-processing AppDelegate registration plugin.');
 }
 for (const token of [
   'AVAudioSession.routeChangeNotification',
@@ -63,9 +67,20 @@ for (const token of [
   'BGTaskScheduler.shared.submit',
   'beginBackgroundTask',
   'setTaskCompleted',
+  'public static func registerLaunchHandler()',
+  'continued-processing-handler-unregistered',
 ]) {
   if (!readFileSync(continuedProcessing, 'utf8').includes(token)) {
     throw new Error(`iOS continued-processing invariant missing: ${token}`);
+  }
+}
+for (const token of [
+  'withAppDelegate',
+  'internal import MainaRecorder',
+  'MainaIOSContinuedProcessing.registerLaunchHandler()',
+]) {
+  if (!readFileSync(continuedProcessingPlugin, 'utf8').includes(token)) {
+    throw new Error(`iOS AppDelegate registration invariant missing: ${token}`);
   }
 }
 

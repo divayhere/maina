@@ -13,7 +13,11 @@ export type AudioRetentionDecision = {
   projectedBytes: number;
 };
 
-const COMPLETE_STATUSES = new Set<MeetingStatus>(['transcribed', 'summarized']);
+// Cloud notes are queued before retention runs. At that point the meeting is
+// already `summarizing`, but its transcript is durable and the summarizer reads
+// text from SQLite—not the capture files. Treat that state as complete so the
+// temporary audio is removed immediately instead of waiting for another launch.
+const COMPLETE_STATUSES = new Set<MeetingStatus>(['transcribed', 'summarizing', 'summarized']);
 const ACTIVE_STATUSES = new Set<MeetingStatus>(['recording', 'transcribing']);
 
 export function planAudioRetention(input: {

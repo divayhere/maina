@@ -11,7 +11,11 @@ import {
 import { Platform } from 'react-native';
 import { completedCaptureDurationRepair } from '@/core/recording/checkpoint';
 import { materialCaptureGapError } from '@/core/recording/captureGap';
-import { hasCompleteNativeTranscript, terminalNativeMeetingRepair } from '@/core/recording/nativeCaptureReconciliation';
+import {
+  hasCompleteNativeTranscript,
+  hasInterruptedNativeAsrCheckpoint,
+  terminalNativeMeetingRepair,
+} from '@/core/recording/nativeCaptureReconciliation';
 import {
   acknowledgeNativePostProcessingResult,
   beginIOSContinuedProcessing,
@@ -433,7 +437,11 @@ async function reconcilePendingNativeMeetingWorkInternal(): Promise<number> {
     }
 
     if (
-      (meeting.status === 'transcribing' || meeting.status === 'transcript_partial')
+      (
+        meeting.status === 'transcribing'
+        || meeting.status === 'transcript_partial'
+        || hasInterruptedNativeAsrCheckpoint(meeting)
+      )
       && (
         meeting.transcriptionWindowCount === 0
         || (meeting.transcriptionCompletedWindows + meeting.transcriptionFailedWindows) < meeting.transcriptionWindowCount

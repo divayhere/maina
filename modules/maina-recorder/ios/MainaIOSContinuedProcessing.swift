@@ -8,8 +8,8 @@ import UIKit
  * short UIApplication background grace period and rely on durable per-window
  * checkpoints plus BGProcessing for eventual continuation.
  */
-final class MainaIOSContinuedProcessing {
-  static let shared = MainaIOSContinuedProcessing()
+public final class MainaIOSContinuedProcessing {
+  public static let shared = MainaIOSContinuedProcessing()
 
   private let queue = DispatchQueue(label: "com.divay.maina.ios.continued-processing")
   private let wildcardIdentifier = "com.divay.maina.staging.continued-processing.*"
@@ -22,12 +22,31 @@ final class MainaIOSContinuedProcessing {
 
   private init() {}
 
+  /**
+   * Register the iOS continued-processing launch handler during the native app
+   * launch sequence, before React Native starts. A pending task can relaunch
+   * Maina before JavaScript exists; registering from the Expo module's first
+   * method call is therefore too late and iOS terminates the process.
+   */
+  public static func registerLaunchHandler() {
+    guard #available(iOS 26.0, *) else { return }
+    shared.queue.sync {
+      shared.registerIfNeeded()
+    }
+  }
+
   func begin(title: String, subtitle: String, totalUnits: Int) -> [String: Any] {
     queue.sync {
       self.completedUnits = 0
       self.totalUnits = Int64(max(1, totalUnits))
       if #available(iOS 26.0, *) {
-        registerIfNeeded()
+        // Never attempt a late registration after app launch. If the generated
+        // native entry point is misconfigured, preserve the meeting with the
+        // ordinary background grace period and durable checkpoint worker.
+        guard registered else {
+          beginFallbackTask()
+          return ["started": fallbackTask != .invalid, "mode": "fallback", "reason": "continued-processing-handler-unregistered"]
+        }
         let request = BGContinuedProcessingTaskRequest(
           identifier: requestIdentifier,
           title: title,

@@ -24,6 +24,11 @@ RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)"
 RUN_ROOT="$BACKUP_ROOT/Backups/$RUN_ID"
 mkdir -p "$RUN_ROOT/preflight" "$RUN_ROOT/device"
 
+# CoreDevice tunnels are demand-driven and may appear disconnected in
+# `list devices` until a device service is acquired. Establish that service
+# immediately before the strict wired-iPhone identity gate; a locked or
+# unavailable phone still fails closed here.
+xcrun devicectl device info processes --device "$DEVICE_ID" --timeout 15 --quiet >/dev/null
 xcrun devicectl list devices --json-output "$RUN_ROOT/devices.json" --quiet
 xcrun devicectl device info apps --device "$DEVICE_ID" --bundle-id "$BUNDLE_ID" \
   --columns '*' --json-output "$RUN_ROOT/apps.json" --quiet
@@ -39,15 +44,18 @@ NODE
 # Copy before terminating. The durable DB state is the idle gate; an active
 # recording/transcription makes renewal fail closed.
 xcrun devicectl device copy from --device "$DEVICE_ID" --domain-type appDataContainer \
-  --domain-identifier "$BUNDLE_ID" --source . --destination "$RUN_ROOT/preflight/container" --quiet
+  --domain-identifier "$BUNDLE_ID" --source / --destination "$RUN_ROOT/preflight/container" --quiet
 node scripts/inspect-mobile-backup.mjs "$RUN_ROOT/preflight/container" > "$RUN_ROOT/preflight-snapshot.json"
 node --input-type=module - "$RUN_ROOT/preflight-snapshot.json" <<'NODE'
 import { readFileSync } from 'node:fs';
 const snapshot = JSON.parse(readFileSync(process.argv[2]));
-if (snapshot.activeMeetings > 0 || snapshot.activeStages > 0) {
-  throw new Error(`Maina is busy (meetings=${snapshot.activeMeetings}, stages=${snapshot.activeStages}); renewal refused.`);
+if (snapshot.activeRecordings > 0) {
+  throw new Error(`Maina is actively recording (${snapshot.activeRecordings}); renewal refused.`);
 }
 console.log(`Idle gate passed; ${snapshot.meetings} meetings and ${snapshot.transcriptBlocks} transcript blocks are durable.`);
+if (snapshot.recoverableProcessingMeetings > 0 || snapshot.activeStages > 0) {
+  console.log(`Checkpoint gate passed; ${snapshot.recoverableProcessingMeetings} processing meeting(s) and ${snapshot.activeStages} running stage(s) will resume after the in-place update.`);
+}
 NODE
 
 if $DRY_RUN; then
@@ -57,9 +65,9 @@ fi
 
 xcrun devicectl device process terminate --device "$DEVICE_ID" --bundle-id "$BUNDLE_ID" >/dev/null 2>&1 || true
 xcrun devicectl device copy from --device "$DEVICE_ID" --domain-type appDataContainer \
-  --domain-identifier "$BUNDLE_ID" --source . --destination "$RUN_ROOT/device/container" --quiet
+  --domain-identifier "$BUNDLE_ID" --source / --destination "$RUN_ROOT/device/container" --quiet
 xcrun devicectl device copy from --device "$DEVICE_ID" --domain-type systemCrashLogs \
-  --source . --destination "$BACKUP_ROOT/Crash Reports/$RUN_ID" --quiet || true
+  --source / --destination "$BACKUP_ROOT/Crash Reports/$RUN_ID" --quiet || true
 node scripts/inspect-mobile-backup.mjs "$RUN_ROOT/device/container" > "$RUN_ROOT/before.json"
 
 npm run ios:prepare
@@ -79,13 +87,24 @@ import { execFileSync } from 'node:child_process';
 import { validateCandidateIdentity } from './scripts/lib/renewal-core.mjs';
 const [, , info, profile, entitlements, bundleId, teamId] = process.argv;
 const pl = (path, key) => execFileSync('/usr/libexec/PlistBuddy', ['-c', `Print :${key}`, path], { encoding: 'utf8' }).trim();
-const groups = execFileSync('/usr/libexec/PlistBuddy', ['-c', 'Print :keychain-access-groups', entitlements], { encoding: 'utf8' });
+const profileExpiry = execFileSync('/usr/bin/plutil', ['-extract', 'ExpirationDate', 'raw', profile], {
+  encoding: 'utf8',
+}).trim();
+let groups = '';
+try {
+  groups = execFileSync('/usr/libexec/PlistBuddy', ['-c', 'Print :keychain-access-groups', entitlements], {
+    encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'],
+  });
+} catch {
+  // No explicit group means the default application-identifier group; the
+  // identity check below still pins the same Team ID and bundle identifier.
+}
 validateCandidateIdentity({
   bundleId: pl(info, 'CFBundleIdentifier'),
   teamId: pl(entitlements, 'com.apple.developer.team-identifier'),
   applicationIdentifier: pl(entitlements, 'application-identifier'),
   keychainGroups: groups.split(/\s+/).filter((x) => x.includes('.')),
-  profileExpiresAt: new Date(pl(profile, 'ExpirationDate')),
+  profileExpiresAt: new Date(profileExpiry),
 }, { bundleId, teamId, minimumExpiryMs: Date.now() + 2 * 86_400_000 });
 console.log('Candidate signing identity, Keychain group, and profile expiry verified.');
 NODE
@@ -95,7 +114,7 @@ xcrun devicectl device install app --device "$DEVICE_ID" "$APP"
 xcrun devicectl device process launch --device "$DEVICE_ID" "$BUNDLE_ID"
 sleep 5
 xcrun devicectl device copy from --device "$DEVICE_ID" --domain-type appDataContainer \
-  --domain-identifier "$BUNDLE_ID" --source . --destination "$RUN_ROOT/postflight-container" --quiet
+  --domain-identifier "$BUNDLE_ID" --source / --destination "$RUN_ROOT/postflight-container" --quiet
 node scripts/inspect-mobile-backup.mjs "$RUN_ROOT/postflight-container" > "$RUN_ROOT/after.json"
 node scripts/validate-renewal-snapshots.mjs "$RUN_ROOT/before.json" "$RUN_ROOT/after.json"
 echo "Personal-signing renewal succeeded in place. Backup: $RUN_ROOT"

@@ -26,6 +26,20 @@ export function hasCompleteNativeTranscript(meeting: NativeCaptureTerminalMeetin
     && meeting.transcriptionCompletedWindows === meeting.transcriptionWindowCount;
 }
 
+/**
+ * iOS can be terminated after individual windows commit but before the JS
+ * pipeline has persisted its `transcribing` label. In that narrow state the
+ * durable counters, not the stale `recorded` label, prove there is unfinished
+ * ASR work. Fully checked no-speech recordings deliberately return false.
+ */
+export function hasInterruptedNativeAsrCheckpoint(meeting: NativeCaptureTerminalMeeting): boolean {
+  const checked = meeting.transcriptionCompletedWindows + meeting.transcriptionFailedWindows;
+  return meeting.status === 'recorded'
+    && !!meeting.audioUri
+    && meeting.transcriptionWindowCount > 0
+    && checked < meeting.transcriptionWindowCount;
+}
+
 export function shouldPreserveTerminalNativeMeeting(meeting: NativeCaptureTerminalMeeting): boolean {
   return hasCompleteNativeTranscript(meeting)
     && (meeting.status === 'transcribed' || meeting.status === 'summarizing' || meeting.status === 'summarized');

@@ -42,8 +42,17 @@ export function validateCandidateIdentity(candidate, expected) {
   if (candidate.applicationIdentifier !== `${expected.teamId}.${expected.bundleId}`) {
     throw new Error('Candidate application identifier mismatch.');
   }
-  if (!candidate.keychainGroups.includes(`${expected.teamId}.${expected.bundleId}`)) {
-    throw new Error('Candidate Keychain access group mismatch.');
+  // An explicit keychain-access-groups entitlement is optional when the app
+  // uses only its default application-identifier group (Expo SecureStore's
+  // normal configuration). If groups are explicitly declared, however, they
+  // must preserve this app's identity or the in-place update could lose access
+  // to previously stored sessions.
+  if (
+    candidate.keychainGroups.length > 0
+    && !candidate.keychainGroups.includes(`${expected.teamId}.${expected.bundleId}`)
+    && !candidate.keychainGroups.includes(`${expected.teamId}.*`)
+  ) {
+    throw new Error('Candidate explicit Keychain access group mismatch.');
   }
   if (!(candidate.profileExpiresAt instanceof Date) || Number.isNaN(candidate.profileExpiresAt.valueOf())) {
     throw new Error('Candidate provisioning expiry is invalid.');
