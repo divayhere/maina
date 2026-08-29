@@ -1,0 +1,36 @@
+{
+  "schema_version": "maina.mobile-contract-pin.v1",
+  "backend_commit": "8d58470",
+  "source_files": {
+    "openapi": {
+      "path": "contracts/openapi.v0.1.json",
+      "sha256": "ab9750f84d4188ee5c23ffb5c78fe2d801e7a6b6fa182fe247dc8afb2b65abfa"
+    },
+    "apiTypes": {
+      "path": "src/contracts/types.ts",
+      "sha256": "310d2bedde38f0994598c188d343c4e2760b3d91b4d38e777f1926b5662483a8"
+    },
+    "retrievalTypes": {
+      "path": "src/retrieval/contracts.ts",
+      "sha256": "bf59dae9abfb80b8cf847d8d26b349e138404178db5327eb4ac7b4dcaf794b0b"
+    },
+    "recallIntent": {
+      "path": "src/retrieval/intent.ts",
+      "sha256": "9a12932253a81fa171620c26136e52267ed4335f79f95f057574a7848888524c"
+    },
+    "handoff": {
+      "path": "docs/RELEASE_A_CONTRACT_HANDOFF_2026-08-29.md",
+      "sha256": "bc8fe3fb79eff02528ae2209d70791cbad3bcb013af1ba48953e457353b24563"
+    }
+  },
+  "generated_types": {
+    "path": "src/contracts/mkc-release-a.generated.ts",
+    "sha256": "bcd3326cc6010624fc8e7f1943ae3b78d0c381af82410b58958976abcd8ff7fe"
+  },
+  "activation": {
+    "meetings": "contract-complete-default-off",
+    "frozen_open": "blocked-openapi-generic-response",
+    "frozen_chapter": "blocked-openapi-generic-response",
+    "frozen_source": "blocked-until-frozen-open-boundary-complete"
+  }
+}

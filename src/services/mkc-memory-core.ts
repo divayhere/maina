@@ -1,6 +1,7 @@
 export type MkcMemoryResourceKind =
   | 'meeting-list'
   | 'meeting-detail'
+  | 'meeting-transcript'
   | 'frozen-recall'
   | 'pulse'
   | 'saved-recalls';

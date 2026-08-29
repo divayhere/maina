@@ -1,0 +1,626 @@
+import type {
+  CanonicalCorrectionPackage,
+  CanonicalSourcePackage,
+  FirefliesImportRequest,
+  IntakeJobCreateRequest,
+} from "../domain/schemas";
+
+export type BudgetMetric = {
+  metricKey: string;
+  hardLimit: number;
+  unit: "daily" | "monthly" | "gauge";
+  note: string;
+  referenceUrl: string;
+  used: number;
+  ratio: number;
+  stage: "normal" | "info" | "warning" | "degraded" | "critical";
+};
+
+export type ErrorResponse = {
+  error: {
+    code: string;
+    message: string;
+    details: unknown | null;
+  };
+  request_id: string;
+};
+
+export type SourceIngestResponse =
+  | {
+      status: "created";
+      source_key: string;
+      source_id: string;
+      canonical_sha256: string;
+      canonical_r2_key: string;
+      ingested_at: string;
+    }
+  | {
+      status: "idempotent";
+      source_key: string;
+      canonical_sha256: string;
+    };
+
+export type FirefliesImportResponse = SourceIngestResponse & {
+  import: {
+    provider: "fireflies";
+    external_id: string;
+    snapshot_status: "created" | "idempotent";
+    snapshot_r2_key: string;
+    snapshot_sha256: string;
+  };
+  allocation: {
+    owner: "mkc";
+    canonical_project: "captured-meetings";
+    source_topics: string[];
+    semantic_status: "queued_or_recoverable";
+  };
+};
+
+export type CorrectionIngestResponse =
+  | {
+      status: "created";
+      correction_id: string;
+      correction_key: string;
+      source_key: string;
+      canonical_r2_key: string;
+      canonical_sha256: string;
+      supersedes_correction_key: string | null;
+      version_tag: string | null;
+    }
+  | {
+      status: "idempotent";
+      correction_key: string;
+      source_key: string;
+      canonical_r2_key: string;
+      canonical_sha256: string;
+      supersedes_correction_key: string | null;
+      version_tag: string | null;
+    };
+
+export type SourceCorrectionRecord = {
+  correction_key: string;
+  correction_type: string;
+  field_path: string;
+  body: string;
+  author: string;
+  occurred_at: string;
+  canonical_r2_key: string;
+  canonical_sha256: string;
+  supersedes_correction_key: string | null;
+  version_tag: string | null;
+  provenance: Record<string, unknown>;
+  metadata: Record<string, unknown>;
+};
+
+export type FieldVersionRecord = {
+  field_path: string;
+  latest_correction_key: string;
+  latest_occurred_at: string;
+  latest_version_tag: string | null;
+  lineage_depth: number;
+};
+
+export type SourceEventRecord = {
+  request_id: string;
+  source_key: string | null;
+  event_type: string;
+  status: string;
+  detail_code: string;
+  message: string;
+  created_at: string;
+  details: Record<string, unknown> | null;
+};
+
+export type SourceDetailResponse = {
+  source_key: string;
+  source_type: string;
+  title: string;
+  occurred_at: string;
+  ingested_at: string;
+  workspace: {
+    key: string;
+    name: string;
+  };
+  project: {
+    key: string;
+    name: string;
+  };
+  schema_version: string;
+  canonical_r2_key: string;
+  canonical_sha256: string;
+  summary_text: string | null;
+  provenance: Record<string, unknown>;
+  metadata: Record<string, unknown>;
+  blocks: Array<{
+    block_key: string;
+    kind: string;
+    text: string;
+    started_at: string | null;
+    ended_at: string | null;
+    metadata: Record<string, unknown>;
+  }>;
+  topics: Array<{
+    topic_key: string;
+    label: string;
+    confidence: number | null;
+    origin: "source" | "semantic";
+  }>;
+  semantic: {
+    status: "queued" | "processing" | "ready" | "failed";
+    classifier_key: string;
+    classifier_version: string;
+    provider_kind: "ai" | "deterministic" | null;
+    model_name: string | null;
+    classification_fallback_reason: string | null;
+    vector_state: "pending" | "disabled" | "submitted" | "failed";
+    vector_validation: {
+      status: "pending" | "validated" | "failed";
+      expected_chunk_count: number | null;
+      observed_chunk_count: number | null;
+      checked_at: string | null;
+      error_code: string | null;
+    } | null;
+    topic_count: number;
+    chunk_count: number;
+    error_code: string | null;
+    error_message: string | null;
+    completed_at: string | null;
+    project: {
+      key: string;
+      label: string | null;
+      confidence: number | null;
+    } | null;
+  } | null;
+  memory_items: Array<{
+    item_type: string;
+    body: string;
+  }>;
+  corrections: SourceCorrectionRecord[];
+  current_field_versions: FieldVersionRecord[];
+};
+
+export type SourceHistoryResponse = {
+  source: {
+    source_key: string;
+    source_type: string;
+    title: string;
+    occurred_at: string;
+    ingested_at: string;
+    schema_version: string;
+    canonical_r2_key: string;
+    canonical_sha256: string;
+    workspace: {
+      key: string;
+      name: string;
+    };
+    project: {
+      key: string;
+      name: string;
+    };
+  };
+  corrections: SourceCorrectionRecord[];
+  current_field_versions: FieldVersionRecord[];
+  events: SourceEventRecord[];
+};
+
+export type SourceCorrectionAuthoringTarget = {
+  field_path: string;
+  label: string;
+  value_kind: "string" | "string_array";
+  current_value: string | string[];
+  latest_correction_key: string | null;
+  latest_version_tag: string | null;
+  latest_occurred_at: string | null;
+  lineage_depth: number;
+};
+
+export type SourceCorrectionTargetsResponse = {
+  source_key: string;
+  source_type: string;
+  title: string;
+  canonical_r2_key: string;
+  canonical_sha256: string;
+  target_count: number;
+  targets: SourceCorrectionAuthoringTarget[];
+};
+
+export type AuthoredSourceCorrectionRequest = {
+  client_correction_id: string;
+  correction_type: "annotation" | "fact_fix" | "classification_fix" | "note";
+  field_path: string;
+  body: string;
+  supersedes_correction_key?: string;
+  version_tag?: string;
+  metadata?: Record<string, unknown>;
+};
+
+export type AuthoredSourceCorrectionResponse = CorrectionIngestResponse & {
+  field_path: string;
+  author: string;
+  occurred_at: string;
+};
+
+export type RecallResponse = {
+  query: string;
+  count: number;
+  results: Array<{
+    source_key: string;
+    title: string;
+    source_type: string;
+    occurred_at: string;
+    workspace_key: string;
+    project_key: string;
+    summary_text: string | null;
+    score: number;
+    match_reasons: string[];
+    matched_evidence: Array<{
+      evidence_kind: string;
+      evidence_key: string | null;
+      field_path: string | null;
+      snippet: string;
+    }>;
+    snippets: string[];
+  }>;
+};
+
+export type MeetingReadiness = "ready" | "transcript_only" | "processing" | "summary_failed";
+
+export type MeetingLibraryItem = {
+  source_key: string;
+  title: string;
+  occurred_at: string;
+  ingested_at: string;
+  readiness: MeetingReadiness;
+  duration_seconds: number | null;
+  provenance: { kind: "maina_app"; platform: "android" | "ios" | null };
+  summary_preview: string | null;
+  counts: { decisions: number; todos: number; open_questions: number };
+};
+
+export type MeetingLibraryResponse = {
+  schema_version: "mkc.meeting-library.v1";
+  filters: {
+    query: string | null;
+    occurred_from: string | null;
+    occurred_to_exclusive: string | null;
+    readiness: string | null;
+    sort: "newest" | "oldest";
+  };
+  total: number;
+  meetings: MeetingLibraryItem[];
+  page: { size: number; has_more: boolean; next_cursor: string | null };
+};
+
+export type MeetingTranscriptUnit = {
+  block_key: string;
+  kind: string;
+  text: string;
+  started_at: string | null;
+  ended_at: string | null;
+};
+
+export type MeetingTranscriptPage = {
+  schema_version: "mkc.meeting-transcript-page.v1";
+  source_key: string;
+  transcript_sha256: string;
+  correction_key: string | null;
+  total_units: number;
+  units: MeetingTranscriptUnit[];
+  page: { size: number; has_more: boolean; next_cursor: string | null };
+};
+
+export type MeetingDetailResponse = {
+  schema_version: "mkc.meeting-detail.v1";
+  source_key: string;
+  title: string;
+  occurred_at: string;
+  ingested_at: string;
+  readiness: MeetingReadiness;
+  duration_seconds: number | null;
+  provenance: {
+    kind: "maina_app";
+    platform: "android" | "ios" | null;
+    captured_at: string | null;
+    client_schema_version: string | null;
+  };
+  workspace: Record<string, unknown>;
+  project: Record<string, unknown>;
+  topics: Array<Record<string, unknown>>;
+  summary: string | null;
+  decisions: string[];
+  todos: string[];
+  open_questions: string[];
+  important_points: string[];
+  transcript: {
+    blocks: Array<MeetingTranscriptUnit & { metadata?: Record<string, unknown> }>;
+    correction: { correction_key: string; body: string; occurred_at: string } | null;
+    continuation: {
+      schema_version: "mkc.meeting-transcript-page.v1";
+      total_units: number;
+      transcript_sha256: string;
+      url: string;
+    };
+  };
+  corrections: Array<Record<string, unknown>>;
+  current_field_versions: Array<Record<string, unknown>>;
+  correction_targets_url: string;
+};
+
+export type FrozenRecallSourceResponse = {
+  schema_version: "mkc.frozen-recall-source.v1";
+  search_id: string;
+  result_sha256: string;
+  bundle_sha256: string;
+  expires_at: string;
+  coverage: import("../retrieval/contracts").RecallCoverageReceiptV1;
+  source: import("../retrieval/contracts").FrozenRecallSource;
+};
+
+export type TopicItem = {
+  topic_key: string;
+  label: string;
+  source_count: number;
+  latest_occurred_at: string;
+};
+
+export type TopicSourcesResponse = {
+  topic_key: string;
+  label: string;
+  count: number;
+  results: Array<{
+    source_key: string;
+    title: string;
+    source_type: string;
+    occurred_at: string;
+    workspace_key: string;
+    project_key: string;
+    summary_text: string | null;
+  }>;
+};
+
+export type ResourceStatusResponse = {
+  stage: "normal" | "info" | "warning" | "degraded" | "critical";
+  metrics: BudgetMetric[];
+  policy: {
+    profile: "free" | "paid";
+    enforcement_enabled: boolean;
+    rules: Array<{
+      action:
+        | "ingest_write"
+        | "destructive_write"
+        | "read_query"
+        | "maintenance_rebuild";
+      blockAt: "normal" | "info" | "warning" | "degraded" | "critical";
+    }>;
+  };
+  verified_on: string;
+  request_id: string;
+};
+
+export type MaintenanceStatusResponse = {
+  service: string;
+  version: string;
+  request_id: string;
+  verified_on: string;
+  budget: {
+    stage: "normal" | "info" | "warning" | "degraded" | "critical";
+    metrics: BudgetMetric[];
+    policy: ResourceStatusResponse["policy"];
+  };
+  indexes: {
+    active_sources: number;
+    deleted_sources: number;
+    corrections: number;
+    ingestion_events: number;
+  };
+  canonical_inventory: {
+    source_packages: number;
+    correction_packages: number;
+  };
+  drift: {
+    source_gap: number;
+    correction_gap: number;
+    rebuild_recommended: boolean;
+  };
+};
+
+export type CanonicalInventoryResponse = {
+  request_id: string;
+  source_packages: {
+    count: number;
+    sample_keys: string[];
+  };
+  correction_packages: {
+    count: number;
+    sample_keys: string[];
+  };
+};
+
+export type MaintenanceRecentEventsResponse = {
+  request_id: string;
+  count: number;
+  events: SourceEventRecord[];
+};
+
+export type ProjectTimelineItem = {
+  source_key: string;
+  title: string;
+  source_type: string;
+  occurred_at: string;
+  workspace_key: string;
+  project_key: string;
+  summary_text: string | null;
+};
+
+export type WorkspaceItem = {
+  workspace_key: string;
+  name: string;
+};
+
+export type ProjectItem = {
+  workspace_key: string;
+  project_key: string;
+  project_name: string;
+};
+
+export type DeleteSourceResponse = {
+  deleted: true;
+  source_key: string;
+};
+
+export type IntakeJobFile = {
+  file_id: string;
+  client_file_id: string | null;
+  file_name: string;
+  content_type: string;
+  declared_size_bytes: number;
+  uploaded_size_bytes: number | null;
+  uploaded_sha256: string | null;
+  staging_r2_key: string | null;
+  status: "pending" | "uploaded";
+  uploaded_at: string | null;
+  promotion_state: "pending" | "promoted";
+  promoted_source_key: string | null;
+  promoted_canonical_r2_key: string | null;
+  promoted_canonical_sha256: string | null;
+  promoted_at: string | null;
+  metadata: Record<string, unknown>;
+  upload_method: "PUT";
+  upload_url: string;
+};
+
+export type IntakeJobResponse = {
+  job_id: string;
+  status: "awaiting_upload" | "staged";
+  owner: {
+    scope_kind: "user" | "token";
+    principal_label: string;
+    auth_kind: "api_token" | "bootstrap" | "session";
+  };
+  workspace: {
+    key: string;
+    name: string;
+  };
+  project: {
+    key: string;
+    name: string;
+  };
+  intake_note: string | null;
+  declared_file_count: number;
+  declared_total_size_bytes: number;
+  uploaded_file_count: number;
+  uploaded_total_size_bytes: number;
+  created_at: string;
+  staged_at: string | null;
+  files: IntakeJobFile[];
+};
+
+export type IntakeFileUploadResponse =
+  | {
+      status: "uploaded";
+      job_id: string;
+      file_id: string;
+      file_name: string;
+      uploaded_size_bytes: number;
+      uploaded_sha256: string;
+      staging_r2_key: string;
+      uploaded_at: string;
+    }
+  | {
+      status: "idempotent";
+      job_id: string;
+      file_id: string;
+      file_name: string;
+      uploaded_size_bytes: number;
+      uploaded_sha256: string;
+      staging_r2_key: string;
+      uploaded_at: string;
+    };
+
+export type IntakeTextPromotionResult = {
+  file_id: string;
+  file_name: string;
+  source_key: string;
+  source_status: "created" | "idempotent";
+  canonical_sha256: string;
+  canonical_r2_key: string;
+  promoted_at: string;
+};
+
+export type IntakeTextPromotionResponse = {
+  job_id: string;
+  promotion_type: "text/plain";
+  promoted_count: number;
+  results: IntakeTextPromotionResult[];
+};
+
+export type IntakeJobListResponse = {
+  count: number;
+  request_id: string;
+  jobs: Array<{
+    job_id: string;
+    status: "awaiting_upload" | "staged";
+    promotion_state:
+      "pending" | "processing" | "complete" | "partial" | "attention_required";
+    promotion_summary: Record<string, number>;
+    declared_file_count: number;
+    uploaded_file_count: number;
+    created_at: string;
+    staged_at: string | null;
+    files: Array<{
+      file_id: string;
+      file_name: string;
+      content_type: string;
+      declared_size_bytes: number;
+      status: "pending" | "uploaded";
+      promotion_state: string;
+      promoted_source_key: string | null;
+      promoted_at: string | null;
+      conversion_error_code: string | null;
+      conversion_error_message: string | null;
+    }>;
+  }>;
+};
+
+export type RebuildResponse = {
+  rebuilt_sources: number;
+  rebuilt_corrections: number;
+  rebuild_id: string;
+};
+
+export type MkcApiContract = {
+  requests: {
+    source: CanonicalSourcePackage;
+    research: CanonicalSourcePackage;
+    correction: CanonicalCorrectionPackage;
+    intakeJobCreate: IntakeJobCreateRequest;
+    authoredSourceCorrection: AuthoredSourceCorrectionRequest;
+    firefliesImport: FirefliesImportRequest;
+  };
+  responses: {
+    sourceIngest: SourceIngestResponse;
+    firefliesImport: FirefliesImportResponse;
+    correctionIngest: CorrectionIngestResponse;
+    sourceCorrectionTargets: SourceCorrectionTargetsResponse;
+    authoredSourceCorrection: AuthoredSourceCorrectionResponse;
+    intakeJob: IntakeJobResponse;
+    intakeJobList: IntakeJobListResponse;
+    intakeFileUpload: IntakeFileUploadResponse;
+    intakeTextPromotion: IntakeTextPromotionResponse;
+    sourceDetail: SourceDetailResponse;
+    sourceHistory: SourceHistoryResponse;
+    recall: RecallResponse;
+    topicItem: TopicItem;
+    topicSources: TopicSourcesResponse;
+    resourceStatus: ResourceStatusResponse;
+    maintenanceStatus: MaintenanceStatusResponse;
+    canonicalInventory: CanonicalInventoryResponse;
+    maintenanceRecentEvents: MaintenanceRecentEventsResponse;
+    timelineItem: ProjectTimelineItem;
+    workspaceItem: WorkspaceItem;
+    projectItem: ProjectItem;
+    deleteSource: DeleteSourceResponse;
+    rebuild: RebuildResponse;
+    error: ErrorResponse;
+  };
+};
