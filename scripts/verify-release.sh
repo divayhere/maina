@@ -6,6 +6,7 @@ PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 source "$PROJECT_DIR/scripts/maina-env.sh"
 
 cd "$PROJECT_DIR"
+"$PROJECT_DIR/scripts/ensure-gradle.sh"
 "$PROJECT_DIR/scripts/verify-toolchain.sh"
 npm run verify:coordination
 npm run verify:native-recorder
@@ -33,7 +34,7 @@ EXPORT_DIR="$(mktemp -d -t maina-export.XXXXXX)"
 npx expo export --platform android --output-dir "$EXPORT_DIR"
 
 cd "$PROJECT_DIR/android"
-./gradlew \
+"$MAINA_GRADLE_HOME/bin/gradle" \
   --gradle-user-home "$GRADLE_USER_HOME" \
   --project-cache-dir "$MAINA_BUILD_ROOT/gradle-project-cache" \
   --init-script "$PROJECT_DIR/scripts/gradle-output-redirect.init.gradle" \

@@ -17,10 +17,18 @@ if [[ "$java_version" != *'17.'* ]]; then
   exit 1
 fi
 
+if [[ ! -x "$MAINA_GRADLE_HOME/bin/gradle" ]]; then
+  echo "Pinned Gradle is missing; run scripts/ensure-gradle.sh." >&2
+  exit 1
+fi
+gradle_version="$($MAINA_GRADLE_HOME/bin/gradle --version | sed -n 's/^Gradle //p')"
+[[ "$gradle_version" == "9.3.1" ]] || { echo "Expected Gradle 9.3.1; found $gradle_version." >&2; exit 1; }
+
 adb="$ANDROID_HOME/platform-tools/adb"
 if ! "$adb" devices | awk 'NR > 1 && $1 == serial && $2 == "device" { found = 1 } END { exit found ? 0 : 1 }' serial="$MAINA_ADB_SERIAL"; then
   echo "Expected USB Pixel $MAINA_ADB_SERIAL is not connected and authorized." >&2
   exit 1
 fi
 
-printf 'Toolchain OK: Node %s, %s, USB device %s\n' "$(node --version)" "$java_version" "$MAINA_ADB_SERIAL"
+printf 'Toolchain OK: Node %s, %s, Gradle %s, USB device %s\n' \
+  "$(node --version)" "$java_version" "$gradle_version" "$MAINA_ADB_SERIAL"

@@ -17,6 +17,7 @@ MAINA_NODE_BIN="${MAINA_NODE_BIN:-/Users/divay/.cache/codex-runtimes/codex-prima
 MAINA_JAVA_HOME="${MAINA_JAVA_HOME:-/Users/divay/.cache/maina-build-tools/jdk17/Contents/Home}"
 MAINA_ANDROID_HOME="${MAINA_ANDROID_HOME:-/Users/divay/Library/Android/sdk}"
 MAINA_BUILD_ROOT="${MAINA_BUILD_ROOT:-/Users/divay/.cache/maina-build-v2}"
+MAINA_GRADLE_HOME="${MAINA_GRADLE_HOME:-/Users/divay/.cache/maina-build-tools/gradle/gradle-9.3.1}"
 MAINA_ADB_SERIAL="${MAINA_ADB_SERIAL:-47011FDAP000VE}"
 MAINA_ANDROID_ABI="${MAINA_ANDROID_ABI:-arm64-v8a}"
 
@@ -44,7 +45,7 @@ export GRADLE_USER_HOME="$MAINA_BUILD_ROOT/gradle-user-home"
 # Release artifact commands can opt into NODE_ENV=production after dependencies
 # are materialized.
 export MAINA_REPO_ROOT MAINA_NODE_BIN MAINA_JAVA_HOME MAINA_ANDROID_HOME
-export MAINA_BUILD_ROOT MAINA_ADB_SERIAL MAINA_ANDROID_ABI
+export MAINA_BUILD_ROOT MAINA_GRADLE_HOME MAINA_ADB_SERIAL MAINA_ANDROID_ABI
 
 # Runtime crash reporting uses the DSN embedded in the app. Source-map uploads
 # are a separate release operation and require a Sentry CLI auth token. Local
