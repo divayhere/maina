@@ -24,10 +24,18 @@ import {
   isRetryableCloudFailure,
   nextCloudRetry,
 } from '@/services/cloudRetryPolicy';
+import { isTerminalPartialTranscript } from '@/services/transcriptCoverage';
 
 const inflight = new Map<string, Promise<void>>();
 const TRANSCRIPT_PAGE_SIZE = 100;
 const RETRYABLE_MESSAGE = 'Waiting for internet. Maina will continue automatically.';
+
+function isMeetingPacketEligible(meeting: Meeting): boolean {
+  return meeting.status === 'transcribed'
+    || meeting.status === 'summarizing'
+    || meeting.status === 'summarized'
+    || isTerminalPartialTranscript(meeting);
+}
 
 type CloudPacketTodo = { text: string; source_quote?: string; source_timestamp?: string };
 type CloudPacket = {
@@ -287,7 +295,7 @@ async function retryCloudJob(jobId: string): Promise<CloudPacketJob> {
 async function reconcileMeetingPacket(meetingId: string, options?: { regenerate?: boolean }): Promise<void> {
   const meeting = await getMeeting(meetingId);
   if (!meeting) return;
-  if (!(meeting.status === 'transcribed' || meeting.status === 'summarizing' || meeting.status === 'summarized')) return;
+  if (!isMeetingPacketEligible(meeting)) return;
   if (!await getMainaCloudSession()) {
     await setMeetingSummaryState(meetingId, 'failed', { error: 'Connect Maina Cloud once to create notes automatically.' });
     return;
@@ -339,7 +347,7 @@ export async function maybeQueueMeetingPacket(meetingId: string): Promise<void> 
   const config = await getAppConfig();
   if (!config.autoSummarize || !await getMainaCloudSession()) return;
   const meeting = await getMeeting(meetingId);
-  if (!meeting || !(meeting.status === 'transcribed' || meeting.status === 'summarizing' || meeting.status === 'summarized')) return;
+  if (!meeting || !isMeetingPacketEligible(meeting)) return;
   await setMeetingSummaryState(meetingId, 'queued').catch(() => {});
   void runMeetingPacketGeneration(meetingId);
 }
@@ -354,7 +362,8 @@ export async function reconcilePendingMeetingPackets(): Promise<number> {
 export async function reconcileAutoSummaryEligibility(): Promise<number> {
   const config = await getAppConfig();
   if (!config.autoSummarize || !await getMainaCloudSession()) return 0;
-  const meetings = (await listMeetingsEligibleForSummaryQueue()).filter((meeting) => meeting.status === 'transcribed' && meeting.summaryStatus === 'idle');
+  const meetings = (await listMeetingsEligibleForSummaryQueue())
+    .filter((meeting) => isMeetingPacketEligible(meeting) && meeting.summaryStatus === 'idle');
   for (const meeting of meetings) await maybeQueueMeetingPacket(meeting.id);
   if (meetings.length > 0) log.info('summary', 'cloud meeting packets queued', { count: meetings.length });
   return meetings.length;
@@ -363,7 +372,7 @@ export async function reconcileAutoSummaryEligibility(): Promise<number> {
 export async function queueEligibleMeetingPackets(): Promise<number> {
   const config = await getAppConfig();
   if (!config.autoSummarize || !await getMainaCloudSession()) return 0;
-  const meetings = await listMeetingsEligibleForSummaryQueue();
+  const meetings = (await listMeetingsEligibleForSummaryQueue()).filter(isMeetingPacketEligible);
   for (const meeting of meetings) await maybeQueueMeetingPacket(meeting.id);
   return meetings.length;
 }

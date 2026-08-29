@@ -515,7 +515,7 @@ export async function listMeetingsEligibleForSummaryQueue(): Promise<Meeting[]> 
             (SELECT COUNT(*) FROM todo_items t WHERE t.meeting_id = m.id AND t.done = 0) AS open_todo_count,
             (SELECT COUNT(*) FROM todo_items t WHERE t.meeting_id = m.id) AS total_todo_count
      FROM meetings m
-     WHERE m.status IN ('transcribed', 'summarizing', 'summarized')
+     WHERE m.status IN ('transcribed', 'transcript_partial', 'summarizing', 'summarized')
        AND m.summary_status IN ('idle', 'failed', 'queued', 'running', 'retryable')
      ORDER BY m.started_at DESC`,
   );

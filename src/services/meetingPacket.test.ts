@@ -116,6 +116,42 @@ describe('meetingPacket cloud broker integration', () => {
     expect(mocks.maybeQueueSource).not.toHaveBeenCalled();
   });
 
+  it('creates notes after the bounded recovery budget leaves at least 99% audio coverage', async () => {
+    meeting = {
+      ...meeting,
+      status: 'transcript_partial',
+      transcriptionWindowCount: 645,
+      transcriptionCompletedWindows: 644,
+      transcriptionFailedWindows: 1,
+      transcriptionRecoveryRounds: 3,
+    };
+    mocks.cloudFetch.mockResolvedValue(new Response(JSON.stringify({
+      job_id: 'job-partial', source_key: 'meeting:maina:m1', packet_version: 'meeting-packet-v3', status: 'ready',
+      provider: 'google', model: 'managed-model', progress: { completed_sections: 1, total_sections: 1 },
+      packet: { title: 'Bounded recovery', summary: 'Usable notes from high-coverage audio.', decisions: [], todos: [], open_questions: [] },
+    })));
+
+    await runMeetingPacketGeneration('m1');
+
+    expect(mocks.saveMeetingPacket).toHaveBeenCalled();
+    expect(mocks.maybeQueueSource).toHaveBeenCalledWith('m1');
+  });
+
+  it('does not create notes from a materially incomplete transcript after retries end', async () => {
+    meeting = {
+      ...meeting,
+      status: 'transcript_partial',
+      transcriptionWindowCount: 100,
+      transcriptionCompletedWindows: 90,
+      transcriptionFailedWindows: 10,
+      transcriptionRecoveryRounds: 3,
+    };
+
+    await runMeetingPacketGeneration('m1');
+
+    expect(mocks.cloudFetch).not.toHaveBeenCalled();
+  });
+
 
   it('resumes an existing server job instead of creating a duplicate', async () => {
     meeting = { ...meeting, cloudNotesJobId: 'job-existing', summaryStatus: 'running' };
