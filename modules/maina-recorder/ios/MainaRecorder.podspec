@@ -24,7 +24,7 @@ Pod::Spec.new do |s|
   sherpa_framework = 'vendor/sherpa-onnx.xcframework'
   raise 'Run npm run ios:runtime before pod install.' unless File.exist?(File.join(__dir__, sherpa_framework))
   s.vendored_frameworks = sherpa_framework
-  s.frameworks = 'Accelerate', 'AVFAudio'
+  s.frameworks = 'Accelerate', 'AVFAudio', 'BackgroundTasks', 'UIKit'
 
   # Swift/Objective-C compatibility
   s.pod_target_xcconfig = {

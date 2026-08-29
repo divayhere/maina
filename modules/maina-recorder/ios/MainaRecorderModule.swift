@@ -14,6 +14,7 @@ import UIKit
 public final class MainaRecorderModule: Module {
   private let capture = MainaIOSNativeAudioCapture.shared
   private let qwen = MainaQwenAsr.shared
+  private let continuedProcessing = MainaIOSContinuedProcessing.shared
 
   public func definition() -> ModuleDefinition {
     Name("MainaRecorder")
@@ -90,6 +91,15 @@ public final class MainaRecorderModule: Module {
       }
     }
     AsyncFunction("releaseQwenAsr") { self.qwen.release() }
+    Function("beginIOSContinuedProcessing") { (title: String, subtitle: String, totalUnits: Int) in
+      self.continuedProcessing.begin(title: title, subtitle: subtitle, totalUnits: totalUnits)
+    }
+    Function("updateIOSContinuedProcessing") { (completedUnits: Int, totalUnits: Int, subtitle: String?) in
+      self.continuedProcessing.update(completedUnits: completedUnits, totalUnits: totalUnits, subtitle: subtitle)
+    }
+    Function("finishIOSContinuedProcessing") { (success: Bool) in
+      self.continuedProcessing.finish(success: success)
+    }
     Function("startNativePostProcessing") { (_: [String: Any]) in
       throw NSError(domain: "MainaRecorder", code: 1002, userInfo: [NSLocalizedDescriptionKey: "The iOS local ASR runtime has not been installed yet."])
     }

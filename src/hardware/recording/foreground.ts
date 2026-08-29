@@ -156,6 +156,27 @@ export async function releaseQwenAsr(): Promise<void> {
   if (MainaRecorder) await MainaRecorder.releaseQwenAsr();
 }
 
+export function beginIOSContinuedProcessing(totalUnits: number): void {
+  if (Platform.OS !== 'ios' || !MainaRecorder?.beginIOSContinuedProcessing) return;
+  MainaRecorder.beginIOSContinuedProcessing(
+    'Preparing meeting transcript',
+    'Maina is processing saved audio on this iPhone.',
+    Math.max(1, totalUnits),
+  );
+}
+
+export function updateIOSContinuedProcessing(completedUnits: number, totalUnits: number): void {
+  if (Platform.OS !== 'ios' || !MainaRecorder?.updateIOSContinuedProcessing) return;
+  const completed = Math.max(0, completedUnits);
+  const total = Math.max(1, totalUnits);
+  MainaRecorder.updateIOSContinuedProcessing(completed, total, `${completed} of ${total} audio windows checked`);
+}
+
+export function finishIOSContinuedProcessing(success: boolean): void {
+  if (Platform.OS !== 'ios' || !MainaRecorder?.finishIOSContinuedProcessing) return;
+  MainaRecorder.finishIOSContinuedProcessing(success);
+}
+
 export async function getRemoteControlStatus(): Promise<RemoteControlStatus | null> {
   if (Platform.OS !== 'android' || !MainaRecorder) return null;
   return MainaRecorder.getRemoteControlStatus();

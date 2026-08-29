@@ -1,6 +1,7 @@
 import AVFAudio
 import Foundation
 import SherpaOnnxC
+import UIKit
 
 /**
  * Small iOS-only adapter around sherpa-onnx's official Qwen3-ASR C API.
@@ -12,6 +13,8 @@ final class MainaQwenAsr {
 
   private let inferenceQueue = DispatchQueue(label: "com.divay.maina.ios.qwen", qos: .utility)
   private var recognizer: OpaquePointer?
+  private var memoryWarningObserver: NSObjectProtocol?
+  private var thermalObserver: NSObjectProtocol?
 
   private let requiredFiles: [String: UInt64] = [
     "conv_frontend.onnx": 44_148_281,
@@ -21,6 +24,24 @@ final class MainaQwenAsr {
     "tokenizer/merges.txt": 1_671_853,
     "tokenizer/tokenizer_config.json": 12_487,
   ]
+
+  private init() {
+    memoryWarningObserver = NotificationCenter.default.addObserver(
+      forName: UIApplication.didReceiveMemoryWarningNotification,
+      object: nil,
+      queue: nil
+    ) { [weak self] _ in
+      self?.inferenceQueue.async { self?.releaseNow() }
+    }
+    thermalObserver = NotificationCenter.default.addObserver(
+      forName: ProcessInfo.thermalStateDidChangeNotification,
+      object: nil,
+      queue: nil
+    ) { [weak self] _ in
+      guard Self.mustDeferForThermalState else { return }
+      self?.inferenceQueue.async { self?.releaseNow() }
+    }
+  }
 
   func status() -> [String: Any] {
     let root = modelRoot()
@@ -63,6 +84,10 @@ final class MainaQwenAsr {
   }
 
   private func transcribeNow(uri: String, startMs: Double, endMs: Double) throws -> [String: Any] {
+    guard !Self.mustDeferForThermalState else {
+      releaseNow()
+      throw failure(1109, "iPhone is too warm for reliable local transcription. Maina will continue automatically after it cools.")
+    }
     let model = status()
     guard model["ready"] as? Bool == true else {
       throw failure(1101, model["reason"] as? String ?? "Qwen model pack is unavailable.")
@@ -139,13 +164,16 @@ final class MainaQwenAsr {
                 "greedy_search".withCString { decodingPtr in
                   var config = SherpaOnnxOfflineRecognizerConfig()
                   config.feat_config.sample_rate = 16_000
-                  config.feat_config.feature_dim = 80
+                  // Qwen3-ASR's official frontend uses 128-dimensional fbank
+                  // features. Using Whisper's common 80-bin default silently
+                  // degrades or rejects model input.
+                  config.feat_config.feature_dim = 128
                   config.model_config.qwen3_asr.conv_frontend = convPtr
                   config.model_config.qwen3_asr.encoder = encoderPtr
                   config.model_config.qwen3_asr.decoder = decoderPtr
                   config.model_config.qwen3_asr.tokenizer = tokenizerPtr
                   config.model_config.qwen3_asr.max_total_len = 512
-                  config.model_config.qwen3_asr.max_new_tokens = 256
+                  config.model_config.qwen3_asr.max_new_tokens = 128
                   config.model_config.qwen3_asr.temperature = 1e-6
                   config.model_config.qwen3_asr.top_p = 0.8
                   config.model_config.qwen3_asr.seed = 42
@@ -169,6 +197,14 @@ final class MainaQwenAsr {
   private func releaseNow() {
     if let recognizer { SherpaOnnxDestroyOfflineRecognizer(recognizer) }
     recognizer = nil
+  }
+
+  private static var mustDeferForThermalState: Bool {
+    switch ProcessInfo.processInfo.thermalState {
+    case .serious, .critical: return true
+    case .nominal, .fair: return false
+    @unknown default: return true
+    }
   }
 
   private func modelRoot() -> URL {

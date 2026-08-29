@@ -67,6 +67,9 @@
     "ios:model:stage": "bash scripts/stage-ios-qwen-model.sh",
     "ios:ui-tests:configure": "ruby scripts/configure-ios-ui-tests.rb",
     "ios:prepare": "bash scripts/prepare-ios-local.sh",
+    "ios:renew-personal": "bash scripts/renew-ios-personal.sh",
+    "android:install-preserving": "bash scripts/install-android-preserving-data.sh",
+    "verify:renewal": "node scripts/verify-renewal-core.mjs",
     "android:prepare": "bash scripts/prebuild-android.sh",
     "verify:release": "bash scripts/verify-release.sh",
     "postinstall": "patch-package"

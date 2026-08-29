@@ -43,6 +43,7 @@ type LocalAsrPipelineInput = {
   recoverPartials: boolean;
   resetTranscript?: boolean;
   onBlocks?: (blocks: TranscriptBlock[]) => void;
+  onProgress?: (completedWindows: number, totalWindows: number) => void;
 };
 
 // Qwen owns one native inference runtime and Expo SQLite exposes one shared
@@ -137,6 +138,7 @@ async function runLocalAsrPipelineNow(input: LocalAsrPipelineInput): Promise<Loc
     transcriptionCompletedWindows: completedWindowKeys.size,
     transcriptionFailedWindows: 0,
   });
+  input.onProgress?.(completedWindowKeys.size, totalWindows);
   let chunkCursorAt = input.meetingStartedAt;
   let windowCount = 0;
   let completedWindows = completedWindowKeys.size;
@@ -226,6 +228,7 @@ async function runLocalAsrPipelineNow(input: LocalAsrPipelineInput): Promise<Loc
             transcriptionFailedWindows: failedWindows,
             lastError,
           });
+          input.onProgress?.(completedWindows, totalWindows);
           log[suspicious ? 'warn' : 'info']('asr', 'qwen window processed', {
             meetingId: input.meetingId,
             chunkIndex,
@@ -268,6 +271,7 @@ async function runLocalAsrPipelineNow(input: LocalAsrPipelineInput): Promise<Loc
         transcriptionFailedWindows: failedWindows,
         lastError,
       });
+      input.onProgress?.(completedWindows, totalWindows);
       chunkCursorAt += durationMs;
     }
   } finally {

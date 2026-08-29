@@ -1,0 +1,101 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+NODE_BIN="/Users/divay/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin"
+DEVICE_ID="${MAINA_IOS_DEVICE_ID:-945E396B-87B0-5CB7-9A3D-A5E75CF9B4CD}"
+DEVICE_UDID="${MAINA_IOS_DEVICE_UDID:-00008120-001E146611E2601E}"
+BUNDLE_ID="${MAINA_IOS_BUNDLE_ID:-com.divay.maina.staging}"
+TEAM_ID="${MAINA_IOS_TEAM_ID:-9X4X3R4KCN}"
+BACKUP_ROOT="${MAINA_MAINTENANCE_ROOT:-$HOME/Library/Application Support/Maina Maintenance}"
+DRY_RUN=false
+[[ "${1:-}" == "--dry-run" ]] && DRY_RUN=true
+
+export PATH="$NODE_BIN:$PATH"
+export NODE_BINARY="$NODE_BIN/node"
+export SENTRY_DISABLE_AUTO_UPLOAD="${SENTRY_DISABLE_AUTO_UPLOAD:-true}"
+export SENTRY_ALLOW_FAILURE="${SENTRY_ALLOW_FAILURE:-true}"
+umask 077
+
+cd "$PROJECT_DIR"
+[[ "$(node --version)" == v24.* ]] || { echo "Node 24 is required." >&2; exit 1; }
+mkdir -p "$BACKUP_ROOT/Backups" "$BACKUP_ROOT/Crash Reports" "$BACKUP_ROOT/Artifacts"
+RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)"
+RUN_ROOT="$BACKUP_ROOT/Backups/$RUN_ID"
+mkdir -p "$RUN_ROOT/preflight" "$RUN_ROOT/device"
+
+xcrun devicectl list devices --json-output "$RUN_ROOT/devices.json" --quiet
+xcrun devicectl device info apps --device "$DEVICE_ID" --bundle-id "$BUNDLE_ID" \
+  --columns '*' --json-output "$RUN_ROOT/apps.json" --quiet
+node --input-type=module - "$RUN_ROOT/devices.json" "$RUN_ROOT/apps.json" "$DEVICE_ID" "$DEVICE_UDID" "$BUNDLE_ID" <<'NODE'
+import { readFileSync } from 'node:fs';
+import { findInstalledIosApp, findQualifiedIosDevice } from './scripts/lib/renewal-core.mjs';
+const [, , devicesPath, appsPath, deviceId, udid, bundleId] = process.argv;
+findQualifiedIosDevice(JSON.parse(readFileSync(devicesPath)), { deviceId, udid, marketingName: 'iPhone 15' });
+const app = findInstalledIosApp(JSON.parse(readFileSync(appsPath)), bundleId);
+console.log(`Qualified USB iPhone 15; installed Maina ${app.version} (${app.build}).`);
+NODE
+
+# Copy before terminating. The durable DB state is the idle gate; an active
+# recording/transcription makes renewal fail closed.
+xcrun devicectl device copy from --device "$DEVICE_ID" --domain-type appDataContainer \
+  --domain-identifier "$BUNDLE_ID" --source . --destination "$RUN_ROOT/preflight/container" --quiet
+node scripts/inspect-mobile-backup.mjs "$RUN_ROOT/preflight/container" > "$RUN_ROOT/preflight-snapshot.json"
+node --input-type=module - "$RUN_ROOT/preflight-snapshot.json" <<'NODE'
+import { readFileSync } from 'node:fs';
+const snapshot = JSON.parse(readFileSync(process.argv[2]));
+if (snapshot.activeMeetings > 0 || snapshot.activeStages > 0) {
+  throw new Error(`Maina is busy (meetings=${snapshot.activeMeetings}, stages=${snapshot.activeStages}); renewal refused.`);
+}
+console.log(`Idle gate passed; ${snapshot.meetings} meetings and ${snapshot.transcriptBlocks} transcript blocks are durable.`);
+NODE
+
+if $DRY_RUN; then
+  echo "Dry run passed. No process was terminated, no app was built, and nothing was installed."
+  exit 0
+fi
+
+xcrun devicectl device process terminate --device "$DEVICE_ID" --bundle-id "$BUNDLE_ID" >/dev/null 2>&1 || true
+xcrun devicectl device copy from --device "$DEVICE_ID" --domain-type appDataContainer \
+  --domain-identifier "$BUNDLE_ID" --source . --destination "$RUN_ROOT/device/container" --quiet
+xcrun devicectl device copy from --device "$DEVICE_ID" --domain-type systemCrashLogs \
+  --source . --destination "$BACKUP_ROOT/Crash Reports/$RUN_ID" --quiet || true
+node scripts/inspect-mobile-backup.mjs "$RUN_ROOT/device/container" > "$RUN_ROOT/before.json"
+
+npm run ios:prepare
+BUILD_ROOT="/Users/divay/Developer/.builds/maina-ios-renewal-$RUN_ID"
+xcodebuild -workspace ios/Maina.xcworkspace -scheme Maina -configuration Release \
+  -destination "platform=iOS,id=$DEVICE_UDID" -derivedDataPath "$BUILD_ROOT" \
+  -allowProvisioningUpdates DEVELOPMENT_TEAM="$TEAM_ID" CODE_SIGN_STYLE=Automatic build
+APP="$BUILD_ROOT/Build/Products/Release-iphoneos/Maina.app"
+codesign --verify --deep --strict "$APP"
+
+PROFILE_PLIST="$RUN_ROOT/profile.plist"
+ENTITLEMENTS_PLIST="$RUN_ROOT/entitlements.plist"
+security cms -D -i "$APP/embedded.mobileprovision" > "$PROFILE_PLIST"
+codesign -d --entitlements :- "$APP" > "$ENTITLEMENTS_PLIST" 2>/dev/null
+node --input-type=module - "$APP/Info.plist" "$PROFILE_PLIST" "$ENTITLEMENTS_PLIST" "$BUNDLE_ID" "$TEAM_ID" <<'NODE'
+import { execFileSync } from 'node:child_process';
+import { validateCandidateIdentity } from './scripts/lib/renewal-core.mjs';
+const [, , info, profile, entitlements, bundleId, teamId] = process.argv;
+const pl = (path, key) => execFileSync('/usr/libexec/PlistBuddy', ['-c', `Print :${key}`, path], { encoding: 'utf8' }).trim();
+const groups = execFileSync('/usr/libexec/PlistBuddy', ['-c', 'Print :keychain-access-groups', entitlements], { encoding: 'utf8' });
+validateCandidateIdentity({
+  bundleId: pl(info, 'CFBundleIdentifier'),
+  teamId: pl(entitlements, 'com.apple.developer.team-identifier'),
+  applicationIdentifier: pl(entitlements, 'application-identifier'),
+  keychainGroups: groups.split(/\s+/).filter((x) => x.includes('.')),
+  profileExpiresAt: new Date(pl(profile, 'ExpirationDate')),
+}, { bundleId, teamId, minimumExpiryMs: Date.now() + 2 * 86_400_000 });
+console.log('Candidate signing identity, Keychain group, and profile expiry verified.');
+NODE
+
+cp -R "$APP" "$BACKUP_ROOT/Artifacts/Maina-$RUN_ID.app"
+xcrun devicectl device install app --device "$DEVICE_ID" "$APP"
+xcrun devicectl device process launch --device "$DEVICE_ID" "$BUNDLE_ID"
+sleep 5
+xcrun devicectl device copy from --device "$DEVICE_ID" --domain-type appDataContainer \
+  --domain-identifier "$BUNDLE_ID" --source . --destination "$RUN_ROOT/postflight-container" --quiet
+node scripts/inspect-mobile-backup.mjs "$RUN_ROOT/postflight-container" > "$RUN_ROOT/after.json"
+node scripts/validate-renewal-snapshots.mjs "$RUN_ROOT/before.json" "$RUN_ROOT/after.json"
+echo "Personal-signing renewal succeeded in place. Backup: $RUN_ROOT"

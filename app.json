@@ -15,7 +15,11 @@
       "infoPlist": {
         "NSMicrophoneUsageDescription": "Maina records meetings on this iPhone so it can create a private transcript and meeting notes.",
         "UIBackgroundModes": [
-          "audio"
+          "audio",
+          "processing"
+        ],
+        "BGTaskSchedulerPermittedIdentifiers": [
+          "com.divay.maina.staging.continued-processing.*"
         ]
       }
     },

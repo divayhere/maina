@@ -17,6 +17,7 @@ import {
   markMeetingsAudioDeleted,
   startRecordingSegment,
   finishRecordingSegment,
+  repairStoredRecordingReferences,
   updateMeeting,
 } from '@/data/meetings';
 import { ErrorBoundary } from '@/design/ErrorBoundary';
@@ -92,6 +93,7 @@ function RootLayout() {
         }
         log.info('app', 'launch');
         await initDb();
+        await repairStoredRecordingReferences();
         // Previous staging builds stored direct provider and MKC values in
         // SQLite. Cloud notes now use a scoped SecureStore session only.
         await clearLegacyDirectAiConfiguration();

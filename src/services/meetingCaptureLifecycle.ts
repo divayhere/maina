@@ -14,9 +14,12 @@ import { materialCaptureGapError } from '@/core/recording/captureGap';
 import { hasCompleteNativeTranscript, terminalNativeMeetingRepair } from '@/core/recording/nativeCaptureReconciliation';
 import {
   acknowledgeNativePostProcessingResult,
+  beginIOSContinuedProcessing,
+  finishIOSContinuedProcessing,
   getNativeCaptureStatusAsync,
   readNativePostProcessingResult,
   startNativePostProcessing,
+  updateIOSContinuedProcessing,
 } from '@/hardware/recording/foreground';
 import { log } from '@/services/logger';
 import { getNativeCaptureMetrics } from '@/services/nativeCaptureMetrics';
@@ -72,6 +75,8 @@ async function launchIOSPostProcessing(meeting: Meeting): Promise<boolean> {
     state: 'running',
     error: null,
   });
+  beginIOSContinuedProcessing(Math.max(1, meeting.transcriptionWindowCount));
+  let passCompleted = false;
   const runPass = () => runLocalAsrPipeline({
     meetingId: meeting.id,
     directory: captureDirectory,
@@ -80,6 +85,7 @@ async function launchIOSPostProcessing(meeting: Meeting): Promise<boolean> {
     // Completed Qwen windows are transactionally checkpointed. Relaunch skips
     // them and resumes only unfinished intervals rather than replaying hours.
     resetTranscript: false,
+    onProgress: updateIOSContinuedProcessing,
   });
   const work = runPass()
     .then(async (firstResult) => {
@@ -147,6 +153,7 @@ async function launchIOSPostProcessing(meeting: Meeting): Promise<boolean> {
         failedWindows: result.failedWindows,
         words: result.wordCount,
       });
+      passCompleted = true;
     })
     .catch(async (cause) => {
       const message = cause instanceof Error ? cause.message : String(cause);
@@ -166,6 +173,7 @@ async function launchIOSPostProcessing(meeting: Meeting): Promise<boolean> {
       });
     })
     .finally(() => {
+      finishIOSContinuedProcessing(passCompleted);
       iosPostProcessingInFlight.delete(meeting.id);
     });
   iosPostProcessingInFlight.set(meeting.id, work);

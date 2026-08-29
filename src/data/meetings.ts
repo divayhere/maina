@@ -13,6 +13,21 @@ import {
 } from '../services/nativePostProcessingCore';
 import { didTranscriptCoverageImprove } from '../services/transcriptCoverage';
 import { deriveStageTransition } from '../core/pipeline/stageState';
+import * as FileSystem from 'expo-file-system/legacy';
+import {
+  resolveDocumentReference,
+  toPortableDocumentReference,
+} from '../core/recording/appFileReference';
+
+const documentDirectory = FileSystem.documentDirectory;
+
+function storeAudioUri(value: string | null | undefined): string | null {
+  return toPortableDocumentReference(value, documentDirectory);
+}
+
+function readAudioUri(value: string | null | undefined): string | null {
+  return resolveDocumentReference(value, documentDirectory);
+}
 
 export type MeetingStatus =
   | 'recording'
@@ -235,7 +250,7 @@ const toMeeting = (r: Row): Meeting => ({
   durationMs: r.duration_ms,
   audioDurationMs: r.audio_duration_ms ?? 0,
   captureEndedAt: r.capture_ended_at,
-  audioUri: r.audio_uri,
+  audioUri: readAudioUri(r.audio_uri),
   transcript: r.transcript,
   summary: r.summary,
   decisions: parseJsonList(r.decisions_json),
@@ -452,7 +467,7 @@ export async function createMeeting(m: {
       m.title,
       m.startedAt,
       m.durationMs,
-      m.audioUri ?? null,
+      storeAudioUri(m.audioUri),
       m.status ?? 'recorded',
       m.segmentCount ?? 0,
       Date.now(),
@@ -765,6 +780,8 @@ export async function updateMeeting(id: string, patch: Partial<Meeting>): Promis
       cols.push(`${col} = ?`);
       if (k === 'decisions' || k === 'openQuestions') {
         vals.push(stringifyJsonList((patch as Record<string, string[] | null | undefined>)[k]));
+      } else if (k === 'audioUri') {
+        vals.push(storeAudioUri((patch as Record<string, string | null | undefined>)[k]));
       } else {
         vals.push((patch as Record<string, string | number | null | undefined>)[k] ?? null);
       }
@@ -995,7 +1012,7 @@ export async function startRecordingSegment(
        ended_at = NULL,
        status = 'recording',
        error_code = NULL`,
-    [meetingId, index, audioUri, Date.now()],
+    [meetingId, index, storeAudioUri(audioUri), Date.now()],
   );
 }
 
@@ -1010,7 +1027,7 @@ export async function finishRecordingSegment(
     `UPDATE recording_segments
      SET audio_uri = COALESCE(?, audio_uri), ended_at = ?, status = ?, error_code = ?
      WHERE meeting_id = ? AND segment_index = ?`,
-    [audioUri, Date.now(), audioUri ? 'recorded' : 'failed', errorCode ?? null, meetingId, index],
+    [storeAudioUri(audioUri), Date.now(), audioUri ? 'recorded' : 'failed', errorCode ?? null, meetingId, index],
   );
 }
 
@@ -1031,7 +1048,7 @@ export async function listRecordingSegments(meetingId: string): Promise<Recordin
   return rows.map((row) => ({
     meetingId: row.meeting_id,
     index: row.segment_index,
-    audioUri: row.audio_uri,
+    audioUri: readAudioUri(row.audio_uri) ?? row.audio_uri,
     startedAt: row.started_at,
     endedAt: row.ended_at,
     status: row.status,
@@ -1931,7 +1948,7 @@ export async function listInterruptedRecordingSegments(): Promise<RecordingSegme
   return rows.map((row) => ({
     meetingId: row.meeting_id,
     index: row.segment_index,
-    audioUri: row.audio_uri,
+    audioUri: readAudioUri(row.audio_uri) ?? row.audio_uri,
     startedAt: row.started_at,
     endedAt: row.ended_at,
     status: row.status,
@@ -1943,4 +1960,42 @@ export async function deleteMeeting(id: string): Promise<void> {
   const db = await getDb();
   await db.runAsync('DELETE FROM meetings WHERE id = ?', [id]);
   log.info('meetings', 'deleted', { id });
+}
+
+/**
+ * One-time/idempotent startup repair for pre-portable iOS releases. This only
+ * rewrites database identifiers; it never deletes or moves audio.
+ */
+export async function repairStoredRecordingReferences(): Promise<number> {
+  const db = await getDb();
+  const meetings = await db.getAllAsync<{ id: string; audio_uri: string }>(
+    `SELECT id, audio_uri FROM meetings WHERE audio_uri IS NOT NULL`,
+  );
+  const segments = await db.getAllAsync<{ meeting_id: string; segment_index: number; audio_uri: string }>(
+    `SELECT meeting_id, segment_index, audio_uri FROM recording_segments`,
+  );
+  let changes = 0;
+  await db.withTransactionAsync(async () => {
+    for (const row of meetings) {
+      const portable = storeAudioUri(row.audio_uri);
+      if (!portable || portable === row.audio_uri) continue;
+      await db.runAsync(`UPDATE meetings SET audio_uri = ?, updated_at = ? WHERE id = ?`, [
+        portable,
+        Date.now(),
+        row.id,
+      ]);
+      changes += 1;
+    }
+    for (const row of segments) {
+      const portable = storeAudioUri(row.audio_uri);
+      if (!portable || portable === row.audio_uri) continue;
+      await db.runAsync(
+        `UPDATE recording_segments SET audio_uri = ? WHERE meeting_id = ? AND segment_index = ?`,
+        [portable, row.meeting_id, row.segment_index],
+      );
+      changes += 1;
+    }
+  });
+  if (changes > 0) log.info('meetings', 'repaired portable recording references', { changes });
+  return changes;
 }

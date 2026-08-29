@@ -73,6 +73,8 @@ export interface NativeCaptureStatus {
   captureGapMs?: number;
   rmsDbfs?: number;
   peakDbfs?: number;
+  freeStorageBytes?: number;
+  storageReserveBytes?: number;
 }
 
 export interface NativeCaptureDirectoryInspection {
@@ -275,6 +277,9 @@ interface MainaRecorderNativeModule {
   getQwenAsrStatus(): Promise<QwenAsrStatus>;
   transcribeWithQwen(uri: string, startMs: number, endMs: number): Promise<QwenAsrResult>;
   releaseQwenAsr(): Promise<void>;
+  beginIOSContinuedProcessing?(title: string, subtitle: string, totalUnits: number): { started: boolean; mode: string; reason?: string };
+  updateIOSContinuedProcessing?(completedUnits: number, totalUnits: number, subtitle?: string | null): void;
+  finishIOSContinuedProcessing?(success: boolean): void;
   getRemoteControlStatus(): Promise<RemoteControlStatus>;
   openRemoteAccessibilitySettings(): Promise<void>;
   acknowledgeHardwareTrigger(commandId: string, action: string, accepted: boolean): Promise<void>;
