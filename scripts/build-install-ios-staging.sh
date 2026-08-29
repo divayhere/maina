@@ -7,6 +7,8 @@ PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 NODE_BIN="/Users/divay/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin"
 DEVICE_ID="${MAINA_IOS_DEVICE_ID:-945E396B-87B0-5CB7-9A3D-A5E75CF9B4CD}"
 DEVICE_UDID="${MAINA_IOS_DEVICE_UDID:-00008120-001E146611E2601E}"
+DEVICE_PRODUCT_TYPE="${MAINA_IOS_DEVICE_PRODUCT_TYPE:-iPhone15,4}"
+PYMOBILEDEVICE3_BIN="${MAINA_PYMOBILEDEVICE3_BIN:-/Users/divay/Developer/.tools/maina-pymobiledevice3/bin/pymobiledevice3}"
 BUNDLE_ID="${MAINA_IOS_BUNDLE_ID:-com.divay.maina.staging}"
 TEAM_ID="${MAINA_IOS_TEAM_ID:-9X4X3R4KCN}"
 MIN_FREE_KB=$((8 * 1024 * 1024))
@@ -23,9 +25,22 @@ cd "$PROJECT_DIR"
 xcodebuild -checkFirstLaunchStatus
 [[ -d ios/Maina.xcworkspace ]] || { echo "Run npm run ios:prepare first; ios/Maina.xcworkspace is missing." >&2; exit 1; }
 
-device_line="$(xcrun devicectl list devices | grep "$DEVICE_ID" || true)"
-[[ "$device_line" == *"connected"* && "$device_line" == *"iPhone 15"* ]] || {
-  echo "Qualified USB iPhone 15 is not connected: $DEVICE_ID ($DEVICE_UDID)." >&2
+[[ -x "$PYMOBILEDEVICE3_BIN" ]] || {
+  echo "USB device verifier is unavailable: $PYMOBILEDEVICE3_BIN" >&2
+  exit 1
+}
+usb_device_json="$("$PYMOBILEDEVICE3_BIN" usbmux list)"
+usb_device_ok="$(USBMUX_JSON="$usb_device_json" node -e '
+  const devices = JSON.parse(process.env.USBMUX_JSON || "[]");
+  const expectedUdid = process.argv[1];
+  const expectedProduct = process.argv[2];
+  const device = devices.find((candidate) => candidate.Identifier === expectedUdid);
+  process.stdout.write(
+    device?.ConnectionType === "USB" && device?.ProductType === expectedProduct ? "yes" : "no",
+  );
+' "$DEVICE_UDID" "$DEVICE_PRODUCT_TYPE")"
+[[ "$usb_device_ok" == "yes" ]] || {
+  echo "Qualified USB iPhone 15 is not physically connected: $DEVICE_ID ($DEVICE_UDID, $DEVICE_PRODUCT_TYPE)." >&2
   exit 1
 }
 
