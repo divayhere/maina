@@ -25,6 +25,7 @@ import {
   canApplyIdleCaptureMetrics,
   shouldPreserveTerminalNativeMeeting,
 } from '@/core/recording/nativeCaptureReconciliation';
+import { nativeCapturePresentation } from '@/core/recording/nativeCapturePresentation';
 import {
   commitTranscriptFinalBlocks,
   createMeeting,
@@ -782,6 +783,26 @@ export default function RecordScreen() {
         // lifecycle transitions must not leave the visible timer or controls
         // believing an otherwise healthy native recording has stopped.
         activeRef.current = true;
+      }
+      const nativePresentation = nativeCapturePresentation(nativeStatus?.state);
+      if (nativePresentation === 'recording' && (pausedRef.current || !listeningRef.current)) {
+        pausedRef.current = false;
+        listeningRef.current = true;
+        setPaused(false);
+        setListening(true);
+        log.info('record', 'visible state followed native capture recovery', {
+          nativeState: nativeStatus?.state,
+          routeRecoveryActive: nativeStatus?.routeRecoveryActive,
+        });
+      } else if (nativePresentation === 'paused' && (!pausedRef.current || listeningRef.current)) {
+        pausedRef.current = true;
+        listeningRef.current = false;
+        setPaused(true);
+        setListening(false);
+        log.info('record', 'visible state followed native capture pause', {
+          nativeState: nativeStatus?.state,
+          routeRecoveryActive: nativeStatus?.routeRecoveryActive,
+        });
       }
       if (activeRef.current && startedAtRef.current !== 0) {
         const health = healthRef.current.snapshot(now);
