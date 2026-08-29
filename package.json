@@ -1,7 +1,7 @@
 {
   "name": "maina",
   "main": "expo-router/entry",
-  "version": "0.10.30",
+  "version": "0.10.31",
   "dependencies": {
     "@expo/ui": "~57.0.14",
     "@expo/vector-icons": "^15.0.2",
