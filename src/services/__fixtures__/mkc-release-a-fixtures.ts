@@ -1,10 +1,16 @@
 import type {
+  FrozenRecallChapterV1,
+  FrozenRecallOpenV1,
+  FrozenRecallSourceOpenV1,
   MeetingDetailResponse,
   MeetingLibraryResponse,
   MeetingTranscriptPage,
 } from '@/contracts/mkc-release-a.generated';
 
 export const releaseATranscriptSha256 = 'a'.repeat(64);
+export const frozenResultSha256 = 'b'.repeat(64);
+export const frozenBundleSha256 = 'c'.repeat(64);
+export const frozenChapterSha256 = 'd'.repeat(64);
 
 export const meetingLibraryFixture: MeetingLibraryResponse = {
   schema_version: 'mkc.meeting-library.v1',
@@ -88,4 +94,130 @@ export const meetingTranscriptFixture: MeetingTranscriptPage = {
     ended_at: '2026-08-29T09:00:15.000Z',
   }],
   page: { size: 1, has_more: false, next_cursor: null },
+};
+
+export const frozenCoverageFixture = {
+  schema_version: 'mkc.coverage-receipt.v1' as const,
+  mode: 'all_filtered' as const,
+  scope_source_count: 1,
+  inspected_source_count: 1,
+  returned_source_count: 1,
+  source_census_complete: true,
+  evidence_complete: true,
+  evidence_source_count: 1,
+  evidence_passage_count: 1,
+  unreadable_source_count: 0,
+  omitted_evidence_source_count: 0,
+  evidence_truncated: false,
+  coverage_basis: 'deterministic_source_census' as const,
+  complete: true,
+  truncated: false,
+  continuation_available: true,
+  exclusions: [],
+  warnings: [],
+};
+
+export const frozenRecallOpenFixture: FrozenRecallOpenV1 = {
+  schema_version: 'mkc.frozen-recall-open.v1',
+  search_id: 'search-synthetic-release-a',
+  created_at: '2026-08-29T09:00:00.000Z',
+  expires_at: '2027-08-29T09:00:00.000Z',
+  result_sha256: frozenResultSha256,
+  bundle_sha256: frozenBundleSha256,
+  plan: {
+    schema_version: 'mkc.query-plan.v2',
+    original_query: 'Find the synthetic release decision',
+    planner_version: 'synthetic-v1',
+    planner_source: 'deterministic',
+    user_job: 'locate',
+    execution_strategy: 'deterministic_list',
+    result_mode: 'sources',
+    coverage_mode: 'all_filtered',
+    sort: 'newest',
+    timezone: 'Asia/Kolkata',
+    date_basis: 'source_occurred_at',
+    occurred_from: null,
+    occurred_to_exclusive: null,
+    explicit_constraints: [],
+    inferred_constraints: [],
+    exact_literals: ['synthetic'],
+    exact_identifiers: [],
+    aliases: [],
+    typo_candidates: [],
+    topical_query: 'synthetic release decision',
+    supporting_queries: [],
+    source_families: ['meetings'],
+    source_types: ['meeting'],
+    fact_types: ['decision'],
+    requested_count: 1,
+    intent: 'decision',
+  },
+  coverage: frozenCoverageFixture,
+  source_count: 1,
+  fact_count: 1,
+  source_manifest_markdown: '# Synthetic source manifest',
+  memory_bundle_markdown: '# Synthetic memory bundle',
+  bundle: {
+    token_budget: 1000,
+    estimated_tokens: 100,
+    core_source_count: 1,
+    core_evidence_count: 1,
+    available_source_count: 1,
+    available_evidence_count: 1,
+    omitted_from_core_source_count: 0,
+    truncated: false,
+    recommended_next_chapter_id: 'chapter-synthetic',
+    chapters: [{
+      chapter_id: 'chapter-synthetic',
+      title: 'Synthetic chapter',
+      source_count: 1,
+      evidence_count: 1,
+      estimated_tokens: 100,
+      chapter_sha256: frozenChapterSha256,
+    }],
+  },
+};
+
+export const frozenRecallChapterFixture: FrozenRecallChapterV1 = {
+  schema_version: 'mkc.frozen-recall-chapter.v1',
+  search_id: frozenRecallOpenFixture.search_id,
+  result_sha256: frozenResultSha256,
+  bundle_sha256: frozenBundleSha256,
+  expires_at: frozenRecallOpenFixture.expires_at,
+  coverage: frozenCoverageFixture,
+  chapter_id: 'chapter-synthetic',
+  title: 'Synthetic chapter',
+  source_keys: [meetingDetailFixture.source_key],
+  source_count: 1,
+  evidence_count: 1,
+  estimated_tokens: 100,
+  markdown: '# Synthetic chapter',
+  chapter_sha256: frozenChapterSha256,
+};
+
+export const frozenRecallSourceFixture: FrozenRecallSourceOpenV1 = {
+  schema_version: 'mkc.frozen-recall-source.v1',
+  search_id: frozenRecallOpenFixture.search_id,
+  result_sha256: frozenResultSha256,
+  bundle_sha256: frozenBundleSha256,
+  expires_at: frozenRecallOpenFixture.expires_at,
+  coverage: frozenCoverageFixture,
+  source: {
+    source_key: meetingDetailFixture.source_key,
+    title: meetingDetailFixture.title,
+    source_type: 'meeting',
+    occurred_at: meetingDetailFixture.occurred_at,
+    workspace_key: 'maina',
+    project_key: 'captured-meetings',
+    summary_text: meetingDetailFixture.summary,
+    score: 1,
+    match_reasons: ['synthetic fixture'],
+    evidence: [{
+      evidence_id: 'evidence-synthetic',
+      evidence_kind: 'decision',
+      field_path: 'content.decisions',
+      snippet: 'Keep the fixture synthetic.',
+      score: 1,
+    }],
+  },
 };

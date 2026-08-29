@@ -10,11 +10,11 @@ import type {
 const CHECKSUM_PATTERN = /^[a-f0-9]{64}$/;
 
 export const MKC_RELEASE_A_CONTRACT = {
-  backendCommit: '8d58470',
+  backendCommit: '57cbb52',
   meetings: 'contract-complete-default-off',
-  frozenOpen: 'blocked-openapi-generic-response',
-  frozenChapter: 'blocked-openapi-generic-response',
-  frozenSource: 'blocked-until-frozen-open-boundary-complete',
+  frozenOpen: 'contract-complete-default-off-deployment-pending',
+  frozenChapter: 'contract-complete-default-off-deployment-pending',
+  frozenSource: 'contract-complete-default-off-deployment-pending',
 } as const;
 
 export class MkcReleaseAContractError extends Error {
