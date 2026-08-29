@@ -3,7 +3,7 @@ import * as TaskManager from 'expo-task-manager';
 import { Platform } from 'react-native';
 
 import { initDb } from '@/data/db';
-import { markMeetingsAudioDeleted } from '@/data/meetings';
+import { markMeetingsAudioDeleted, repairStoredRecordingReferences } from '@/data/meetings';
 import { enforceAudioRetentionPolicy } from '@/services/audioRetention';
 import { log } from '@/services/logger';
 import { reconcilePendingMainaKnowledgeCloudSyncs } from '@/services/mainaKnowledgeCloud';
@@ -11,30 +11,27 @@ import { reconcilePendingMainaKnowledgeCloudCorrections } from '@/services/maina
 import { reconcilePendingNativeMeetingWork } from '@/services/meetingCaptureLifecycle';
 import { reconcileAutoSummaryEligibility, reconcilePendingMeetingPackets } from '@/services/meetingPacket';
 import { flushDiagnostics, getMeetingsWithDeletedAudio } from '@/services/remoteLog';
+import { executePipelineRecovery, type PipelineRecoveryResult } from '@/services/backgroundPipelineCore';
 
 export const MAINA_BACKGROUND_PIPELINE_TASK = 'maina-background-pipeline-v1';
 const MINIMUM_BACKGROUND_INTERVAL_MINUTES = 15;
 
 let cycleInFlight: Promise<PipelineRecoveryResult> | null = null;
 
-export type PipelineRecoveryResult = {
-  nativeMeetings: number;
-  pendingPackets: number;
-  eligiblePackets: number;
-};
-
 async function performPipelineRecoveryCycle(): Promise<PipelineRecoveryResult> {
-  await initDb();
-  const deletedAudioMeetingIds = await getMeetingsWithDeletedAudio().catch(() => []);
-  await markMeetingsAudioDeleted(deletedAudioMeetingIds);
-  const nativeMeetings = await reconcilePendingNativeMeetingWork();
-  await enforceAudioRetentionPolicy();
-  const eligiblePackets = await reconcileAutoSummaryEligibility();
-  const pendingPackets = await reconcilePendingMeetingPackets();
-  await reconcilePendingMainaKnowledgeCloudSyncs();
-  await reconcilePendingMainaKnowledgeCloudCorrections();
-  await flushDiagnostics().catch(() => {});
-  return { nativeMeetings, pendingPackets, eligiblePackets };
+  return executePipelineRecovery({
+    initDb,
+    repairStoredRecordingReferences,
+    getMeetingsWithDeletedAudio,
+    markMeetingsAudioDeleted,
+    reconcilePendingNativeMeetingWork,
+    enforceAudioRetentionPolicy,
+    reconcileAutoSummaryEligibility,
+    reconcilePendingMeetingPackets,
+    reconcilePendingMainaKnowledgeCloudSyncs,
+    reconcilePendingMainaKnowledgeCloudCorrections,
+    flushDiagnostics,
+  });
 }
 
 /** One idempotent outbox drain shared by foreground, reconnect and OS wakeups. */
