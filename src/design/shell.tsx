@@ -15,6 +15,8 @@ import { useAppTheme } from './theme';
 import { space } from './tokens';
 import { AppText } from './components';
 import { countActionableNotifications } from '@/services/notifications';
+import { MKC_MEMORY_FEATURE_FLAGS } from '@/services/mkc-memory-flags';
+import { getMainaDrawerDestinations, MAIN_TAB_DESTINATIONS } from '@/services/mkc-memory-navigation';
 import { useMeetings } from '@/state/meetingsStore';
 
 export function TopBar({
@@ -70,11 +72,7 @@ export function DrawerMenu() {
   const notificationCount = countActionableNotifications(meetings);
 
   const items = useMemo(
-    () => [
-      { label: 'Settings', icon: 'settings-outline' as const, href: '/settings' },
-      { label: 'Privacy & storage', icon: 'shield-checkmark-outline' as const, href: '/settings' },
-      { label: 'Help', icon: 'help-circle-outline' as const, href: '/help' },
-    ],
+    () => getMainaDrawerDestinations(MKC_MEMORY_FEATURE_FLAGS),
     [],
   );
 
@@ -173,8 +171,7 @@ export function MainaTabBar({ state, navigation }: any) {
   const activeRoute = state.routes[state.index]?.name;
 
   const visibleItems = [
-    { key: 'index', label: 'Home', icon: 'home-outline' as const },
-    { key: 'todos', label: 'To-dos', icon: 'checkmark-circle-outline' as const },
+    ...MAIN_TAB_DESTINATIONS,
   ];
   const leftItem = visibleItems[0];
   const rightItem = visibleItems[1];
@@ -303,6 +300,7 @@ function IconCircle({
 
 function resolveTitle(pathname: string): string {
   if (pathname.startsWith('/todos')) return 'To-dos';
+  if (pathname.startsWith('/memory')) return 'Memory';
   if (pathname.startsWith('/settings')) return 'Settings';
   return greetingTitle();
 }

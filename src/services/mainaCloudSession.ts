@@ -2,6 +2,7 @@ import * as SecureStore from 'expo-secure-store';
 
 import { deleteSetting } from '@/data/settings';
 import { log } from '@/services/logger';
+import { clearMkcMemoryCacheForOwner } from '@/services/mkc-memory-cache';
 
 const SESSION_KEY = 'maina_cloud_session_v1';
 const REQUEST_TIMEOUT_MS = 20_000;
@@ -117,7 +118,16 @@ export async function saveMainaCloudSession(session: MainaCloudSession): Promise
 }
 
 export async function clearMainaCloudSession(): Promise<void> {
+  const session = parseStoredSession(await SecureStore.getItemAsync(SESSION_KEY));
   await SecureStore.deleteItemAsync(SESSION_KEY);
+  if (session?.user.userId) {
+    try {
+      await clearMkcMemoryCacheForOwner(session.user.userId);
+    } catch (cause) {
+      // Token removal must never be rolled back by a disposable-cache failure.
+      log.warn('maina-cloud-session', 'owner memory cache cleanup did not complete', { err: String(cause) });
+    }
+  }
 }
 
 export async function mainaCloudFetch(path: string, init: RequestInit = {}): Promise<Response> {
