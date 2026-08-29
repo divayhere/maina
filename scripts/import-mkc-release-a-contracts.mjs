@@ -2,12 +2,16 @@
 
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const APP_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const BACKEND_ROOT = resolve(APP_ROOT, '..', 'Maina', 'code', 'backend');
+const BACKEND_ROOT = [
+  process.env.MAINA_BACKEND_ROOT,
+  resolve(APP_ROOT, '..', 'Maina', 'code', 'backend'),
+  resolve(APP_ROOT, '..', '..', 'Maina', 'code', 'backend'),
+].filter(Boolean).find((candidate) => existsSync(resolve(candidate, '.git')));
 const RELEASE_COMMIT = '8d58470';
 const SNAPSHOT_ROOT = resolve(APP_ROOT, 'contracts', 'mkc-release-a');
 const GENERATED_FILE = resolve(APP_ROOT, 'src', 'contracts', 'mkc-release-a.generated.ts');
@@ -33,6 +37,9 @@ function sha256(value) {
 }
 
 function readCommitted(path) {
+  if (!BACKEND_ROOT) {
+    throw new Error('Canonical Maina backend checkout was not found. Set MAINA_BACKEND_ROOT to import a new contract pin.');
+  }
   return execFileSync('git', ['show', `${RELEASE_COMMIT}:${path}`], {
     cwd: BACKEND_ROOT,
     encoding: 'utf8',
