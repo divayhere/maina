@@ -48,12 +48,16 @@ final class MainaIOSNativeAudioCapture: NSObject, AVAudioRecorderDelegate {
   private var deliberatelyPaused = false
   private var interrupted = false
   private var recoveryGeneration = 0
+  private var recoveryBackgroundTask: UIBackgroundTaskIdentifier = .invalid
   private var lastStorageCheckUptime: TimeInterval = 0
   private var freeStorageBytes: Int64 = 0
   private var onRouteChanged: (([String: Any]) -> Void)?
 
   private static let storageReserveBytes: Int64 = 256 * 1_024 * 1_024
-  private static let recoveryDelaysMs = [250, 750, 1_500, 3_000, 5_000]
+  // A call can release microphone priority several seconds after its UI ends.
+  // Keep the first retry immediate, then stay within one bounded UIKit
+  // background-time assertion instead of requiring the owner to reopen Maina.
+  private static let recoveryDelaysMs = [0, 250, 500, 1_000, 2_000, 3_000, 5_000, 8_000, 10_000]
 
   private override init() {
     super.init()
@@ -481,10 +485,47 @@ final class MainaIOSNativeAudioCapture: NSObject, AVAudioRecorderDelegate {
   }
 
   private func handleRouteChange(_ notification: Notification) {
-    guard state == .recording, !interrupted, !routeRecoveryActive else { return }
     let reasonValue = notification.userInfo?[AVAudioSessionRouteChangeReasonKey] as? UInt ?? 0
     let reason = AVAudioSession.RouteChangeReason(rawValue: reasonValue)
     lastRouteChangeAtMs = Date().timeIntervalSince1970 * 1_000
+
+    // Call teardown can produce a route notification even when the matching
+    // interruption-ended notification is delayed. Treat it as another bounded
+    // recovery signal while preserving the same meeting and closed chunks.
+    if state == .paused, interrupted, !deliberatelyPaused {
+      appendJournal("route-change-while-interrupted", fields: [
+        "reason": String(describing: reason ?? .unknown),
+        "route": routeDescription(),
+      ])
+      // Configuring our own session can emit a category-change notification.
+      // Never let that reset an in-flight backoff chain to attempt zero.
+      guard !routeRecoveryActive else { return }
+      scheduleRecovery(reason: "route-resumption-recovery")
+      return
+    }
+
+    guard state == .recording, !interrupted, !routeRecoveryActive else { return }
+
+    // setCategory/setActive can emit category/override notifications for our
+    // own session. Restarting a healthy recorder for those notifications can
+    // create a recovery loop. Only hardware/input topology changes require a
+    // new durable WAV chunk; otherwise recover only if capture actually died.
+    let requiresChunkRestart: Bool
+    switch reason {
+    case .newDeviceAvailable, .oldDeviceUnavailable, .noSuitableRouteForCategory:
+      requiresChunkRestart = true
+    default:
+      requiresChunkRestart = recorder?.isRecording != true
+    }
+    guard requiresChunkRestart else {
+      appendJournal("route-change-observed", fields: [
+        "reason": String(describing: reason ?? .unknown),
+        "route": routeDescription(),
+      ])
+      onRouteChanged?(routeEvent(change: "active-route"))
+      return
+    }
+
     recoveryStartedUptime = ProcessInfo.processInfo.systemUptime
     routeRecoveryActive = true
     appendJournal("route-change", fields: ["reason": String(describing: reason ?? .unknown), "route": routeDescription()])
@@ -554,7 +595,10 @@ final class MainaIOSNativeAudioCapture: NSObject, AVAudioRecorderDelegate {
    */
   private func scheduleRecovery(reason: String, attempt: Int = 0) {
     guard state == .paused, interrupted, !deliberatelyPaused else { return }
-    if attempt == 0 { recoveryGeneration += 1 }
+    if attempt == 0 {
+      recoveryGeneration += 1
+      beginRecoveryBackgroundTaskIfNeeded(reason: reason)
+    }
     let generation = recoveryGeneration
     let boundedAttempt = min(attempt, Self.recoveryDelaysMs.count - 1)
     let delayMs = Self.recoveryDelaysMs[boundedAttempt]
@@ -584,12 +628,16 @@ final class MainaIOSNativeAudioCapture: NSObject, AVAudioRecorderDelegate {
           "routeRestartCount": self.routeRestartCount,
           "route": self.routeDescription(),
         ])
+        self.endRecoveryBackgroundTask()
         self.onRouteChanged?(self.routeEvent(change: "active-route"))
       } catch {
+        let nsError = error as NSError
         self.appendJournal("capture-recovery-attempt-failed", fields: [
           "reason": reason,
           "attempt": attempt + 1,
           "error": error.localizedDescription,
+          "errorDomain": nsError.domain,
+          "errorCode": nsError.code,
         ])
         if attempt + 1 < Self.recoveryDelaysMs.count {
           self.scheduleRecovery(reason: reason, attempt: attempt + 1)
@@ -597,13 +645,49 @@ final class MainaIOSNativeAudioCapture: NSObject, AVAudioRecorderDelegate {
           self.routeRecoveryActive = false
           self.lastError = "Microphone recovery is paused safely. Reopen Maina to continue this recording."
           self.appendJournal("capture-recovery-deferred", fields: ["reason": reason])
+          self.endRecoveryBackgroundTask()
         }
       }
     }
   }
 
+  private func beginRecoveryBackgroundTaskIfNeeded(reason: String) {
+    guard recoveryBackgroundTask == .invalid else { return }
+    recoveryBackgroundTask = UIApplication.shared.beginBackgroundTask(withName: "Maina microphone recovery") { [weak self] in
+      self?.expireRecoveryBackgroundTaskSynchronously(reason: reason)
+    }
+    appendJournal("capture-recovery-background-time-began", fields: [
+      "reason": reason,
+      "granted": recoveryBackgroundTask != .invalid,
+    ])
+  }
+
+  private func expireRecoveryBackgroundTaskSynchronously(reason: String) {
+    let task: UIBackgroundTaskIdentifier = queue.sync {
+      let current = recoveryBackgroundTask
+      guard current != .invalid else { return .invalid }
+      appendJournal("capture-recovery-background-time-expired", fields: ["reason": reason])
+      routeRecoveryActive = false
+      lastError = "Microphone recovery is paused safely. Reopen Maina to continue this recording."
+      recoveryGeneration += 1
+      recoveryBackgroundTask = .invalid
+      return current
+    }
+    if task != .invalid {
+      UIApplication.shared.endBackgroundTask(task)
+    }
+  }
+
+  private func endRecoveryBackgroundTask() {
+    let task = recoveryBackgroundTask
+    guard task != .invalid else { return }
+    recoveryBackgroundTask = .invalid
+    UIApplication.shared.endBackgroundTask(task)
+  }
+
   private func tearDownSession() {
     stopTimers()
+    endRecoveryBackgroundTask()
     do { try audioSession.setActive(false, options: .notifyOthersOnDeactivation) } catch { /* best effort */ }
   }
 
@@ -619,6 +703,7 @@ final class MainaIOSNativeAudioCapture: NSObject, AVAudioRecorderDelegate {
     deliberatelyPaused = false
     interrupted = false
     routeRecoveryActive = false
+    endRecoveryBackgroundTask()
   }
 
   private func fail(_ message: String, error: Error) {

@@ -2,13 +2,16 @@ import { describe, expect, it } from 'vitest';
 
 import {
   ACTIVE_PACKET_POLL_MS,
+  BACKGROUND_PACKET_POLL_MS,
   MINIMUM_PACKET_RETRY_WAKE_MS,
   nextPacketPollDelay,
 } from './pipelineScheduling';
 
 describe('pipeline scheduling', () => {
   it('does not poll while there is no cloud work', () => expect(nextPacketPollDelay({ pendingCount: 0, appActive: true })).toBeNull());
-  it('does not poll while the app is backgrounded', () => expect(nextPacketPollDelay({ pendingCount: 1, appActive: false })).toBeNull());
+  it('keeps one bounded poll chain alive while OS background execution is available', () => {
+    expect(nextPacketPollDelay({ pendingCount: 1, appActive: false })).toBe(BACKGROUND_PACKET_POLL_MS);
+  });
   it('polls an active pending cloud job', () => expect(nextPacketPollDelay({ pendingCount: 1, appActive: true })).toBe(ACTIVE_PACKET_POLL_MS));
   it('wakes when durable retry work becomes due instead of dropping the retry', () => {
     expect(nextPacketPollDelay({

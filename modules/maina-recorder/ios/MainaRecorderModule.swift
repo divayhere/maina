@@ -91,8 +91,8 @@ public final class MainaRecorderModule: Module {
       }
     }
     AsyncFunction("releaseQwenAsr") { self.qwen.release() }
-    Function("beginIOSContinuedProcessing") { (title: String, subtitle: String, totalUnits: Int) in
-      self.continuedProcessing.begin(title: title, subtitle: subtitle, totalUnits: totalUnits)
+    Function("beginIOSContinuedProcessing") { (jobId: String, title: String, subtitle: String, totalUnits: Int) in
+      self.continuedProcessing.begin(jobId: jobId, title: title, subtitle: subtitle, totalUnits: totalUnits)
     }
     Function("updateIOSContinuedProcessing") { (completedUnits: Int, totalUnits: Int, subtitle: String?) in
       self.continuedProcessing.update(completedUnits: completedUnits, totalUnits: totalUnits, subtitle: subtitle)

@@ -28,7 +28,8 @@ import {
 import { log } from '@/services/logger';
 import { getNativeCaptureMetrics } from '@/services/nativeCaptureMetrics';
 import { runLocalAsrPipeline } from '@/services/localAsrPipeline';
-import { maybeQueueMeetingPacket } from '@/services/meetingPacket';
+import { drainMeetingPacketUntilSettled, maybeQueueMeetingPacket } from '@/services/meetingPacket';
+import { reconcilePendingMainaKnowledgeCloudSyncs } from '@/services/mainaKnowledgeCloud';
 import { enforceAudioRetentionPolicy } from '@/services/audioRetention';
 import {
   IOS_ASR_MAX_RECOVERY_ROUNDS,
@@ -79,7 +80,7 @@ async function launchIOSPostProcessing(meeting: Meeting): Promise<boolean> {
     state: 'running',
     error: null,
   });
-  beginIOSContinuedProcessing(Math.max(1, meeting.transcriptionWindowCount));
+  beginIOSContinuedProcessing(meeting.id, Math.max(1, meeting.transcriptionWindowCount));
   let passCompleted = false;
   const runPass = () => runLocalAsrPipeline({
     meetingId: meeting.id,
@@ -139,6 +140,21 @@ async function launchIOSPostProcessing(meeting: Meeting): Promise<boolean> {
       if (usableTranscript) {
         await maybeQueueMeetingPacket(meeting.id).catch((cause) => {
           log.warn('summary', 'iOS post-call packet queue deferred', {
+            meetingId: meeting.id,
+            err: String(cause),
+          });
+        });
+        // A user-initiated iOS continued-processing task should carry the
+        // resulting short cloud handoff too. Bound this to one minute; longer
+        // server work remains in the durable retry queue for an OS wake.
+        await drainMeetingPacketUntilSettled(meeting.id).catch((cause) => {
+          log.warn('summary', 'iOS bounded packet drain deferred', {
+            meetingId: meeting.id,
+            err: String(cause),
+          });
+        });
+        await reconcilePendingMainaKnowledgeCloudSyncs().catch((cause) => {
+          log.warn('maina-cloud', 'iOS bounded source drain deferred', {
             meetingId: meeting.id,
             err: String(cause),
           });

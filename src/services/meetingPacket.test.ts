@@ -35,7 +35,7 @@ vi.mock('@/services/mainaCloudSession', () => ({
 }));
 
 import { buildTranscriptText } from '@/data/meetings';
-import { reconcilePendingMeetingPackets, runMeetingPacketGeneration } from './meetingPacket';
+import { drainMeetingPacketUntilSettled, reconcilePendingMeetingPackets, runMeetingPacketGeneration } from './meetingPacket';
 
 describe('meetingPacket cloud broker integration', () => {
   let meeting: Record<string, unknown>;
@@ -56,7 +56,7 @@ describe('meetingPacket cloud broker integration', () => {
     mocks.getSession.mockResolvedValue({ accessToken: 'opaque', user: { userId: 'u1', email: 'owner@maina.local' } });
     mocks.listMeetingsEligibleForSummaryQueue.mockResolvedValue([]);
     mocks.updateMeeting.mockImplementation(async (_id: string, patch: Record<string, unknown>) => { meeting = { ...meeting, ...patch }; });
-    mocks.saveMeetingPacket.mockResolvedValue(undefined);
+    mocks.saveMeetingPacket.mockImplementation(async () => { meeting = { ...meeting, summaryStatus: 'ready', status: 'summarized' }; });
     mocks.replaceMeetingTodos.mockResolvedValue(undefined);
     mocks.setMeetingSummaryState.mockResolvedValue(undefined);
     mocks.maybeQueueSource.mockResolvedValue(undefined);
@@ -115,9 +115,29 @@ describe('meetingPacket cloud broker integration', () => {
     })));
 
     await reconcilePendingMeetingPackets();
-    await vi.waitFor(() => expect(mocks.saveMeetingPacket).toHaveBeenCalled());
-
+    expect(mocks.saveMeetingPacket).toHaveBeenCalled();
     expect(mocks.cloudFetch).toHaveBeenCalledWith('/v1/meeting-packets/job-recovered');
+  });
+
+  it('keeps a user-initiated iOS drain attached until the existing job settles', async () => {
+    meeting = { ...meeting, cloudNotesJobId: 'job-background', summaryStatus: 'running' };
+    mocks.cloudFetch
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        job_id: 'job-background', source_key: 'meeting:maina:m1', packet_version: 'meeting-packet-v3', status: 'processing',
+        provider: 'google', model: 'managed-model', progress: { completed_sections: 1, total_sections: 2 },
+      })))
+      .mockResolvedValueOnce(new Response(JSON.stringify({
+        job_id: 'job-background', source_key: 'meeting:maina:m1', packet_version: 'meeting-packet-v3', status: 'ready',
+        provider: 'google', model: 'managed-model', progress: { completed_sections: 2, total_sections: 2 },
+        packet: { title: 'Recovered notes', summary: 'The background job completed.', decisions: [], todos: [], open_questions: [] },
+      })));
+    const wait = vi.fn().mockResolvedValue(undefined);
+
+    const status = await drainMeetingPacketUntilSettled('m1', { maxPolls: 2, pollIntervalMs: 1, wait });
+
+    expect(status).toBe('ready');
+    expect(wait).toHaveBeenCalledOnce();
+    expect(mocks.cloudFetch).toHaveBeenCalledTimes(2);
   });
 
   it('does not hot-poll retryable work excluded by the durable due query', async () => {

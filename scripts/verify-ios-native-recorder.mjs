@@ -14,6 +14,7 @@ const continuedProcessingPlugin = path.join(project, 'plugins', 'withMainaIOSCon
 const sherpaHeaders = path.join(moduleRoot, 'ios', 'vendor', 'sherpa-onnx.xcframework', 'ios-arm64', 'Headers');
 const config = JSON.parse(readFileSync(path.join(moduleRoot, 'expo-module.config.json'), 'utf8'));
 const appConfig = JSON.parse(readFileSync(path.join(project, 'app.json'), 'utf8'));
+const captureSource = readFileSync(capture, 'utf8');
 
 for (const file of [capture, module, qwen, continuedProcessing, continuedProcessingPlugin]) {
   if (!existsSync(file) || readFileSync(file, 'utf8').trim().length === 0) {
@@ -47,10 +48,40 @@ for (const token of [
   'UIApplication.didBecomeActiveNotification',
   'storageReserveBytes',
   'capture-recovery-deferred',
+  'beginBackgroundTask(withName: "Maina microphone recovery")',
+  'capture-recovery-background-time-expired',
+  'expireRecoveryBackgroundTaskSynchronously',
+  'route-change-observed',
+  'recorder?.isRecording != true',
 ]) {
-  if (!readFileSync(capture, 'utf8').includes(token)) {
+  if (!captureSource.includes(token)) {
     throw new Error(`iOS recorder reliability invariant missing: ${token}`);
   }
+}
+for (const token of [
+  'requestIdentifierPrefix',
+  'jobId: String',
+  'cancel(taskRequestWithIdentifier:',
+  'attach(_ task: BGTask)',
+  'beginFallbackTask()',
+  'expireFallbackTaskSynchronously',
+  'UIApplication.shared.endBackgroundTask(identifier)',
+]) {
+  if (!readFileSync(continuedProcessing, 'utf8').includes(token)) {
+    throw new Error(`iOS continued-processing invariant missing: ${token}`);
+  }
+}
+
+const recoveryDelays = captureSource
+  .match(/recoveryDelaysMs\s*=\s*\[([^\]]+)\]/)?.[1]
+  ?.split(',')
+  .map((value) => Number(value.trim().replaceAll('_', '')));
+if (!recoveryDelays?.length || recoveryDelays.some((value) => !Number.isFinite(value))) {
+  throw new Error('iOS microphone recovery delays are missing or malformed.');
+}
+const recoveryWindowMs = recoveryDelays.reduce((sum, value) => sum + value, 0);
+if (recoveryDelays[0] !== 0 || recoveryWindowMs < 20_000 || recoveryWindowMs > 45_000) {
+  throw new Error(`iOS microphone recovery must retry immediately within one bounded background window; found ${recoveryWindowMs} ms.`);
 }
 for (const token of [
   'startNativeCapture',

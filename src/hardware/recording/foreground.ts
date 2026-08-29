@@ -156,13 +156,21 @@ export async function releaseQwenAsr(): Promise<void> {
   if (MainaRecorder) await MainaRecorder.releaseQwenAsr();
 }
 
-export function beginIOSContinuedProcessing(totalUnits: number): void {
+export function beginIOSContinuedProcessing(meetingId: string, totalUnits: number): void {
   if (Platform.OS !== 'ios' || !MainaRecorder?.beginIOSContinuedProcessing) return;
-  MainaRecorder.beginIOSContinuedProcessing(
+  const result = MainaRecorder.beginIOSContinuedProcessing(
+    meetingId,
     'Preparing meeting transcript',
     'Maina is processing saved audio on this iPhone.',
     Math.max(1, totalUnits),
   );
+  // The request identifier is intentionally omitted from logs. Mode/reason are
+  // enough to diagnose OS acceptance without retaining a meeting identifier.
+  console.info('[MainaContinuedProcessing] begin', {
+    started: result.started,
+    mode: result.mode,
+    reason: result.reason ?? null,
+  });
 }
 
 export function updateIOSContinuedProcessing(completedUnits: number, totalUnits: number): void {

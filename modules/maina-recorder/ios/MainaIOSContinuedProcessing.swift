@@ -13,9 +13,10 @@ public final class MainaIOSContinuedProcessing {
 
   private let queue = DispatchQueue(label: "com.divay.maina.ios.continued-processing")
   private let wildcardIdentifier = "com.divay.maina.staging.continued-processing.*"
-  private let requestIdentifier = "com.divay.maina.staging.continued-processing.transcription"
+  private let requestIdentifierPrefix = "com.divay.maina.staging.continued-processing.transcription"
   private var registered = false
   private var activeTask: BGTask?
+  private var activeRequestIdentifier: String?
   private var fallbackTask = UIBackgroundTaskIdentifier.invalid
   private var completedUnits: Int64 = 0
   private var totalUnits: Int64 = 1
@@ -35,7 +36,7 @@ public final class MainaIOSContinuedProcessing {
     }
   }
 
-  func begin(title: String, subtitle: String, totalUnits: Int) -> [String: Any] {
+  func begin(jobId: String, title: String, subtitle: String, totalUnits: Int) -> [String: Any] {
     queue.sync {
       self.completedUnits = 0
       self.totalUnits = Int64(max(1, totalUnits))
@@ -47,6 +48,15 @@ public final class MainaIOSContinuedProcessing {
           beginFallbackTask()
           return ["started": fallbackTask != .invalid, "mode": "fallback", "reason": "continued-processing-handler-unregistered"]
         }
+        let safeJobId = jobId
+          .lowercased()
+          .map { $0.isLetter || $0.isNumber || $0 == "-" ? $0 : "-" }
+        let requestIdentifier = "\(requestIdentifierPrefix).\(String(safeJobId.suffix(40)))"
+        if let previous = activeRequestIdentifier, previous != requestIdentifier {
+          BGTaskScheduler.shared.cancel(taskRequestWithIdentifier: previous)
+        }
+        BGTaskScheduler.shared.cancel(taskRequestWithIdentifier: requestIdentifier)
+        activeRequestIdentifier = requestIdentifier
         let request = BGContinuedProcessingTaskRequest(
           identifier: requestIdentifier,
           title: title,
@@ -55,12 +65,17 @@ public final class MainaIOSContinuedProcessing {
         request.strategy = .queue
         do {
           try BGTaskScheduler.shared.submit(request)
-          return ["started": true, "mode": "continued-processing"]
+          // Bridge the short interval before the scheduler attaches the
+          // continued task. attach(_:) ends this fallback immediately; if iOS
+          // queues longer, expiration checkpoints safely and the request stays
+          // available for a later OS launch.
+          beginFallbackTask()
+          return ["started": true, "mode": "continued-processing-requested", "requestId": requestIdentifier]
         } catch {
           // A submission refusal must not lose a meeting. Checkpoints and the
           // scheduled processing worker remain the durable fallback.
           beginFallbackTask()
-          return ["started": fallbackTask != .invalid, "mode": "fallback", "reason": error.localizedDescription]
+          return ["started": fallbackTask != .invalid, "mode": "fallback", "reason": error.localizedDescription, "requestId": requestIdentifier]
         }
       }
       beginFallbackTask()
@@ -87,6 +102,10 @@ public final class MainaIOSContinuedProcessing {
         task.setTaskCompleted(success: success)
         self.activeTask = nil
       }
+      if let requestIdentifier = self.activeRequestIdentifier {
+        BGTaskScheduler.shared.cancel(taskRequestWithIdentifier: requestIdentifier)
+        self.activeRequestIdentifier = nil
+      }
       self.endFallbackTask()
     }
   }
@@ -104,11 +123,10 @@ public final class MainaIOSContinuedProcessing {
 
   private func attach(_ task: BGTask) {
     activeTask = task
+    endFallbackTask()
     task.expirationHandler = { [weak self, weak task] in
-      self?.queue.async {
-        task?.setTaskCompleted(success: false)
-        self?.activeTask = nil
-      }
+      task?.setTaskCompleted(success: false)
+      self?.queue.async { self?.activeTask = nil }
     }
     if #available(iOS 26.0, *), let continued = task as? BGContinuedProcessingTask {
       continued.progress.totalUnitCount = totalUnits
@@ -120,10 +138,22 @@ public final class MainaIOSContinuedProcessing {
     guard fallbackTask == .invalid else { return }
     let start = {
       self.fallbackTask = UIApplication.shared.beginBackgroundTask(withName: "Maina transcription") { [weak self] in
-        self?.queue.async { self?.endFallbackTask() }
+        self?.expireFallbackTaskSynchronously()
       }
     }
     if Thread.isMainThread { start() } else { DispatchQueue.main.sync(execute: start) }
+  }
+
+  /** UIKit requires the task to be ended before its expiration handler returns. */
+  private func expireFallbackTaskSynchronously() {
+    let identifier: UIBackgroundTaskIdentifier = queue.sync {
+      let task = fallbackTask
+      fallbackTask = .invalid
+      return task
+    }
+    if identifier != .invalid {
+      UIApplication.shared.endBackgroundTask(identifier)
+    }
   }
 
   private func endFallbackTask() {

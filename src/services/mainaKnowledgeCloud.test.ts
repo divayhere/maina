@@ -50,6 +50,7 @@ vi.mock('@/services/mainaCloudSession', () => ({
 
 let queueEligibleMainaKnowledgeCloudSyncs: typeof import('./mainaKnowledgeCloud').queueEligibleMainaKnowledgeCloudSyncs;
 let runMainaKnowledgeCloudSync: typeof import('./mainaKnowledgeCloud').runMainaKnowledgeCloudSync;
+let reconcilePendingMainaKnowledgeCloudSyncs: typeof import('./mainaKnowledgeCloud').reconcilePendingMainaKnowledgeCloudSyncs;
 
 describe('mainaKnowledgeCloud service', () => {
   let meeting: Record<string, unknown>;
@@ -58,6 +59,7 @@ describe('mainaKnowledgeCloud service', () => {
     const service = await import('./mainaKnowledgeCloud');
     queueEligibleMainaKnowledgeCloudSyncs = service.queueEligibleMainaKnowledgeCloudSyncs;
     runMainaKnowledgeCloudSync = service.runMainaKnowledgeCloudSync;
+    reconcilePendingMainaKnowledgeCloudSyncs = service.reconcilePendingMainaKnowledgeCloudSyncs;
   });
 
   beforeEach(() => {
@@ -208,6 +210,24 @@ describe('mainaKnowledgeCloud service', () => {
     expect(mockUpdateMeetingPipelineStage).toHaveBeenLastCalledWith(expect.objectContaining({
       stage: 'mkc', state: 'ready', completedUnits: 1, totalUnits: 1,
     }));
+  });
+
+  it('awaits a background source drain and signals the terminal persisted state', async () => {
+    const { subscribeMeetingPipelineChanges } = await import('./meetingPipelineSignals');
+    const changed = vi.fn();
+    const unsubscribe = subscribeMeetingPipelineChanges(changed);
+    mockListMeetingsNeedingKnowledgeCloudSync
+      .mockResolvedValueOnce([meeting])
+      .mockResolvedValueOnce([]);
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ canonical_sha256: 'abc123' }), { status: 201 }),
+    ));
+
+    await reconcilePendingMainaKnowledgeCloudSyncs();
+    unsubscribe();
+
+    expect(meeting.knowledgeCloudSyncStatus).toBe('sync_succeeded');
+    expect(changed).toHaveBeenCalledWith('meeting-1');
   });
 
   it('can intentionally requeue auth-blocked meetings after settings change', async () => {

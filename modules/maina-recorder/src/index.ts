@@ -277,7 +277,7 @@ interface MainaRecorderNativeModule {
   getQwenAsrStatus(): Promise<QwenAsrStatus>;
   transcribeWithQwen(uri: string, startMs: number, endMs: number): Promise<QwenAsrResult>;
   releaseQwenAsr(): Promise<void>;
-  beginIOSContinuedProcessing?(title: string, subtitle: string, totalUnits: number): { started: boolean; mode: string; reason?: string };
+  beginIOSContinuedProcessing?(jobId: string, title: string, subtitle: string, totalUnits: number): { started: boolean; mode: string; reason?: string; requestId?: string };
   updateIOSContinuedProcessing?(completedUnits: number, totalUnits: number, subtitle?: string | null): void;
   finishIOSContinuedProcessing?(success: boolean): void;
   getRemoteControlStatus(): Promise<RemoteControlStatus>;

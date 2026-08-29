@@ -45,6 +45,7 @@ import {
   requeueMainaKnowledgeCloudCorrectionsForMeeting,
 } from '@/services/mainaKnowledgeCloudCorrections';
 import { maybeQueueMeetingPacket, runMeetingPacketGeneration } from '@/services/meetingPacket';
+import { subscribeMeetingPipelineChanges } from '@/services/meetingPipelineSignals';
 import { describeMeetingPresentation } from '@/services/meetingPresentation';
 import { log } from '@/services/logger';
 import { ensureStorageBudget } from '@/services/storageBudget';
@@ -393,6 +394,12 @@ export default function MeetingDetail() {
     });
     return () => subscription.remove();
   }, [load, refresh]);
+
+  useEffect(() => subscribeMeetingPipelineChanges((changedMeetingId) => {
+    if (changedMeetingId !== id) return;
+    load();
+    refresh();
+  }), [id, load, refresh]);
 
   useEffect(() => {
     if (!meeting) return;
