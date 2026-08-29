@@ -241,6 +241,24 @@ const MIGRATIONS: Migration[] = [
     await db.execAsync(`CREATE INDEX IF NOT EXISTS idx_meetings_cloud_notes_retry
       ON meetings(summary_status, cloud_notes_next_retry_at);`);
   },
+  // v15 — disposable, owner-scoped MKC read cache. This table never owns
+  // recordings, transcripts, notes, sync outbox state, or authentication.
+  async (db) => {
+    await db.execAsync(`CREATE TABLE IF NOT EXISTS mkc_memory_cache (
+      owner_user_id TEXT NOT NULL,
+      cache_key TEXT NOT NULL,
+      resource_kind TEXT NOT NULL,
+      payload_json TEXT NOT NULL,
+      etag TEXT,
+      checksum TEXT,
+      fetched_at INTEGER NOT NULL,
+      expires_at INTEGER,
+      last_accessed_at INTEGER NOT NULL,
+      PRIMARY KEY (owner_user_id, cache_key)
+    );
+    CREATE INDEX IF NOT EXISTS idx_mkc_memory_cache_owner_access
+      ON mkc_memory_cache(owner_user_id, last_accessed_at DESC);`);
+  },
 ];
 
 export async function initDb(): Promise<void> {

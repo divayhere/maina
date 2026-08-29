@@ -2,6 +2,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const store = new Map<string, string>();
+const mocks = vi.hoisted(() => ({ clearMkcMemoryCacheForOwner: vi.fn(async () => {}) }));
 
 vi.mock('expo-secure-store', () => ({
   getItemAsync: vi.fn(async (key: string) => store.get(key) ?? null),
@@ -11,6 +12,7 @@ vi.mock('expo-secure-store', () => ({
 
 vi.mock('@/data/settings', () => ({ deleteSetting: vi.fn(async () => {}) }));
 vi.mock('@/services/logger', () => ({ log: { info: vi.fn(), warn: vi.fn(), error: vi.fn() } }));
+vi.mock('@/services/mkc-memory-cache', () => ({ clearMkcMemoryCacheForOwner: mocks.clearMkcMemoryCacheForOwner }));
 
 import {
   MainaCloudApiError,
@@ -32,6 +34,7 @@ describe('mainaCloudSession', () => {
   beforeEach(async () => {
     store.clear();
     vi.restoreAllMocks();
+    mocks.clearMkcMemoryCacheForOwner.mockClear();
     await clearMainaCloudSession();
   });
 
@@ -39,6 +42,13 @@ describe('mainaCloudSession', () => {
     await saveMainaCloudSession(validSession);
     expect(await getMainaCloudSession()).toEqual(validSession);
     expect([...store.values()].join('')).not.toContain('provider');
+  });
+
+  it('clears only the signed-in owner cloud cache while preserving local meeting storage', async () => {
+    await saveMainaCloudSession(validSession);
+    await clearMainaCloudSession();
+    expect(mocks.clearMkcMemoryCacheForOwner).toHaveBeenCalledWith('user-1');
+    expect(mocks.clearMkcMemoryCacheForOwner).toHaveBeenCalledTimes(1);
   });
 
   it('displays the case-sensitive pairing credential byte-for-byte', () => {
