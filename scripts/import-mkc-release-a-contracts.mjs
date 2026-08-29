@@ -12,7 +12,7 @@ const BACKEND_ROOT = [
   resolve(APP_ROOT, '..', 'Maina', 'code', 'backend'),
   resolve(APP_ROOT, '..', '..', 'Maina', 'code', 'backend'),
 ].filter(Boolean).find((candidate) => existsSync(resolve(candidate, '.git')));
-const RELEASE_COMMIT = '8d58470';
+const RELEASE_COMMIT = '57cbb52';
 const SNAPSHOT_ROOT = resolve(APP_ROOT, 'contracts', 'mkc-release-a');
 const GENERATED_FILE = resolve(APP_ROOT, 'src', 'contracts', 'mkc-release-a.generated.ts');
 const CHECK_ONLY = process.argv.includes('--check');
@@ -25,11 +25,11 @@ const SOURCE_FILES = {
   handoff: 'docs/RELEASE_A_CONTRACT_HANDOFF_2026-08-29.md',
 };
 const EXPECTED_SOURCE_SHA256 = {
-  openapi: 'ab9750f84d4188ee5c23ffb5c78fe2d801e7a6b6fa182fe247dc8afb2b65abfa',
+  openapi: '003ade465b3bc84465b50a548d8b9b83309adfb40e256f9a4d3a162795e7df4d',
   apiTypes: '310d2bedde38f0994598c188d343c4e2760b3d91b4d38e777f1926b5662483a8',
-  retrievalTypes: 'bf59dae9abfb80b8cf847d8d26b349e138404178db5327eb4ac7b4dcaf794b0b',
+  retrievalTypes: 'f614bce4dede9ecc54681caca3861ea0e2e0112ffbb0653dbb4971f76bb3ca8e',
   recallIntent: '9a12932253a81fa171620c26136e52267ed4335f79f95f057574a7848888524c',
-  handoff: 'bc8fe3fb79eff02528ae2209d70791cbad3bcb013af1ba48953e457353b24563',
+  handoff: 'ad1695be2c1f7a527ce58c477f60106b67049d87d015b1bbde16ad8ec6b380dc',
 };
 
 function sha256(value) {
@@ -110,9 +110,9 @@ function manifestFor(sources, generated) {
     },
     activation: {
       meetings: 'contract-complete-default-off',
-      frozen_open: 'blocked-openapi-generic-response',
-      frozen_chapter: 'blocked-openapi-generic-response',
-      frozen_source: 'blocked-until-frozen-open-boundary-complete',
+      frozen_open: 'contract-complete-default-off-deployment-pending',
+      frozen_chapter: 'contract-complete-default-off-deployment-pending',
+      frozen_source: 'contract-complete-default-off-deployment-pending',
     },
   }, null, 2)}\n`;
 }
@@ -140,13 +140,15 @@ if (CHECK_ONLY) {
       throw new Error(`MKC Release A path ${path} is not pinned to ${schemaVersion}.`);
     }
   }
-  for (const path of [
-    '/v1/recall/searches/{searchId}/open',
-    '/v1/recall/searches/{searchId}/bundle/chapters/{chapterId}',
-  ]) {
+  const frozenSchemas = {
+    '/v1/recall/searches/{searchId}/open': 'mkc.frozen-recall-open.v1',
+    '/v1/recall/searches/{searchId}/bundle/chapters/{chapterId}': 'mkc.frozen-recall-chapter.v1',
+    '/v1/recall/searches/{searchId}/sources/{sourceKey}': 'mkc.frozen-recall-source.v1',
+  };
+  for (const [path, schemaVersion] of Object.entries(frozenSchemas)) {
     const schema = openapi.paths?.[path]?.get?.responses?.['200']?.content?.['application/json']?.schema;
-    if (schema?.$ref !== '#/components/schemas/GenericResponse') {
-      throw new Error(`MKC Release A frozen contract status changed at ${path}; import and audit a new pin.`);
+    if (schema?.properties?.schema_version?.const !== schemaVersion) {
+      throw new Error(`MKC Release A frozen contract ${path} is not pinned to ${schemaVersion}.`);
     }
   }
   process.stdout.write(`MKC Release A contract pin verified at ${RELEASE_COMMIT}.\n`);

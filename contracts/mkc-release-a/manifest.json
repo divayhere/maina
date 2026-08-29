@@ -1,10 +1,10 @@
 {
   "schema_version": "maina.mobile-contract-pin.v1",
-  "backend_commit": "8d58470",
+  "backend_commit": "57cbb52",
   "source_files": {
     "openapi": {
       "path": "contracts/openapi.v0.1.json",
-      "sha256": "ab9750f84d4188ee5c23ffb5c78fe2d801e7a6b6fa182fe247dc8afb2b65abfa"
+      "sha256": "003ade465b3bc84465b50a548d8b9b83309adfb40e256f9a4d3a162795e7df4d"
     },
     "apiTypes": {
       "path": "src/contracts/types.ts",
@@ -12,7 +12,7 @@
     },
     "retrievalTypes": {
       "path": "src/retrieval/contracts.ts",
-      "sha256": "bf59dae9abfb80b8cf847d8d26b349e138404178db5327eb4ac7b4dcaf794b0b"
+      "sha256": "f614bce4dede9ecc54681caca3861ea0e2e0112ffbb0653dbb4971f76bb3ca8e"
     },
     "recallIntent": {
       "path": "src/retrieval/intent.ts",
@@ -20,17 +20,17 @@
     },
     "handoff": {
       "path": "docs/RELEASE_A_CONTRACT_HANDOFF_2026-08-29.md",
-      "sha256": "bc8fe3fb79eff02528ae2209d70791cbad3bcb013af1ba48953e457353b24563"
+      "sha256": "ad1695be2c1f7a527ce58c477f60106b67049d87d015b1bbde16ad8ec6b380dc"
     }
   },
   "generated_types": {
     "path": "src/contracts/mkc-release-a.generated.ts",
-    "sha256": "bcd3326cc6010624fc8e7f1943ae3b78d0c381af82410b58958976abcd8ff7fe"
+    "sha256": "960f6004f5f2940d4d4871443e2b1acd72f5db7b9e7d641f67652b3269f26681"
   },
   "activation": {
     "meetings": "contract-complete-default-off",
-    "frozen_open": "blocked-openapi-generic-response",
-    "frozen_chapter": "blocked-openapi-generic-response",
-    "frozen_source": "blocked-until-frozen-open-boundary-complete"
+    "frozen_open": "contract-complete-default-off-deployment-pending",
+    "frozen_chapter": "contract-complete-default-off-deployment-pending",
+    "frozen_source": "contract-complete-default-off-deployment-pending"
   }
 }

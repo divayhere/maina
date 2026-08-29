@@ -4,10 +4,23 @@ import {
   meetingDetailFixture,
   meetingLibraryFixture,
   meetingTranscriptFixture,
+  frozenBundleSha256,
+  frozenChapterSha256,
+  frozenRecallChapterFixture,
+  frozenRecallOpenFixture,
+  frozenRecallSourceFixture,
+  frozenResultSha256,
   releaseATranscriptSha256,
 } from './__fixtures__/mkc-release-a-fixtures';
 import { MkcMemoryReadError } from './mkc-memory-client';
-import { getCloudMeetingDetail, getCloudMeetingTranscriptPage, listCloudMeetings } from './mkc-memory-release-a';
+import {
+  getCloudMeetingDetail,
+  getCloudMeetingTranscriptPage,
+  getFrozenRecallChapter,
+  getFrozenRecallSource,
+  listCloudMeetings,
+  openFrozenRecall,
+} from './mkc-memory-release-a';
 
 const mocks = vi.hoisted(() => ({
   getSession: vi.fn(),
@@ -53,6 +66,10 @@ describe('MKC Release A Meetings client', () => {
     );
     expect(mocks.getSession).not.toHaveBeenCalled();
     expect(mocks.fetch).not.toHaveBeenCalled();
+    await expect(openFrozenRecall({ searchId: 'search-disabled', enabled: false })).rejects.toEqual(
+      expect.objectContaining({ kind: 'invalid', retryable: false } satisfies Partial<MkcMemoryReadError>),
+    );
+    expect(mocks.getSession).not.toHaveBeenCalled();
   });
 
   it('strictly decodes and owner-scopes a successful network result before caching', async () => {
@@ -151,6 +168,63 @@ describe('MKC Release A Meetings client', () => {
     mocks.getCache.mockRejectedValue(new Error('synthetic corrupt cache'));
     await expect(listCloudMeetings({ enabled: true })).rejects.toEqual(
       expect.objectContaining({ kind: 'integrity', retryable: false } satisfies Partial<MkcMemoryReadError>),
+    );
+  });
+
+  it('opens frozen Recall then binds chapter and source reads to its immutable identity', async () => {
+    mocks.fetch
+      .mockResolvedValueOnce({ json: async () => frozenRecallOpenFixture })
+      .mockResolvedValueOnce({ json: async () => frozenRecallChapterFixture })
+      .mockResolvedValueOnce({ json: async () => frozenRecallSourceFixture });
+    await expect(openFrozenRecall({
+      searchId: frozenRecallOpenFixture.search_id,
+      enabled: true,
+      now: Date.parse('2026-08-30T00:00:00.000Z'),
+    })).resolves.toEqual(expect.objectContaining({ data: frozenRecallOpenFixture, source: 'network' }));
+    await expect(getFrozenRecallChapter({
+      searchId: frozenRecallOpenFixture.search_id,
+      chapterId: frozenRecallChapterFixture.chapter_id,
+      resultSha256: frozenResultSha256,
+      bundleSha256: frozenBundleSha256,
+      chapterSha256: frozenChapterSha256,
+      enabled: true,
+      now: Date.parse('2026-08-30T00:00:00.000Z'),
+    })).resolves.toEqual(expect.objectContaining({ data: frozenRecallChapterFixture, source: 'network' }));
+    await expect(getFrozenRecallSource({
+      searchId: frozenRecallOpenFixture.search_id,
+      sourceKey: frozenRecallSourceFixture.source.source_key,
+      resultSha256: frozenResultSha256,
+      bundleSha256: frozenBundleSha256,
+      enabled: true,
+      now: Date.parse('2026-08-30T00:00:00.000Z'),
+    })).resolves.toEqual(expect.objectContaining({ data: frozenRecallSourceFixture, source: 'network' }));
+  });
+
+  it('does not reveal foreign ownership or fall back to cache after a frozen 404', async () => {
+    const { MainaCloudApiError } = await import('./mainaCloudSession');
+    mocks.fetch.mockRejectedValue(new MainaCloudApiError('not found', 404, 'recall_frozen_result_not_found'));
+    await expect(openFrozenRecall({ searchId: 'search-foreign', enabled: true })).rejects.toEqual(
+      expect.objectContaining({ kind: 'expired', retryable: false } satisfies Partial<MkcMemoryReadError>),
+    );
+    expect(mocks.getCache).not.toHaveBeenCalled();
+  });
+
+  it('rechecks expiry when frozen data is served from offline cache', async () => {
+    const { MainaCloudApiError } = await import('./mainaCloudSession');
+    mocks.fetch.mockRejectedValue(new MainaCloudApiError('offline', 0, 'network_error'));
+    mocks.getCache.mockResolvedValue({
+      ownerUserId: 'owner-a',
+      cacheKey: 'synthetic',
+      kind: 'frozen-recall',
+      payload: { ...frozenRecallOpenFixture, expires_at: '2026-08-29T00:00:00.000Z' },
+      fetchedAt: 123,
+    });
+    await expect(openFrozenRecall({
+      searchId: frozenRecallOpenFixture.search_id,
+      enabled: true,
+      now: Date.parse('2026-08-30T00:00:00.000Z'),
+    })).rejects.toEqual(
+      expect.objectContaining({ kind: 'expired', retryable: false } satisfies Partial<MkcMemoryReadError>),
     );
   });
 });

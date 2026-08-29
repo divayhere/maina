@@ -1,5 +1,5 @@
 /* eslint-disable @typescript-eslint/array-type */
-// Generated from Maina Knowledge Cloud 8d58470. Do not edit by hand.
+// Generated from Maina Knowledge Cloud 57cbb52. Do not edit by hand.
 // Run: npm run import:mkc-release-a
 
 export type RecallIntent = "decision" | "task" | "question" | "timeline" | "general";
@@ -10,6 +10,8 @@ export const FROZEN_SEARCH_RESULT_VERSION = "mkc.frozen-search-result.v1" as con
 export const COVERAGE_RECEIPT_VERSION = "mkc.coverage-receipt.v1" as const;
 export const EVIDENCE_BUNDLE_VERSION = "mkc.evidence-bundle.v1" as const;
 export const FROZEN_RECALL_OPEN_VERSION = "mkc.frozen-recall-open.v1" as const;
+export const FROZEN_RECALL_CHAPTER_VERSION = "mkc.frozen-recall-chapter.v1" as const;
+export const FROZEN_RECALL_SOURCE_VERSION = "mkc.frozen-recall-source.v1" as const;
 
 export type SourceFamily =
   | "all"
@@ -207,6 +209,25 @@ export type FrozenRecallOpenV1 = {
       chapter_sha256: string;
     }>;
   };
+};
+
+export type FrozenRecallChapterV1 = EvidenceBundleChapterV1 & {
+  schema_version: typeof FROZEN_RECALL_CHAPTER_VERSION;
+  search_id: string;
+  result_sha256: string;
+  bundle_sha256: string;
+  expires_at: string;
+  coverage: RecallCoverageReceiptV1;
+};
+
+export type FrozenRecallSourceOpenV1 = {
+  schema_version: typeof FROZEN_RECALL_SOURCE_VERSION;
+  search_id: string;
+  result_sha256: string;
+  bundle_sha256: string;
+  expires_at: string;
+  coverage: RecallCoverageReceiptV1;
+  source: FrozenRecallSource;
 };
 
 export type MeetingReadiness = "ready" | "transcript_only" | "processing" | "summary_failed";

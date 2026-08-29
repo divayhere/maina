@@ -24,11 +24,11 @@ function clone<T>(value: T): T {
 describe('MKC Release A Meetings boundary', () => {
   it('is pinned to the qualified backend commit and leaves incomplete frozen schemas blocked', () => {
     expect(MKC_RELEASE_A_CONTRACT).toEqual({
-      backendCommit: '8d58470',
+      backendCommit: '57cbb52',
       meetings: 'contract-complete-default-off',
-      frozenOpen: 'blocked-openapi-generic-response',
-      frozenChapter: 'blocked-openapi-generic-response',
-      frozenSource: 'blocked-until-frozen-open-boundary-complete',
+      frozenOpen: 'contract-complete-default-off-deployment-pending',
+      frozenChapter: 'contract-complete-default-off-deployment-pending',
+      frozenSource: 'contract-complete-default-off-deployment-pending',
     });
   });
 

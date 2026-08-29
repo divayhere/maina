@@ -14,11 +14,13 @@ All three Meeting reads require bearer scope `sources:read`. A non-Maina-app mee
 ## Frozen Recall
 
 - `GET /v1/recall/searches/{searchId}/open` -> `mkc.frozen-recall-open.v1`.
-- `GET /v1/recall/searches/{searchId}/bundle/chapters/{chapterId}` -> `mkc.evidence-bundle-chapter.v1`.
+- `GET /v1/recall/searches/{searchId}/bundle/chapters/{chapterId}` -> `mkc.frozen-recall-chapter.v1`.
 - `GET /v1/recall/searches/{searchId}/sources/{sourceKey}` -> `mkc.frozen-recall-source.v1`.
 - MCP `open_maina_recall(search_id)`, `continue_maina_recall(search_id, chapter_id)` and `open_maina_recall_source(search_id, source_key)` expose the same frozen objects. Gateway version is `0.8.0`.
 
 These operations do not accept query text and do not rerun retrieval. Result and bundle checksums must match the saved D1 run. Unknown, expired, foreign-owner and integrity-failed results deliberately fail closed with `404`; a source outside the frozen result also returns `404`. This indistinguishable response prevents ownership enumeration.
+
+The published OpenAPI binds all three `200` responses to concrete consumer-decodable schemas. Each response contains `search_id`, `result_sha256`, `bundle_sha256`, `expires_at` and the complete `mkc.coverage-receipt.v1`. Source responses publish the full frozen source/evidence shape. Chapter responses retain every existing chapter field and add the identity envelope. The existing MCP `continue_maina_recall` adapter keeps its compatibility version `mkc.evidence-bundle-chapter.v1` while carrying the same additive checksum and coverage fields.
 
 ## Web Handoff
 
