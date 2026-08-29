@@ -11,6 +11,7 @@ import {
   shouldImportNativePostProcessingResult,
   shouldRepairNativeTranscriptStatus,
 } from '../services/nativePostProcessingCore';
+import { didTranscriptCoverageImprove } from '../services/transcriptCoverage';
 import { deriveStageTransition } from '../core/pipeline/stageState';
 
 export type MeetingStatus =
@@ -24,7 +25,7 @@ export type MeetingStatus =
   | 'summarizing'
   | 'summarized';
 
-export type SummaryStatus = 'idle' | 'queued' | 'running' | 'ready' | 'failed';
+export type SummaryStatus = 'idle' | 'queued' | 'running' | 'retryable' | 'ready' | 'failed';
 export type MeetingPipelineStage =
   | 'recording'
   | 'audio_finalized'
@@ -155,6 +156,7 @@ export interface Meeting {
   cloudNotesLastPolledAt?: number | null;
   cloudNotesRetryCount?: number | null;
   cloudNotesLastRetryAt?: number | null;
+  cloudNotesNextRetryAt?: number | null;
   nativePostprocessRunId?: string | null;
   nativePostprocessImportedAt?: number | null;
 }
@@ -199,6 +201,7 @@ interface Row {
   cloud_notes_last_polled_at: number | null;
   cloud_notes_retry_count: number | null;
   cloud_notes_last_retry_at: number | null;
+  cloud_notes_next_retry_at: number | null;
   native_postprocess_run_id: string | null;
   native_postprocess_imported_at: number | null;
 }
@@ -265,6 +268,7 @@ const toMeeting = (r: Row): Meeting => ({
   cloudNotesLastPolledAt: r.cloud_notes_last_polled_at,
   cloudNotesRetryCount: r.cloud_notes_retry_count ?? 0,
   cloudNotesLastRetryAt: r.cloud_notes_last_retry_at,
+  cloudNotesNextRetryAt: r.cloud_notes_next_retry_at,
   nativePostprocessRunId: r.native_postprocess_run_id,
   nativePostprocessImportedAt: r.native_postprocess_imported_at,
 });
@@ -489,7 +493,7 @@ export async function getMeeting(id: string): Promise<Meeting | null> {
   return row ? toMeeting(row) : null;
 }
 
-export async function listMeetingsNeedingSummary(): Promise<Meeting[]> {
+export async function listMeetingsNeedingSummary(now = Date.now()): Promise<Meeting[]> {
   const db = await getDb();
   const rows = await db.getAllAsync<Row>(
     `SELECT m.*,
@@ -497,7 +501,9 @@ export async function listMeetingsNeedingSummary(): Promise<Meeting[]> {
             (SELECT COUNT(*) FROM todo_items t WHERE t.meeting_id = m.id) AS total_todo_count
      FROM meetings m
      WHERE m.summary_status IN ('queued', 'running')
+        OR (m.summary_status = 'retryable' AND (m.cloud_notes_next_retry_at IS NULL OR m.cloud_notes_next_retry_at <= ?))
      ORDER BY m.started_at DESC`,
+    [now],
   );
   return rows.map(toMeeting);
 }
@@ -509,8 +515,8 @@ export async function listMeetingsEligibleForSummaryQueue(): Promise<Meeting[]> 
             (SELECT COUNT(*) FROM todo_items t WHERE t.meeting_id = m.id AND t.done = 0) AS open_todo_count,
             (SELECT COUNT(*) FROM todo_items t WHERE t.meeting_id = m.id) AS total_todo_count
      FROM meetings m
-     WHERE m.status IN ('transcribed', 'summarizing', 'summarized')
-       AND m.summary_status IN ('idle', 'failed', 'queued', 'running')
+     WHERE m.status IN ('transcribed', 'transcript_partial', 'summarizing', 'summarized')
+       AND m.summary_status IN ('idle', 'failed', 'queued', 'running', 'retryable')
      ORDER BY m.started_at DESC`,
   );
   return rows.map(toMeeting);
@@ -748,6 +754,7 @@ export async function updateMeeting(id: string, patch: Partial<Meeting>): Promis
     cloudNotesLastPolledAt: 'cloud_notes_last_polled_at',
     cloudNotesRetryCount: 'cloud_notes_retry_count',
     cloudNotesLastRetryAt: 'cloud_notes_last_retry_at',
+    cloudNotesNextRetryAt: 'cloud_notes_next_retry_at',
     nativePostprocessRunId: 'native_postprocess_run_id',
     nativePostprocessImportedAt: 'native_postprocess_imported_at',
   };
@@ -1367,14 +1374,26 @@ export async function importNativePostProcessingResult(input: {
       incomingFailedWindows: input.failedWindows,
     })) return;
 
+    const coverageImproved = didTranscriptCoverageImprove({
+      transcriptionWindowCount: inTransaction.transcription_window_count,
+      transcriptionCompletedWindows: inTransaction.transcription_completed_windows,
+      transcriptionFailedWindows: inTransaction.transcription_failed_windows,
+    }, {
+      transcriptionWindowCount: input.windowCount,
+      transcriptionCompletedWindows: input.completedWindows,
+      transcriptionFailedWindows: input.failedWindows,
+    });
+
     await transaction.runAsync('DELETE FROM transcript_blocks WHERE meeting_id = ?', [input.meetingId]);
     // AI-derived packet content must not pretend it describes a changed raw
     // transcript. Keep manually-created tasks, but clear machine-generated
     // tasks so the normal auto-summary path can recreate them truthfully.
-    await transaction.runAsync(
-      "DELETE FROM todo_items WHERE meeting_id = ? AND origin = 'ai'",
-      [input.meetingId],
-    );
+    if (coverageImproved) {
+      await transaction.runAsync(
+        "DELETE FROM todo_items WHERE meeting_id = ? AND origin = 'ai'",
+        [input.meetingId],
+      );
+    }
     for (const block of blocks) {
       await transaction.runAsync(
         `INSERT INTO transcript_blocks
@@ -1403,8 +1422,19 @@ export async function importNativePostProcessingResult(input: {
            transcription_window_count = ?, transcription_completed_windows = ?,
            transcription_failed_windows = ?, restart_count = ?,
            transcript = NULL, language = 'auto',
-           status = ?, summary = NULL, decisions_json = NULL, open_questions_json = NULL,
-           summary_status = 'idle', summary_provider_id = NULL, summary_model = NULL, summarized_at = NULL,
+           status = ?,
+           summary = CASE WHEN ? = 1 THEN NULL ELSE summary END,
+           decisions_json = CASE WHEN ? = 1 THEN NULL ELSE decisions_json END,
+           open_questions_json = CASE WHEN ? = 1 THEN NULL ELSE open_questions_json END,
+           summary_status = CASE WHEN ? = 1 THEN 'idle' ELSE summary_status END,
+           summary_provider_id = CASE WHEN ? = 1 THEN NULL ELSE summary_provider_id END,
+           summary_model = CASE WHEN ? = 1 THEN NULL ELSE summary_model END,
+           summarized_at = CASE WHEN ? = 1 THEN NULL ELSE summarized_at END,
+           cloud_notes_job_id = CASE WHEN ? = 1 THEN NULL ELSE cloud_notes_job_id END,
+           cloud_notes_last_polled_at = CASE WHEN ? = 1 THEN NULL ELSE cloud_notes_last_polled_at END,
+           cloud_notes_retry_count = CASE WHEN ? = 1 THEN 0 ELSE cloud_notes_retry_count END,
+           cloud_notes_last_retry_at = CASE WHEN ? = 1 THEN NULL ELSE cloud_notes_last_retry_at END,
+           cloud_notes_next_retry_at = CASE WHEN ? = 1 THEN NULL ELSE cloud_notes_next_retry_at END,
            last_error = ?, native_postprocess_run_id = ?, native_postprocess_imported_at = ?, updated_at = ?
        WHERE id = ?`,
       [
@@ -1418,6 +1448,7 @@ export async function importNativePostProcessingResult(input: {
         Math.max(0, input.failedWindows),
         Math.max(0, input.routeRestartCount),
         outcome.status,
+        ...Array(12).fill(coverageImproved ? 1 : 0),
         outcome.error,
         input.runId,
         now,
@@ -1682,10 +1713,13 @@ export async function setMeetingSummaryState(
   status: SummaryStatus,
   options?: { providerId?: string | null; model?: string | null; error?: string | null },
 ): Promise<void> {
+  const meeting = await getMeeting(meetingId);
   const nextMeetingStatus: MeetingStatus =
-    status === 'ready'
+    meeting?.status === 'transcript_partial'
+      ? 'transcript_partial'
+      : status === 'ready'
       ? 'summarized'
-      : status === 'running' || status === 'queued'
+      : status === 'running' || status === 'queued' || status === 'retryable'
         ? 'summarizing'
         : 'transcribed';
   await updateMeeting(meetingId, {
@@ -1702,6 +1736,8 @@ export async function setMeetingSummaryState(
       ? 'queued'
       : status === 'running'
         ? 'running'
+        : status === 'retryable'
+          ? 'deferred'
         : status === 'ready'
           ? 'ready'
           : 'failed';

@@ -27,7 +27,13 @@ describe('meeting pipeline presentation', () => {
   });
 
   it('offers recovery only for a terminal partial transcript with retained audio', () => {
-    expect(describeMeetingPresentation({ ...meeting, status: 'transcript_partial', transcriptionRecoveryRounds: 3 })).toMatchObject({
+    expect(describeMeetingPresentation({
+      ...meeting,
+      status: 'transcript_partial',
+      transcriptionCompletedWindows: 9,
+      transcriptionFailedWindows: 1,
+      transcriptionRecoveryRounds: 3,
+    })).toMatchObject({
       phase: 'transcript_partial', working: false, canRetryTranscript: true,
     });
   });

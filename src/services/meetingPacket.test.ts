@@ -99,15 +99,15 @@ describe('meetingPacket cloud broker integration', () => {
     }));
   });
 
-  it('revisits a cooled-down failed cloud job and imports it when the server has recovered', async () => {
+  it('revisits a due retryable cloud job and imports it when the server has recovered', async () => {
     meeting = {
       ...meeting,
-      summaryStatus: 'failed',
+      summaryStatus: 'retryable',
       cloudNotesJobId: 'job-recovered',
       cloudNotesRetryCount: 1,
-      cloudNotesLastPolledAt: Date.now() - 16 * 60 * 1000,
+      cloudNotesNextRetryAt: Date.now() - 1,
     };
-    mocks.listMeetingsEligibleForSummaryQueue.mockResolvedValue([meeting]);
+    mocks.listMeetingsNeedingSummary.mockResolvedValue([meeting]);
     mocks.cloudFetch.mockResolvedValue(new Response(JSON.stringify({
       job_id: 'job-recovered', source_key: 'meeting:maina:m1', packet_version: 'meeting-packet-v3', status: 'ready',
       provider: 'google', model: 'managed-model', progress: { completed_sections: 1, total_sections: 1 },
@@ -120,17 +120,47 @@ describe('meetingPacket cloud broker integration', () => {
     expect(mocks.cloudFetch).toHaveBeenCalledWith('/v1/meeting-packets/job-recovered');
   });
 
-  it('does not hot-poll a recently observed failed cloud job', async () => {
-    meeting = {
-      ...meeting,
-      summaryStatus: 'failed',
-      cloudNotesJobId: 'job-recent',
-      cloudNotesRetryCount: 1,
-      cloudNotesLastPolledAt: Date.now() - 60_000,
-    };
-    mocks.listMeetingsEligibleForSummaryQueue.mockResolvedValue([meeting]);
+  it('does not hot-poll retryable work excluded by the durable due query', async () => {
+    mocks.listMeetingsNeedingSummary.mockResolvedValue([]);
 
     await reconcilePendingMeetingPackets();
+
+    expect(mocks.cloudFetch).not.toHaveBeenCalled();
+  });
+
+  it('creates notes after the bounded recovery budget leaves at least 99% audio coverage', async () => {
+    meeting = {
+      ...meeting,
+      status: 'transcript_partial',
+      transcriptionWindowCount: 645,
+      transcriptionCompletedWindows: 644,
+      transcriptionFailedWindows: 1,
+      transcriptionRecoveryRounds: 3,
+    };
+    mocks.cloudFetch.mockResolvedValue(new Response(JSON.stringify({
+      job_id: 'job-partial', source_key: 'meeting:maina:m1', packet_version: 'meeting-packet-v3', status: 'ready',
+      provider: 'google', model: 'managed-model', progress: { completed_sections: 1, total_sections: 1 },
+      packet: { title: 'Bounded recovery', summary: 'Usable notes from high-coverage audio.', decisions: [], todos: [], open_questions: [] },
+    })));
+
+    await runMeetingPacketGeneration('m1');
+
+    expect(mocks.saveMeetingPacket).toHaveBeenCalled();
+    // Immutable source freeze remains blocked while transcript status is partial.
+    expect(mocks.maybeQueueSource).toHaveBeenCalledWith('m1');
+  });
+
+  it('does not create notes from a materially incomplete transcript', async () => {
+    meeting = {
+      ...meeting,
+      status: 'transcript_partial',
+      transcriptionWindowCount: 100,
+      transcriptionCompletedWindows: 90,
+      transcriptionFailedWindows: 10,
+      transcriptionRecoveryRounds: 3,
+    };
+
+    await runMeetingPacketGeneration('m1');
 
     expect(mocks.cloudFetch).not.toHaveBeenCalled();
   });
@@ -157,5 +187,33 @@ describe('meetingPacket cloud broker integration', () => {
     ]);
 
     expect(maximumConcurrentRequests).toBe(1);
+  });
+
+  it('defers a transport failure durably instead of declaring notes failed', async () => {
+    const TransportError = (await import('@/services/mainaCloudSession')).MainaCloudApiError;
+    mocks.cloudFetch.mockRejectedValue(new TransportError('offline', 0, 'network_error'));
+
+    await runMeetingPacketGeneration('m1');
+
+    expect(mocks.setMeetingSummaryState).toHaveBeenCalledWith('m1', 'retryable', expect.objectContaining({
+      error: expect.stringContaining('continue automatically'),
+    }));
+    expect(mocks.updateMeeting).toHaveBeenCalledWith('m1', expect.objectContaining({
+      cloudNotesRetryCount: 1,
+      cloudNotesNextRetryAt: expect.any(Number),
+    }));
+    expect(mocks.maybeQueueSource).not.toHaveBeenCalled();
+  });
+
+  it('keeps authentication failure terminal and preserves the local transcript', async () => {
+    const CloudError = (await import('@/services/mainaCloudSession')).MainaCloudApiError;
+    mocks.cloudFetch.mockRejectedValue(new CloudError('expired', 401, 'unauthorized'));
+
+    await runMeetingPacketGeneration('m1');
+
+    expect(mocks.setMeetingSummaryState).toHaveBeenCalledWith('m1', 'failed', expect.objectContaining({
+      error: expect.stringContaining('reconnected'),
+    }));
+    expect(mocks.saveMeetingPacket).not.toHaveBeenCalled();
   });
 });

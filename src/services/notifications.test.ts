@@ -68,4 +68,11 @@ describe('buildMainaNotifications', () => {
       knowledgeCloudSyncStatus: 'sync_failed_auth',
     })])[0]).toMatchObject({ action: 'open_settings', actionLabel: 'Open settings' });
   });
+
+  it('does not ask the user to operate self-healing network retries', () => {
+    expect(buildMainaNotifications([baseMeeting({
+      summaryStatus: 'retryable',
+      knowledgeCloudSyncStatus: 'sync_failed_retryable',
+    })])).toEqual([]);
+  });
 });

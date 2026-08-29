@@ -28,6 +28,7 @@ import {
   iosAsrRetryDelayMs,
   isIOSAsrRetryDue,
 } from '@/services/iosAsrRecoveryPolicy';
+import { isTerminalPartialTranscript } from '@/services/transcriptCoverage';
 
 // Multiple foreground triggers (launch, resume, the meeting screen, and the
 // short foreground poll) can arrive together. Serialize them so only one
@@ -122,7 +123,10 @@ async function launchIOSPostProcessing(meeting: Meeting): Promise<boolean> {
         error: result.lastError,
         metadata: { blocks: result.blockCount, words: result.wordCount },
       });
-      if (result.coverageComplete && result.hasText) {
+      const refreshedMeeting = await getMeeting(meeting.id);
+      const usableTranscript = result.coverageComplete && result.hasText
+        || Boolean(refreshedMeeting && isTerminalPartialTranscript(refreshedMeeting));
+      if (usableTranscript) {
         await maybeQueueMeetingPacket(meeting.id).catch((cause) => {
           log.warn('summary', 'iOS post-call packet queue deferred', {
             meetingId: meeting.id,

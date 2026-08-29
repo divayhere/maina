@@ -234,6 +234,13 @@ const MIGRATIONS: Migration[] = [
     CREATE INDEX IF NOT EXISTS idx_local_asr_windows_meeting
       ON local_asr_windows(meeting_id, chunk_index, window_index);`);
   },
+  // v14 — durable cloud-note retry scheduling. A network or process failure
+  // must survive app restarts without being presented as a terminal failure.
+  async (db) => {
+    await addColumnIfMissing(db, 'meetings', 'cloud_notes_next_retry_at', 'INTEGER');
+    await db.execAsync(`CREATE INDEX IF NOT EXISTS idx_meetings_cloud_notes_retry
+      ON meetings(summary_status, cloud_notes_next_retry_at);`);
+  },
 ];
 
 export async function initDb(): Promise<void> {

@@ -1,4 +1,11 @@
 import type { Meeting } from '@/data/meetings';
+import {
+  formatCoveragePercent,
+  isRecoveryBudgetExhausted,
+  isTerminalNoSpeechMeeting,
+  isTerminalPartialTranscript,
+  transcriptCoverage,
+} from '@/services/transcriptCoverage';
 
 export type MeetingPresentationPhase =
   | 'recording'
@@ -63,18 +70,51 @@ export function describeMeetingPresentation(meeting: Meeting): MeetingPresentati
     };
   }
   if (meeting.status === 'transcript_partial') {
-    const total = Math.max(0, meeting.transcriptionWindowCount);
-    const completed = Math.min(total, Math.max(0, meeting.transcriptionCompletedWindows));
-    const percent = total > 0 ? `${((completed / total) * 100).toFixed(completed / total >= 0.99 ? 1 : 0)}%` : null;
+    const coverage = transcriptCoverage(meeting);
+    const percent = formatCoveragePercent(coverage.ratio) ?? 'Partial';
+    const terminal = isTerminalPartialTranscript(meeting);
+    const recoveryExhausted = isRecoveryBudgetExhausted(meeting);
+    if (meeting.summaryStatus === 'queued' || meeting.summaryStatus === 'running' || meeting.summaryStatus === 'retryable') {
+      return {
+        phase: 'summary',
+        label: meeting.summaryStatus === 'retryable' ? 'Notes will continue automatically' : 'Writing your notes',
+        tone: 'primary',
+        detail: meeting.summaryStatus === 'retryable' ? `Transcript saved with ${percent} audio coverage.` : `${percent} audio coverage`,
+        working: true,
+        progress: coverage.ratio ?? undefined,
+        canRetryTranscript: false,
+      };
+    }
+    if (meeting.summaryStatus === 'ready') {
+      return {
+        phase: 'complete',
+        label: 'Notes ready',
+        tone: 'primary',
+        detail: `${percent} audio coverage`,
+        working: false,
+        canRetryTranscript: true,
+      };
+    }
+    if (meeting.summaryStatus === 'failed' && terminal) {
+      return {
+        phase: 'summary_failed',
+        label: "Notes didn't come through",
+        tone: 'warn',
+        detail: `Transcript saved with ${percent} audio coverage.`,
+        working: false,
+        canRetryTranscript: true,
+      };
+    }
     return {
       phase: 'transcript_partial',
-      label: percent ? `${percent} processed` : 'Partial transcript saved',
-      tone: 'muted',
-      detail: meeting.transcriptionRecoveryRounds < 3
-        ? 'Maina will retry the remaining saved audio.'
-        : 'Saved audio can be re-transcribed if you need another pass.',
-      working: meeting.transcriptionRecoveryRounds < 3,
-      canRetryTranscript: meeting.transcriptionRecoveryRounds >= 3,
+      label: terminal ? `${percent} processed` : recoveryExhausted ? 'Partial transcript saved' : 'Recovering transcript',
+      tone: terminal ? 'muted' : recoveryExhausted ? 'warn' : 'primary',
+      detail: recoveryExhausted
+        ? `${coverage.failed} of ${coverage.total} audio sections could not be transcribed.`
+        : `Retry ${Math.min((meeting.transcriptionRecoveryRounds ?? 0) + 1, 3)} of 3 is scheduled.`,
+      working: !recoveryExhausted,
+      progress: coverage.ratio ?? undefined,
+      canRetryTranscript: recoveryExhausted,
     };
   }
   if (meeting.status === 'audio_expired_incomplete') {
@@ -88,11 +128,7 @@ export function describeMeetingPresentation(meeting: Meeting): MeetingPresentati
     };
   }
   if (meeting.status === 'recorded' || meeting.status === 'transcribing') {
-    const noSpeech = meeting.status === 'recorded'
-      && meeting.transcriptionWindowCount > 0
-      && meeting.transcriptionCompletedWindows === meeting.transcriptionWindowCount
-      && meeting.transcriptionFailedWindows === 0;
-    if (noSpeech) {
+    if (isTerminalNoSpeechMeeting(meeting)) {
       return {
         phase: 'no_speech',
         label: 'No speech detected',
@@ -121,6 +157,16 @@ export function describeMeetingPresentation(meeting: Meeting): MeetingPresentati
       tone: 'warn',
       detail: 'Your transcript is safe.',
       working: false,
+      canRetryTranscript: false,
+    };
+  }
+  if (meeting.summaryStatus === 'retryable') {
+    return {
+      phase: 'summary',
+      label: 'Notes will continue automatically',
+      tone: 'muted',
+      detail: 'Your transcript is safe. Maina is waiting for internet or cloud availability.',
+      working: true,
       canRetryTranscript: false,
     };
   }
