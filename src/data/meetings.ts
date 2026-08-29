@@ -514,6 +514,17 @@ export async function listMeetingsNeedingSummary(now = Date.now()): Promise<Meet
   return rows.map(toMeeting);
 }
 
+export async function getNextMeetingPacketRetryAt(): Promise<number | null> {
+  const db = await getDb();
+  const row = await db.getFirstAsync<{ next_retry_at: number | null }>(`
+    SELECT MIN(cloud_notes_next_retry_at) AS next_retry_at
+    FROM meetings
+    WHERE summary_status = 'retryable'
+      AND cloud_notes_next_retry_at IS NOT NULL
+  `);
+  return row?.next_retry_at ?? null;
+}
+
 export async function listMeetingsEligibleForSummaryQueue(): Promise<Meeting[]> {
   const db = await getDb();
   const rows = await db.getAllAsync<Row>(

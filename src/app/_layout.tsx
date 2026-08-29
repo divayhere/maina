@@ -17,6 +17,7 @@ import {
   markMeetingsAudioDeleted,
   startRecordingSegment,
   finishRecordingSegment,
+  getNextMeetingPacketRetryAt,
   repairStoredRecordingReferences,
   updateMeeting,
 } from '@/data/meetings';
@@ -256,8 +257,13 @@ function RootLayout() {
       if (packetPollTimer) return Promise.resolve();
       let work: Promise<void>;
       work = reconcilePendingMeetingPackets()
-        .then((pendingCount) => {
-          const delayMs = nextPacketPollDelay(pendingCount, AppState.currentState === 'active');
+        .then(async (pendingCount) => {
+          const nextRetryAt = await getNextMeetingPacketRetryAt();
+          const delayMs = nextPacketPollDelay({
+            pendingCount,
+            appActive: AppState.currentState === 'active',
+            nextRetryAt,
+          });
           if (stopped || delayMs == null) return;
           packetPollTimer = setTimeout(() => {
             packetPollTimer = null;
