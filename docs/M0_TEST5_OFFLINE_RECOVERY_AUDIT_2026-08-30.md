@@ -1,5 +1,10 @@
 # M0 Test 5 — Offline recovery audit (2026-08-30)
 
+> Historical candidate note: this document is evidence for Android `0.10.33
+> (59)` and iOS `0.10.33 (15)` only. It must not be used as evidence for the
+> later `0.10.34` candidates. The separate, current-run addendum is
+> `M0_TEST5_OFFLINE_RECOVERY_0_10_34_ADDENDUM_2026-08-30.md`.
+
 Status: **FAILED / AT RISK for unattended recovery.** Local recording and transcript durability passed. This is not release-readiness evidence.
 
 ## Qualified devices and installed candidates
