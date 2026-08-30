@@ -35,8 +35,10 @@ import {
   IOS_ASR_MAX_RECOVERY_ROUNDS,
   iosAsrRetryDelayMs,
 } from '@/services/iosAsrRecoveryPolicy';
-import { isTerminalPartialTranscript } from '@/services/transcriptCoverage';
-import { TERMINAL_PARTIAL_RECOVERY_ROUNDS } from '@/services/transcriptCoverage';
+import {
+  isTerminalPartialTranscript,
+  TERMINAL_PARTIAL_RECOVERY_ROUNDS,
+} from '@/services/transcriptCoverage';
 
 // Multiple foreground triggers (launch, resume, the meeting screen, and the
 // short foreground poll) can arrive together. Serialize them so only one
