@@ -48,6 +48,7 @@ describe('buildMainaNotifications', () => {
     expect(notification).toMatchObject({
       action: 'review_recovery',
       actionLabel: 'Review options',
+      href: '/meeting/meeting-1/recover',
     });
   });
 
@@ -62,11 +63,19 @@ describe('buildMainaNotifications', () => {
     expect(buildMainaNotifications([baseMeeting({
       summaryStatus: 'failed',
       knowledgeCloudSyncStatus: 'local_only',
-    })])[0]).toMatchObject({ action: 'retry_notes', actionLabel: 'Retry notes' });
+    })])[0]).toMatchObject({
+      action: 'retry_notes',
+      actionLabel: 'Retry notes',
+      href: '/meeting/meeting-1',
+    });
 
     expect(buildMainaNotifications([baseMeeting({
       knowledgeCloudSyncStatus: 'sync_failed_auth',
-    })])[0]).toMatchObject({ action: 'open_settings', actionLabel: 'Open settings' });
+    })])[0]).toMatchObject({
+      action: 'open_settings',
+      actionLabel: 'Open settings',
+      href: '/settings',
+    });
   });
 
   it('does not ask the user to operate self-healing network retries', () => {
