@@ -4,6 +4,7 @@ import {
   ACTIVE_PACKET_POLL_MS,
   BACKGROUND_PACKET_POLL_MS,
   MINIMUM_PACKET_RETRY_WAKE_MS,
+  createPacketPollSignalCoalescer,
   nextPacketPollDelay,
   packetPollSignalDelay,
 } from './pipelineScheduling';
@@ -29,13 +30,29 @@ describe('pipeline scheduling', () => {
     })).toBe(MINIMUM_PACKET_RETRY_WAKE_MS);
   });
 
-  it('does not let a packet poll wake itself while its owner is still active', () => {
-    expect(packetPollSignalDelay({ pollInFlight: true, appActive: true })).toBeNull();
-    expect(packetPollSignalDelay({ pollInFlight: true, appActive: false })).toBeNull();
+  it('uses the bounded platform interval for a packet state signal', () => {
+    expect(packetPollSignalDelay({ appActive: true })).toBe(ACTIVE_PACKET_POLL_MS);
+    expect(packetPollSignalDelay({ appActive: false })).toBe(BACKGROUND_PACKET_POLL_MS);
   });
 
-  it('uses the bounded platform interval for a state signal outside the active poll', () => {
-    expect(packetPollSignalDelay({ pollInFlight: false, appActive: true })).toBe(ACTIVE_PACKET_POLL_MS);
-    expect(packetPollSignalDelay({ pollInFlight: false, appActive: false })).toBe(BACKGROUND_PACKET_POLL_MS);
+  it('retains one dirty hint while a poll is active and consumes it after release', () => {
+    let pollInFlight = true;
+    const armed: number[] = [];
+    const coalescer = createPacketPollSignalCoalescer({
+      isPollInFlight: () => pollInFlight,
+      appActive: () => false,
+      arm: (delayMs) => { armed.push(delayMs); return true; },
+    });
+
+    expect(coalescer.signal()).toBe('deferred');
+    expect(coalescer.signal()).toBe('deferred');
+    expect(coalescer.hasDeferredSignal()).toBe(true);
+    expect(armed).toEqual([]);
+
+    pollInFlight = false;
+    expect(coalescer.pollSettled()).toBe(true);
+    expect(coalescer.pollSettled()).toBe(false);
+    expect(coalescer.hasDeferredSignal()).toBe(false);
+    expect(armed).toEqual([BACKGROUND_PACKET_POLL_MS]);
   });
 });

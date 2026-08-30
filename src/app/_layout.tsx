@@ -8,7 +8,7 @@ import NetInfo from '@react-native-community/netinfo';
 
 import { provisionCoreLanguages, requestSpeechPermissions } from '@/core/transcription/nativeSpeech';
 import { createEarlierDeadlineTimer } from '@/core/pipeline/earlierDeadlineTimer';
-import { nextPacketPollDelay, packetPollSignalDelay } from '@/core/pipeline/pipelineScheduling';
+import { createPacketPollSignalCoalescer, nextPacketPollDelay } from '@/core/pipeline/pipelineScheduling';
 import { initDb } from '@/data/db';
 import {
   getMeeting,
@@ -273,6 +273,11 @@ function RootLayout() {
     const packetPollTimer = createEarlierDeadlineTimer({
       onDue: () => { void schedulePacketPoll(); },
     });
+    const packetPollSignals = createPacketPollSignalCoalescer({
+      isPollInFlight: () => packetPollInFlight !== null,
+      appActive: () => AppState.currentState === 'active',
+      arm: (delayMs) => packetPollTimer.arm(delayMs),
+    });
     const pipelineCoordinator = createPipelineWakeCoordinator({
       requestSignal: requestDurablePipelineWake,
       persistConnectivity: persistPipelineConnectivity,
@@ -319,7 +324,11 @@ function RootLayout() {
           log.warn('summary', 'pending packet reconciliation failed', { err: String(cause) });
         })
         .finally(() => {
-          if (packetPollInFlight === work) packetPollInFlight = null;
+          if (packetPollInFlight !== work) return;
+          packetPollInFlight = null;
+          if (packetPollSignals.pollSettled()) {
+            log.info('summary', 'coalesced packet poll signal retained one successor');
+          }
         });
       packetPollInFlight = work;
       return work;
@@ -370,16 +379,12 @@ function RootLayout() {
       foregroundStarter.requestNativeClaim();
     });
     const unsubscribePipeline = subscribeMeetingPipelineChanges((meetingId) => {
-      const delayMs = packetPollSignalDelay({
-        pollInFlight: packetPollInFlight !== null,
-        appActive: AppState.currentState === 'active',
-      });
+      const disposition = packetPollSignals.signal();
       log.info('summary', 'meeting pipeline state changed; bounded poll evaluated', {
         meetingId,
         pollInFlight: packetPollInFlight !== null,
-        scheduled: delayMs != null,
+        disposition,
       });
-      if (delayMs != null) packetPollTimer.arm(delayMs);
     });
     return () => {
       stopped = true;
@@ -390,6 +395,7 @@ function RootLayout() {
       unsubscribeNativeWake();
       unsubscribePipeline();
       unregisterNativeScheduler();
+      packetPollSignals.cancel();
       packetPollTimer.cancel();
     };
   }, [ready]);
