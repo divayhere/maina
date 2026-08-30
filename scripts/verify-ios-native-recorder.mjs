@@ -91,12 +91,15 @@ for (const token of [
   'cancel(taskRequestWithIdentifier:',
   'previous_schedule_tuple_mismatch',
   'maxNativeScheduleAttempts = 5',
+  'MainaIOSPipelineWakePolicy.shouldResetAttemptBudget',
+  'persistDeferred(target',
   'claimPending()',
   'hasActiveExecution()',
   'CompletionGate',
   '.now() + .seconds(10)',
   'MainaIOSPipelineWakePolicy.scheduleAction',
-  'MainaIOSPipelineWakePolicy.retainedGenerationAfterCompletion',
+  'MainaIOSPipelineWakePolicy.retainedTargetsAfterCompletion',
+  'ensureRetainedTargetAfterCurrentTask()',
   'setTaskCompleted(success:',
 ]) {
   if (!readFileSync(pipelineWake, 'utf8').includes(token)) {

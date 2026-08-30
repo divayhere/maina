@@ -7,6 +7,18 @@ enum MainaIOSPipelineWakeScheduleAction: Equatable {
   case submitPendingRequest
 }
 
+struct MainaIOSPipelineWakeTarget: Equatable {
+  let generation: Int
+  let requiresNetwork: Bool
+  let notBeforeAt: Int64
+  let scheduleRevision: Int
+}
+
+struct MainaIOSPipelineWakeRetention: Equatable {
+  let current: MainaIOSPipelineWakeTarget?
+  let deferred: MainaIOSPipelineWakeTarget?
+}
+
 /**
  * Pure ownership decisions for the single static BGProcessing identifier.
  * SQLite remains the durable queue; this policy only decides whether the one
@@ -25,6 +37,23 @@ enum MainaIOSPipelineWakePolicy {
       && storedProtocolVersion < schedulerProtocolVersion
       && hasUnfinishedSQLiteWork
       && !active
+  }
+
+  static func shouldResetAttemptBudget(
+    attemptedGeneration: Int,
+    attemptedRevision: Int,
+    acceptedGeneration: Int,
+    acceptedRevision: Int
+  ) -> Bool {
+    attemptedGeneration != acceptedGeneration || attemptedRevision != acceptedRevision
+  }
+
+  static func shouldDeferBehindActive(
+    active: Bool,
+    activeGeneration: Int,
+    requestedGeneration: Int
+  ) -> Bool {
+    active && requestedGeneration > activeGeneration
   }
 
   static func scheduleAction(
@@ -81,5 +110,24 @@ enum MainaIOSPipelineWakePolicy {
       return 0
     }
     return requestedGeneration
+  }
+
+
+  static func retainedTargetsAfterCompletion(
+    completedGeneration: Int,
+    succeeded: Bool,
+    current: MainaIOSPipelineWakeTarget?,
+    deferred: MainaIOSPipelineWakeTarget?
+  ) -> MainaIOSPipelineWakeRetention {
+    if !succeeded {
+      return MainaIOSPipelineWakeRetention(current: current, deferred: deferred)
+    }
+    if let deferred, deferred.generation > completedGeneration {
+      return MainaIOSPipelineWakeRetention(current: deferred, deferred: nil)
+    }
+    if let current, current.generation > completedGeneration {
+      return MainaIOSPipelineWakeRetention(current: current, deferred: nil)
+    }
+    return MainaIOSPipelineWakeRetention(current: nil, deferred: nil)
   }
 }

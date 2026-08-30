@@ -10,12 +10,7 @@ public final class MainaIOSPipelineWake {
   public static let shared = MainaIOSPipelineWake()
   public static let taskIdentifier = "com.divay.maina.staging.pipeline-network"
 
-  private struct ScheduleTarget {
-    let generation: Int
-    let requiresNetwork: Bool
-    let notBeforeAt: Int64
-    let scheduleRevision: Int
-  }
+  private typealias ScheduleTarget = MainaIOSPipelineWakeTarget
 
   private final class CompletionGate {
     private let lock = NSLock()
@@ -51,8 +46,15 @@ public final class MainaIOSPipelineWake {
     static let scheduleRevision = "maina.pipelineWake.scheduleRevision"
     static let schedulerProtocolVersion = "maina.pipelineWake.schedulerProtocolVersion"
     static let scheduleAttempts = "maina.pipelineWake.scheduleAttempts"
+    static let attemptGeneration = "maina.pipelineWake.attemptGeneration"
+    static let attemptScheduleRevision = "maina.pipelineWake.attemptScheduleRevision"
     static let scheduleState = "maina.pipelineWake.scheduleState"
     static let activeToken = "maina.pipelineWake.activeToken"
+    static let deferredGeneration = "maina.pipelineWake.deferredGeneration"
+    static let deferredRequiresNetwork = "maina.pipelineWake.deferredRequiresNetwork"
+    static let deferredNotBeforeAt = "maina.pipelineWake.deferredNotBeforeAt"
+    static let deferredScheduleRevision = "maina.pipelineWake.deferredScheduleRevision"
+    static let deferredSchedulerProtocolVersion = "maina.pipelineWake.deferredSchedulerProtocolVersion"
   }
 
   private let queue = DispatchQueue(label: "com.divay.maina.ios.pipeline-wake")
@@ -82,6 +84,11 @@ public final class MainaIOSPipelineWake {
       shared.defaults.removeObject(forKey: Key.activeToken)
       if shared.defaults.integer(forKey: Key.generation) == 0 {
         shared.defaults.set("registered", forKey: Key.scheduleState)
+      } else {
+        // A process may have died after retaining N/N+1 but before the
+        // in-process re-arm ran. Reconcile the exact persisted tuple against
+        // BGTaskScheduler; duplicate calls keep the existing exact request.
+        shared.ensureRetainedTargetAfterCurrentTask()
       }
     }
   }
@@ -123,6 +130,12 @@ public final class MainaIOSPipelineWake {
         return
       }
 
+      let target = ScheduleTarget(
+        generation: generation,
+        requiresNetwork: requiresNetwork,
+        notBeforeAt: max(0, notBeforeAt),
+        scheduleRevision: scheduleRevision
+      )
       let storedProtocol = self.defaults.integer(forKey: Key.schedulerProtocolVersion)
       let active = self.activeGate?.isActive == true
       let resetLegacy = MainaIOSPipelineWakePolicy.shouldResetLegacyScheduler(
@@ -131,8 +144,20 @@ public final class MainaIOSPipelineWake {
         hasUnfinishedSQLiteWork: generation > 0,
         active: active
       )
-      if storedProtocol < schedulerProtocolVersion && !resetLegacy {
-        completion(["scheduled": false, "errorCode": "scheduler_protocol_upgrade_deferred"])
+      if storedProtocol < schedulerProtocolVersion && active {
+        // The active v1 task remains untouched. Preserve the exact v2 target;
+        // completion or launch reconciliation promotes/submits it once.
+        if MainaIOSPipelineWakePolicy.shouldDeferBehindActive(
+          active: true,
+          activeGeneration: self.activeGeneration,
+          requestedGeneration: generation
+        ) {
+          self.persistDeferred(target, schedulerProtocolVersion: schedulerProtocolVersion)
+        } else {
+          self.persist(target, schedulerProtocolVersion: schedulerProtocolVersion)
+        }
+        self.defaults.set("running_upgrade_deferred", forKey: Key.scheduleState)
+        completion(["scheduled": true, "workId": Self.taskIdentifier])
         return
       }
 
@@ -158,20 +183,24 @@ public final class MainaIOSPipelineWake {
         // The bridge call is the explicit proof of unfinished SQLite work.
         // Cancel only the pending static request; active BGTasks are fenced out.
         BGTaskScheduler.shared.cancel(taskRequestWithIdentifier: Self.taskIdentifier)
-        self.defaults.set(0, forKey: Key.scheduleAttempts)
+        self.resetAttemptBudget()
         self.defaults.set(schedulerProtocolVersion, forKey: Key.schedulerProtocolVersion)
       }
 
-      let target = ScheduleTarget(
-        generation: generation,
-        requiresNetwork: requiresNetwork,
-        notBeforeAt: max(0, notBeforeAt),
-        scheduleRevision: scheduleRevision
-      )
-      if active && generation <= self.activeGeneration {
+      if MainaIOSPipelineWakePolicy.shouldDeferBehindActive(
+        active: active,
+        activeGeneration: self.activeGeneration,
+        requestedGeneration: generation
+      ) {
+        self.persistDeferred(target, schedulerProtocolVersion: schedulerProtocolVersion)
+        self.defaults.set("running_successor_deferred", forKey: Key.scheduleState)
+        completion(["scheduled": true, "workId": Self.taskIdentifier])
+        return
+      }
+      if active {
         // A same-generation update may carry the retry due that must be armed
         // after this active task completes. No second active owner is created.
-        self.persist(target)
+        self.persist(target, schedulerProtocolVersion: schedulerProtocolVersion)
         self.defaults.set("running", forKey: Key.scheduleState)
         completion(["scheduled": true, "workId": Self.taskIdentifier])
         return
@@ -195,7 +224,7 @@ public final class MainaIOSPipelineWake {
           )
           switch action {
           case .activeOwnsGeneration:
-            self.persist(target)
+            self.persist(target, schedulerProtocolVersion: schedulerProtocolVersion)
             self.defaults.set("running", forKey: Key.scheduleState)
             completion(["scheduled": true, "workId": Self.taskIdentifier])
           case .keepPendingRequest:
@@ -205,10 +234,10 @@ public final class MainaIOSPipelineWake {
             // This API cancels a pending request only. The CompletionGate is
             // the independent fence proving no active BGTask is touched.
             BGTaskScheduler.shared.cancel(taskRequestWithIdentifier: Self.taskIdentifier)
-            self.persist(target)
+            self.persist(target, schedulerProtocolVersion: schedulerProtocolVersion)
             self.submitPendingRequest(target, completion: completion)
           case .submitPendingRequest:
-            self.persist(target)
+            self.persist(target, schedulerProtocolVersion: schedulerProtocolVersion)
             self.submitPendingRequest(target, completion: completion)
           }
         }
@@ -248,8 +277,8 @@ public final class MainaIOSPipelineWake {
       let completedGeneration = activeGeneration
       let completed = gate.complete(success: succeeded)
       guard completed else { return false }
-      clearActiveState(success: succeeded, completedGeneration: completedGeneration)
-      if !succeeded { scheduleRetryAfterCurrentTask() }
+      let retained = clearActiveState(success: succeeded, completedGeneration: completedGeneration)
+      if retained != nil { ensureRetainedTargetAfterCurrentTask() }
       return true
     }
   }
@@ -265,15 +294,61 @@ public final class MainaIOSPipelineWake {
     )
   }
 
-  private func persist(_ target: ScheduleTarget) {
+  private func persist(
+    _ target: ScheduleTarget,
+    schedulerProtocolVersion: Int = MainaIOSPipelineWakePolicy.schedulerProtocolVersion
+  ) {
+    if MainaIOSPipelineWakePolicy.shouldResetAttemptBudget(
+      attemptedGeneration: defaults.integer(forKey: Key.attemptGeneration),
+      attemptedRevision: defaults.integer(forKey: Key.attemptScheduleRevision),
+      acceptedGeneration: target.generation,
+      acceptedRevision: target.scheduleRevision
+    ) {
+      resetAttemptBudget()
+      defaults.set(target.generation, forKey: Key.attemptGeneration)
+      defaults.set(target.scheduleRevision, forKey: Key.attemptScheduleRevision)
+    }
     defaults.set(target.generation, forKey: Key.generation)
     defaults.set(target.requiresNetwork, forKey: Key.requiresNetwork)
     defaults.set(target.notBeforeAt, forKey: Key.notBeforeAt)
     defaults.set(target.scheduleRevision, forKey: Key.scheduleRevision)
     defaults.set(
-      MainaIOSPipelineWakePolicy.schedulerProtocolVersion,
+      schedulerProtocolVersion,
       forKey: Key.schedulerProtocolVersion
     )
+  }
+
+  private func deferredTarget() -> ScheduleTarget? {
+    let generation = defaults.integer(forKey: Key.deferredGeneration)
+    guard generation > 0 else { return nil }
+    return ScheduleTarget(
+      generation: generation,
+      requiresNetwork: defaults.bool(forKey: Key.deferredRequiresNetwork),
+      notBeforeAt: Int64(defaults.integer(forKey: Key.deferredNotBeforeAt)),
+      scheduleRevision: defaults.integer(forKey: Key.deferredScheduleRevision)
+    )
+  }
+
+  private func persistDeferred(_ target: ScheduleTarget, schedulerProtocolVersion: Int) {
+    defaults.set(target.generation, forKey: Key.deferredGeneration)
+    defaults.set(target.requiresNetwork, forKey: Key.deferredRequiresNetwork)
+    defaults.set(target.notBeforeAt, forKey: Key.deferredNotBeforeAt)
+    defaults.set(target.scheduleRevision, forKey: Key.deferredScheduleRevision)
+    defaults.set(schedulerProtocolVersion, forKey: Key.deferredSchedulerProtocolVersion)
+  }
+
+  private func clearDeferredTarget() {
+    defaults.removeObject(forKey: Key.deferredGeneration)
+    defaults.removeObject(forKey: Key.deferredRequiresNetwork)
+    defaults.removeObject(forKey: Key.deferredNotBeforeAt)
+    defaults.removeObject(forKey: Key.deferredScheduleRevision)
+    defaults.removeObject(forKey: Key.deferredSchedulerProtocolVersion)
+  }
+
+  private func resetAttemptBudget() {
+    defaults.set(0, forKey: Key.scheduleAttempts)
+    defaults.removeObject(forKey: Key.attemptGeneration)
+    defaults.removeObject(forKey: Key.attemptScheduleRevision)
   }
 
   private func submitPendingRequest(
@@ -330,8 +405,8 @@ public final class MainaIOSPipelineWake {
         guard self.activeGate === gate else { return }
         let completedGeneration = self.activeGeneration
         _ = gate.complete(success: false)
-        self.clearActiveState(success: false, completedGeneration: completedGeneration)
-        self.scheduleRetryAfterCurrentTask()
+        let retained = self.clearActiveState(success: false, completedGeneration: completedGeneration)
+        if retained != nil { self.ensureRetainedTargetAfterCurrentTask() }
       }
     }
 
@@ -343,8 +418,8 @@ public final class MainaIOSPipelineWake {
       else { return }
       let completedGeneration = self.activeGeneration
       _ = gate.complete(success: false)
-      self.clearActiveState(success: false, completedGeneration: completedGeneration)
-      self.scheduleRetryAfterCurrentTask()
+      let retained = self.clearActiveState(success: false, completedGeneration: completedGeneration)
+      if retained != nil { self.ensureRetainedTargetAfterCurrentTask() }
     }
   }
 
@@ -353,33 +428,52 @@ public final class MainaIOSPipelineWake {
     onWakeRequested?(["generation": activeGeneration])
   }
 
-  private func clearActiveState(success: Bool, completedGeneration: Int) {
-    let requestedGeneration = defaults.integer(forKey: Key.generation)
-    let retainedGeneration = MainaIOSPipelineWakePolicy.retainedGenerationAfterCompletion(
+  @discardableResult
+  private func clearActiveState(success: Bool, completedGeneration: Int) -> ScheduleTarget? {
+    let currentBeforeCompletion = storedTarget()
+    let deferredBeforeCompletion = deferredTarget()
+    let currentProtocolBeforeCompletion = defaults.integer(forKey: Key.schedulerProtocolVersion)
+    let deferredProtocolBeforeCompletion = defaults.integer(forKey: Key.deferredSchedulerProtocolVersion)
+    let retained = MainaIOSPipelineWakePolicy.retainedTargetsAfterCompletion(
       completedGeneration: completedGeneration,
-      requestedGeneration: requestedGeneration,
-      succeeded: success
+      succeeded: success,
+      current: currentBeforeCompletion,
+      deferred: deferredBeforeCompletion
     )
+    let promotedDeferred = success
+      && deferredBeforeCompletion != nil
+      && retained.current == deferredBeforeCompletion
     activeGate = nil
     activeToken = nil
     activeGeneration = 0
     jsClaimed = false
     defaults.removeObject(forKey: Key.activeToken)
     defaults.set(
-      success && retainedGeneration == 0 ? "complete" : success ? "pending" : "deferred",
+      success && retained.current == nil ? "complete" : success ? "pending" : "deferred",
       forKey: Key.scheduleState
     )
-    defaults.set(retainedGeneration, forKey: Key.generation)
-    if success && retainedGeneration == 0 {
-      defaults.set(0, forKey: Key.scheduleAttempts)
+    if let current = retained.current {
+      let protocolVersion = promotedDeferred
+        ? max(deferredProtocolBeforeCompletion, MainaIOSPipelineWakePolicy.schedulerProtocolVersion)
+        : currentProtocolBeforeCompletion
+      persist(current, schedulerProtocolVersion: protocolVersion)
+    } else {
+      defaults.set(0, forKey: Key.generation)
+    }
+    if retained.deferred == nil {
+      clearDeferredTarget()
+    }
+    if success && retained.current == nil {
+      resetAttemptBudget()
       defaults.set(0, forKey: Key.notBeforeAt)
       defaults.set(0, forKey: Key.scheduleRevision)
     }
+    return retained.current
   }
 
-  private func scheduleRetryAfterCurrentTask() {
-    guard let target = storedTarget() else { return }
-    queue.asyncAfter(deadline: .now() + .seconds(1)) {
+  private func ensureRetainedTargetAfterCurrentTask() {
+    queue.async {
+      guard let target = self.storedTarget() else { return }
       self.schedule(
         generation: target.generation,
         requiresNetwork: target.requiresNetwork,

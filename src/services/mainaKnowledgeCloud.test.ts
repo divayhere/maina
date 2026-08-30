@@ -155,7 +155,10 @@ describe('mainaKnowledgeCloud service', () => {
   });
 
   it('keeps network failures retryable while preserving the frozen payload snapshot', async () => {
-    mockCloudRequest.mockRejectedValue(new TypeError('Network request failed'));
+    mockCloudRequest.mockRejectedValue(Object.assign(
+      new Error('Waiting for internet. Maina will continue automatically.'),
+      { status: 0, code: 'network_error', failureClass: 'transport_unknown' },
+    ));
 
     await runMainaKnowledgeCloudSync('meeting-1');
 
@@ -164,6 +167,34 @@ describe('mainaKnowledgeCloud service', () => {
     expect(mockUpdateMeetingPipelineStage).toHaveBeenLastCalledWith(expect.objectContaining({
       stage: 'mkc', state: 'deferred',
     }));
+  });
+
+  it('terminalizes malformed successful JSON without retrying or changing source identity', async () => {
+    const sourceKey = 'meeting:maina:meeting-1';
+    meeting = {
+      ...meeting,
+      knowledgeCloudSourceKey: sourceKey,
+      knowledgeCloudPayloadJson: JSON.stringify({ source_key: sourceKey }),
+      knowledgeCloudSyncStatus: 'sync_queued',
+    };
+    mockCloudRequest.mockRejectedValue(Object.assign(
+      new Error('Cloud notes need attention. Your recording and transcript are safe.'),
+      { status: 200, code: 'invalid_json_response', failureClass: 'protocol' },
+    ));
+
+    await runMainaKnowledgeCloudSync('meeting-1');
+    await runMainaKnowledgeCloudSync('meeting-1');
+
+    expect(mockCloudRequest).toHaveBeenCalledTimes(1);
+    expect(mockPersistKnowledgeCloudSourceRetry).not.toHaveBeenCalled();
+    expect(meeting).toMatchObject({
+      knowledgeCloudSyncStatus: 'sync_failed_validation',
+      knowledgeCloudSourceKey: sourceKey,
+      knowledgeCloudNextRetryAt: null,
+      knowledgeCloudFailureClass: 'protocol',
+      knowledgeCloudError: 'Cloud notes need attention. Your recording and transcript are safe.',
+    });
+    expect(String(meeting.knowledgeCloudError)).not.toContain('invalid_json_response');
   });
 
   it('does not bypass source retry due time during an automatic recovery cycle', async () => {

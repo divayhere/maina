@@ -25,6 +25,17 @@ export type PipelineWakeTaskOutcome = {
 };
 
 /**
+ * Only a completed drain or a truthful terminal no-op may release the native
+ * owner. Busy and not-due both mean that SQLite still has live future work;
+ * acknowledging either as success would let the OS discard its only wake.
+ */
+export function nativeWakeDispositionSucceeded(
+  disposition: DurablePipelineWakeResult['disposition'],
+): boolean {
+  return disposition === 'completed' || disposition === 'obsolete' || disposition === 'no_work';
+}
+
+/**
  * Owns the native completion token. Every accepted native token reaches one
  * and only one completion attempt, including validation and JS exceptions.
  */
@@ -60,9 +71,9 @@ export async function executeNativePipelineWakeTask(
       isExecutionActive: () => dependencies.isNativeAttemptActive(attemptToken),
     });
     disposition = result.disposition;
-    // Busy means another lease owner is still alive; let bounded WorkManager
-    // retry later. Obsolete/no-work are truthful no-ops, not manufactured work.
-    succeeded = result.disposition !== 'busy';
+    // Busy and not-due retain/reschedule the native owner. Obsolete/no-work
+    // are truthful terminal no-ops and completed means SQLite advanced.
+    succeeded = nativeWakeDispositionSucceeded(result.disposition);
     return { succeeded, disposition };
   } catch {
     disposition = 'error';

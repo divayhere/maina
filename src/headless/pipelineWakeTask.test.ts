@@ -6,7 +6,7 @@ import {
 } from './pipelineWakeTask';
 
 function dependencies(
-  disposition: 'completed' | 'busy' | 'obsolete' | 'no_work' = 'completed',
+  disposition: 'completed' | 'busy' | 'obsolete' | 'no_work' | 'not_due' = 'completed',
 ): PipelineWakeTaskDependencies {
   return {
     completeNative: vi.fn(async () => true),
@@ -88,6 +88,18 @@ describe('native Worker to shared pipeline ownership', () => {
     }, failed)).resolves.toEqual({ succeeded: false, disposition: 'error' });
     expect(failed.completeNative).toHaveBeenCalledTimes(1);
     expect(failed.completeNative).toHaveBeenCalledWith('token-f', false);
+  });
+
+  it('does not acknowledge an early native delivery while the generation is not due', async () => {
+    const notDue = dependencies('not_due');
+    await expect(executeNativePipelineWakeTask({
+      attemptToken: 'token-not-due',
+      wakeKind: 'shared',
+      generation: 9,
+    }, notDue)).resolves.toEqual({ succeeded: false, disposition: 'not_due' });
+    expect(notDue.runDurable).toHaveBeenCalledTimes(1);
+    expect(notDue.completeNative).toHaveBeenCalledTimes(1);
+    expect(notDue.completeNative).toHaveBeenCalledWith('token-not-due', false);
   });
 
   it('rejects malformed task data but still resolves the native token once', async () => {

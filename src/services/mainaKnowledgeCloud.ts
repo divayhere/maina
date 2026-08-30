@@ -27,7 +27,7 @@ import {
   classifyTransportCause,
   safeCloudFailureMessage,
 } from '@/core/pipeline/cloudFailure';
-import { nextCloudRetry } from '@/services/cloudRetryPolicy';
+import { isRetryableCloudFailure, nextCloudRetry } from '@/services/cloudRetryPolicy';
 import { armPipelineNetworkRecovery } from '@/services/pipelineWakeScheduler';
 
 const inflight = new Map<string, Promise<void>>();
@@ -271,17 +271,31 @@ async function syncMeetingToMainaKnowledgeCloud(meetingId: string): Promise<void
       nextRetryAt: retry.nextRetryAt,
     });
   } catch (cause) {
-    const failureClass = classifyTransportCause(cause);
-    const retry = nextCloudRetry({ attemptCount: meeting.knowledgeCloudRetryCount ?? 0 });
-    await setCloudSyncRetryState({
-      meetingId,
-      syncStatus: 'sync_failed_retryable',
-      visibleError: safeCloudFailureMessage(failureClass),
-      failureClass,
-      retryCount: retry.attemptCount,
-      lastRetryAt: retry.lastRetryAt,
-      nextRetryAt: retry.nextRetryAt,
-    });
+    const classified = classifyTransportCause(cause);
+    const retryable = isRetryableCloudFailure(cause);
+    const failureClass = retryable || ['auth', 'http_terminal', 'backend_terminal', 'protocol'].includes(classified)
+      ? classified
+      : 'protocol';
+    if (retryable) {
+      const retry = nextCloudRetry({ attemptCount: meeting.knowledgeCloudRetryCount ?? 0 });
+      await setCloudSyncRetryState({
+        meetingId,
+        syncStatus: 'sync_failed_retryable',
+        visibleError: safeCloudFailureMessage(failureClass),
+        failureClass,
+        retryCount: retry.attemptCount,
+        lastRetryAt: retry.lastRetryAt,
+        nextRetryAt: retry.nextRetryAt,
+      });
+    } else {
+      if (failureClass === 'auth') await clearMainaCloudSession();
+      await setCloudSyncState(meetingId, {
+        knowledgeCloudSyncStatus: failureClass === 'auth' ? 'sync_failed_auth' : 'sync_failed_validation',
+        knowledgeCloudError: safeCloudFailureMessage(failureClass),
+        knowledgeCloudFailureClass: failureClass,
+        knowledgeCloudNextRetryAt: null,
+      });
+    }
     log.warn('maina-cloud', 'meeting sync failed', {
       meetingId,
       failureClass,
