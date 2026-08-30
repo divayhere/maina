@@ -9,6 +9,7 @@ import {
   getLastFinalTranscriptText,
   getTranscriptSummary,
   listCompletedLocalAsrWindowKeys,
+  invalidateLocalAsrRun,
   markLocalAsrWindowComplete,
   resetMeetingTranscript,
   startRecordingSegment,
@@ -48,6 +49,7 @@ type LocalAsrPipelineInput = {
   resetTranscript?: boolean;
   onBlocks?: (blocks: TranscriptBlock[]) => void;
   onProgress?: (completedWindows: number, totalWindows: number) => void;
+  isExecutionActive?: () => Promise<boolean> | boolean;
 };
 
 // Qwen owns one native inference runtime and Expo SQLite exposes one shared
@@ -137,6 +139,11 @@ async function runLocalAsrPipelineNow(input: LocalAsrPipelineInput): Promise<Loc
 
   const durations = await getPcmWavDurationsMs(chunks).catch(() => ({} as Record<string, number | null>));
   const runClaim = await beginLocalAsrRun(input.meetingId);
+  const assertExecutionActive = async () => {
+    if (!input.isExecutionActive || await input.isExecutionActive()) return;
+    await invalidateLocalAsrRun(runClaim).catch(() => false);
+    throw new Error('Local ASR execution ownership ended; the in-flight window remains replayable.');
+  };
   const totalWindows = chunks.reduce((sum, uri) => sum + planAsrWindows(durations[uri] ?? 0).length, 0);
   await updateMeeting(input.meetingId, {
     transcriptionWindowCount: totalWindows,
@@ -172,6 +179,7 @@ async function runLocalAsrPipelineNow(input: LocalAsrPipelineInput): Promise<Loc
       const windows = planAsrWindows(durationMs);
       windowCount += windows.length;
       for (let windowIndex = 0; windowIndex < windows.length; windowIndex += 1) {
+        await assertExecutionActive();
         const window = windows[windowIndex];
         const windowKey = localAsrWindowKey({ chunkIndex, startMs: window.startMs, endMs: window.endMs });
         const ordinal = windowCount - windows.length + windowIndex + 1;
@@ -192,6 +200,10 @@ async function runLocalAsrPipelineNow(input: LocalAsrPipelineInput): Promise<Loc
           }
           if (windowClaim === 'lost') throw new Error('Local ASR run ownership ended.');
           const result = await transcribeWithQwen(uri, window.startMs, window.endMs);
+          // Expiration cannot interrupt an ONNX decode safely. Fence the
+          // callback after it returns; an expired run is invalidated before it
+          // can commit text, and a later generation may replay the window.
+          await assertExecutionActive();
           const rawText = result.text.trim();
           const text = removeExactTextOverlap(previousText, rawText);
           // The durable native post-processing service owns production ASR and

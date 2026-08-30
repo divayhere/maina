@@ -19,6 +19,7 @@ import {
   finishIOSContinuedProcessing,
   getNativeCaptureStatusAsync,
   isNativePostProcessingServiceRunning,
+  isIOSContinuedProcessingActive,
   readNativePostProcessingResult,
   startNativePostProcessing,
   updateIOSContinuedProcessing,
@@ -92,6 +93,7 @@ async function launchIOSPostProcessing(meeting: Meeting): Promise<boolean> {
         recoverPartials: true,
         resetTranscript: false,
         onProgress: updateIOSContinuedProcessing,
+        isExecutionActive: () => isIOSContinuedProcessingActive(meeting.id),
       });
       const firstResult = await runPass();
       const result = firstResult.coverageComplete ? firstResult : await runPass();

@@ -63,7 +63,12 @@ import {
   repairDurablePipelineScheduling,
   requestDurablePipelineWake,
 } from '@/services/pipelineWakeScheduler';
-import { scheduleNativePipelineWake } from '@/hardware/pipelineWake';
+import {
+  claimPendingNativePipelineWake,
+  scheduleNativePipelineWake,
+  subscribeNativePipelineWakeRequests,
+} from '@/hardware/pipelineWake';
+import { runNativePipelineWakeTask } from '@/headless/registerPipelineWake';
 import { persistPipelineConnectivity } from '@/data/pipelineWake';
 import { createPipelineWakeCoordinator } from '@/services/pipelineWakeCoordinator';
 
@@ -270,6 +275,27 @@ function RootLayout() {
       runGeneration: (generation) => runDurablePipelineWake({ expectedGeneration: generation }),
       repairNativeScheduling: repairDurablePipelineScheduling,
     });
+    let nativeClaimInFlight = false;
+    const claimAndRunNativeWake = async () => {
+      if (stopped || nativeClaimInFlight) return;
+      nativeClaimInFlight = true;
+      try {
+        const pending = await claimPendingNativePipelineWake();
+        if (!pending || stopped) return;
+        const outcome = await runNativePipelineWakeTask(pending);
+        if (!outcome.succeeded) {
+          log.warn('background-pipeline', 'native iOS wake remains deferred', {
+            disposition: outcome.disposition,
+          });
+        }
+      } catch (cause) {
+        log.warn('background-pipeline', 'native iOS wake claim failed safely', {
+          causeName: cause instanceof Error ? cause.name : typeof cause,
+        });
+      } finally {
+        nativeClaimInFlight = false;
+      }
+    };
     const schedulePacketPoll = () => {
       if (stopped || packetPollInFlight) return packetPollInFlight;
       if (packetPollTimer) return Promise.resolve();
@@ -307,6 +333,7 @@ function RootLayout() {
         });
     };
     runPipelineFromSignal('foreground');
+    void claimAndRunNativeWake();
     const subscription = AppState.addEventListener('change', (state) => {
       if (state !== 'active') return;
       runPipelineFromSignal('foreground');
@@ -328,6 +355,9 @@ function RootLayout() {
       });
       runPipelineFromSignal('native_progress');
     });
+    const unsubscribeNativeWake = subscribeNativePipelineWakeRequests(() => {
+      void claimAndRunNativeWake();
+    });
     const unsubscribePipeline = subscribeMeetingPipelineChanges((meetingId) => {
       log.info('summary', 'meeting pipeline state changed; waking poller', { meetingId });
       if (packetPollTimer) clearTimeout(packetPollTimer);
@@ -341,6 +371,7 @@ function RootLayout() {
       subscription.remove();
       unsubscribeNetwork();
       unsubscribeNative();
+      unsubscribeNativeWake();
       unsubscribePipeline();
       unregisterNativeScheduler();
       if (packetPollTimer) clearTimeout(packetPollTimer);
