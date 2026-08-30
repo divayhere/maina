@@ -18,23 +18,31 @@ android() { adb -s "$ANDROID_SERIAL" "$@"; }
 
 preflight() {
   command -v adb >/dev/null
-  command -v xcrun >/dev/null
   test -x "$PMD"
 
   android get-state >/dev/null
-  local android_hardware android_version android_code ios_details ios_apps
+  local android_hardware android_version android_code ios_devices ios_apps
   android_hardware="$(android shell getprop ro.serialno | tr -d '\r')"
   test "$android_hardware" = "47011FDAP000VE"
   android_version="$(android shell dumpsys package "$ANDROID_PACKAGE" | awk -F= '/versionName=/{print $2; exit}' | tr -d '\r')"
   android_code="$(android shell dumpsys package "$ANDROID_PACKAGE" | awk '/versionCode=/{sub(/^.*versionCode=/, ""); sub(/ .*/, ""); print; exit}' | tr -d '\r')"
   test -n "$android_version"
 
-  ios_details="$(xcrun devicectl device info details --device "$IOS_COREDEVICE_ID" --timeout 15 2>/dev/null)"
-  grep -q "marketingName: iPhone 15" <<<"$ios_details"
-  grep -q "serialNumber: $IOS_SERIAL" <<<"$ios_details"
-  grep -q "udid: $IOS_UDID" <<<"$ios_details"
-  ios_apps="$(xcrun devicectl device info apps --device "$IOS_COREDEVICE_ID" --bundle-id "$IOS_BUNDLE_ID" --columns '*' --timeout 15 2>/dev/null)"
-  grep -q "$IOS_BUNDLE_ID" <<<"$ios_apps"
+  # CoreDevice can remain in a stale "connecting" state even while usbmux and
+  # DeveloperTools services are healthy. Verify the exact physical USB device
+  # and installed staging bundle through the same transport used for evidence.
+  ios_devices="$("$PMD" usbmux list)"
+  IOS_DEVICES="$ios_devices" IOS_UDID="$IOS_UDID" node -e '
+    const devices = JSON.parse(process.env.IOS_DEVICES);
+    const expected = devices.find((device) => device.Identifier === process.env.IOS_UDID);
+    if (!expected || expected.ConnectionType !== "USB" || expected.ProductType !== "iPhone15,4") process.exit(1);
+  '
+  ios_apps="$("$PMD" apps query "$IOS_BUNDLE_ID" --udid "$IOS_UDID")"
+  IOS_APPS="$ios_apps" IOS_BUNDLE_ID="$IOS_BUNDLE_ID" node -e '
+    const apps = JSON.parse(process.env.IOS_APPS);
+    const app = apps[process.env.IOS_BUNDLE_ID];
+    if (!app || app.CFBundleShortVersionString !== "0.10.34" || app.CFBundleVersion !== "16") process.exit(1);
+  '
 
   printf 'M0 replay preflight passed\n'
   printf 'Android: Pixel serial %s, Maina %s (%s)\n' "$android_hardware" "$android_version" "$android_code"
@@ -48,6 +56,8 @@ snapshot() {
   android shell dumpsys notification --noredact > "$output_dir/snapshots/${label}-android-notifications.txt" 2>&1 || true
   android shell dumpsys activity services "$ANDROID_PACKAGE" > "$output_dir/snapshots/${label}-android-services.txt" 2>&1 || true
   android shell screencap -p > "$output_dir/snapshots/${label}-android.png" 2>/dev/null || true
+  "$PMD" developer dvt screenshot "$output_dir/snapshots/${label}-ios.png" \
+    --native --udid "$IOS_UDID" > "$output_dir/snapshots/${label}-ios-screenshot.txt" 2>&1 || true
   xcrun devicectl device info processes --device "$IOS_COREDEVICE_ID" --timeout 15 \
     > "$output_dir/snapshots/${label}-ios-processes.txt" 2>&1 || true
   date -u '+%Y-%m-%dT%H:%M:%SZ' > "$output_dir/snapshots/${label}-timestamp.txt"
