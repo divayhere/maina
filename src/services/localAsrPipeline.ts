@@ -14,6 +14,7 @@ import {
   resetMeetingTranscript,
   startRecordingSegment,
   type TranscriptBlock,
+  type LocalAsrRunClaim,
   updateMeeting,
 } from '@/data/meetings';
 import {
@@ -49,6 +50,7 @@ type LocalAsrPipelineInput = {
   resetTranscript?: boolean;
   onBlocks?: (blocks: TranscriptBlock[]) => void;
   onProgress?: (completedWindows: number, totalWindows: number) => void;
+  onRunClaim?: (claim: LocalAsrRunClaim) => Promise<void> | void;
   isExecutionActive?: () => Promise<boolean> | boolean;
 };
 
@@ -146,6 +148,7 @@ async function runLocalAsrPipelineNow(input: LocalAsrPipelineInput): Promise<Loc
 
   const durations = await getPcmWavDurationsMs(chunks).catch(() => ({} as Record<string, number | null>));
   const runClaim = await beginLocalAsrRun(input.meetingId);
+  await input.onRunClaim?.(runClaim);
   const assertExecutionActive = async () => {
     if (!input.isExecutionActive || await input.isExecutionActive()) return;
     await invalidateLocalAsrRun(runClaim).catch(() => false);

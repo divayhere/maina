@@ -131,6 +131,13 @@ export interface NativePipelineWakeRequestedEvent {
   generation: number;
 }
 
+export interface IOSPostProcessingDeferralEvent {
+  requestId: string;
+  meetingId: string;
+  asrGeneration: number;
+  occurredAt: number;
+}
+
 export interface QwenAsrStatus {
   ready: boolean;
   root: string;
@@ -261,6 +268,10 @@ interface MainaRecorderNativeModule {
     eventName: 'onPipelineWakeRequested',
     listener: (event: NativePipelineWakeRequestedEvent) => void,
   ): NativeEventSubscription;
+  addListener(
+    eventName: 'onIOSPostProcessingDeferralRequested',
+    listener: (event: IOSPostProcessingDeferralEvent) => void,
+  ): NativeEventSubscription;
   startForegroundSession(): Promise<boolean>;
   stopForegroundSession(): Promise<void>;
   armRemoteControl(): Promise<RemoteControlStatus>;
@@ -306,9 +317,11 @@ interface MainaRecorderNativeModule {
     reason?: string;
     requestId?: string;
   };
-  updateIOSContinuedProcessing?(completedUnits: number, totalUnits: number, subtitle?: string | null): void;
-  finishIOSContinuedProcessing?(success: boolean): void;
-  isIOSContinuedProcessingActive?(meetingId: string): boolean;
+  bindIOSContinuedProcessingRun?(requestId: string, meetingId: string, asrGeneration: number): boolean;
+  updateIOSContinuedProcessing?(requestId: string, completedUnits: number, totalUnits: number, subtitle?: string | null): void;
+  finishIOSContinuedProcessing?(requestId: string, success: boolean): void;
+  acknowledgeIOSContinuedProcessingDeferral?(requestId: string, meetingId: string, asrGeneration: number): boolean;
+  isIOSContinuedProcessingActive?(requestId: string, meetingId: string): boolean;
   getRemoteControlStatus(): Promise<RemoteControlStatus>;
   openRemoteAccessibilitySettings(): Promise<void>;
   acknowledgeHardwareTrigger(commandId: string, action: string, accepted: boolean): Promise<void>;

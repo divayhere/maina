@@ -4,9 +4,9 @@ import Foundation
 import UIKit
 
 /**
- * Monitors one user-started local-ASR run without becoming its data owner.
- * Each scheduler submission has a never-reused identifier; durable per-window
- * SQLite claims remain the source of truth when iOS expires or relaunches work.
+ * Monitors foreground-started local ASR without becoming its data owner.
+ * SQLite per-window claims remain canonical; this registry only binds an OS
+ * assertion to one meeting/generation and fences expiration exactly once.
  */
 public final class MainaIOSContinuedProcessing {
   public static let shared = MainaIOSContinuedProcessing()
@@ -52,6 +52,24 @@ public final class MainaIOSContinuedProcessing {
   }
 
   private struct Submission: Codable {
+    enum State: String, Codable {
+      case pending, attached, deferralRequested, deferred, complete
+    }
+
+    let identifier: String
+    let meetingId: String
+    let runSequence: Int
+    var asrGeneration: Int?
+    let createdAt: TimeInterval
+    var attachedAt: TimeInterval?
+    var deferralRequestedAt: TimeInterval?
+    var deferredAt: TimeInterval?
+    var completedAt: TimeInterval?
+    var lifecycleUpdatedAt: TimeInterval
+    var state: State
+  }
+
+  private struct LegacySubmission: Codable {
     enum State: String, Codable { case pending, attached, deferred, complete }
     let identifier: String
     let meetingId: String
@@ -61,8 +79,10 @@ public final class MainaIOSContinuedProcessing {
   }
 
   private enum Key {
-    static let registry = "maina.continuedProcessing.registry.v2"
-    static let sequence = "maina.continuedProcessing.sequence.v2"
+    static let registry = "maina.continuedProcessing.registry.v3"
+    static let legacyRegistry = "maina.continuedProcessing.registry.v2"
+    static let sequence = "maina.continuedProcessing.sequence.v3"
+    static let legacySequence = "maina.continuedProcessing.sequence.v2"
   }
 
   private let queue = DispatchQueue(label: "com.divay.maina.ios.continued-processing")
@@ -71,15 +91,17 @@ public final class MainaIOSContinuedProcessing {
   private var registeredIdentifiers = Set<String>()
   private var gates: [String: CompletionGate] = [:]
   private var claimedIdentifiers = Set<String>()
-  private var currentIdentifier: String?
-  private var fallbackTask = UIBackgroundTaskIdentifier.invalid
-  private var fallbackMeetingId: String?
-  private var completedUnits: Int64 = 0
-  private var totalUnits: Int64 = 1
+  private var fallbackTasks: [String: UIBackgroundTaskIdentifier] = [:]
+  private var progressByIdentifier: [String: (completed: Int64, total: Int64)] = [:]
+  private var deferralHandler: (([String: Any]) -> Void)?
 
   private init() {}
 
-  /** Re-register exact pending identifiers before RN starts after relaunch. */
+  public func configure(onDeferralRequested: @escaping ([String: Any]) -> Void) {
+    queue.async { self.deferralHandler = onDeferralRequested }
+  }
+
+  /** Register exact persisted identifiers before RN starts after relaunch. */
   public static func registerLaunchHandler() {
     guard #available(iOS 26.0, *) else { return }
     shared.queue.sync {
@@ -87,6 +109,10 @@ public final class MainaIOSContinuedProcessing {
       shared.pruneRegistry(&registry)
       shared.saveRegistry(registry)
       for submission in registry where submission.state == .pending || submission.state == .attached {
+        guard MainaIOSContinuedProcessingRetentionPolicy.mayRegister(
+          identifier: submission.identifier,
+          registered: shared.registeredIdentifiers
+        ) else { break }
         _ = shared.registerExactIdentifierIfNeeded(submission.identifier)
       }
     }
@@ -94,31 +120,17 @@ public final class MainaIOSContinuedProcessing {
 
   func begin(jobId: String, title: String, subtitle: String, totalUnits: Int) -> [String: Any] {
     queue.sync {
-      completedUnits = 0
-      self.totalUnits = Int64(max(1, totalUnits))
-      // Apple continued-processing submissions are foreground, user-initiated
-      // assertions. A BGProcessing recovery may run the same durable ASR work,
-      // but it must never manufacture a new continued-processing request.
-      guard UIApplication.shared.applicationState == .active else {
-        return [
-          "started": false,
-          "mode": "existing-background-owner",
-          "reason": "continued-processing-requires-foreground",
-        ]
-      }
-      if #available(iOS 26.0, *) {
+      if #available(iOS 26.0, *), UIApplication.shared.applicationState == .active {
         var registry = loadRegistry()
         pruneRegistry(&registry)
 
-        // A background delivery may attach before RN starts. Claim that exact
-        // persisted submission instead of creating a duplicate request.
         if let existing = registry.last(where: {
           $0.meetingId == jobId && ($0.state == .pending || $0.state == .attached)
         }) {
-          currentIdentifier = existing.identifier
           claimedIdentifiers.insert(existing.identifier)
+          progressByIdentifier[existing.identifier] = (0, Int64(max(1, totalUnits)))
           saveRegistry(registry)
-          beginFallbackTask(meetingId: jobId)
+          beginFallbackTask(identifier: existing.identifier)
           return [
             "started": true,
             "mode": gates[existing.identifier]?.isActive == true ? "attached-existing" : "pending-existing",
@@ -126,107 +138,141 @@ public final class MainaIOSContinuedProcessing {
           ]
         }
 
-        let requestIdentifier = makeUniqueIdentifier(meetingId: jobId)
+        let identity = makeUniqueIdentifier(meetingId: jobId)
+        let now = Date().timeIntervalSince1970
         registry.append(Submission(
-          identifier: requestIdentifier,
+          identifier: identity.identifier,
           meetingId: jobId,
-          createdAt: Date().timeIntervalSince1970,
-          state: .pending,
-          completedAt: nil
+          runSequence: identity.sequence,
+          asrGeneration: nil,
+          createdAt: now,
+          attachedAt: nil,
+          deferralRequestedAt: nil,
+          deferredAt: nil,
+          completedAt: nil,
+          lifecycleUpdatedAt: now,
+          state: .pending
         ))
+        pruneRegistry(&registry)
         saveRegistry(registry) // Persist before registration/submission.
-        guard registerExactIdentifierIfNeeded(requestIdentifier) else {
-          markSubmission(requestIdentifier, state: .deferred)
-          beginFallbackTask(meetingId: jobId)
+        progressByIdentifier[identity.identifier] = (0, Int64(max(1, totalUnits)))
+
+        guard registerExactIdentifierIfNeeded(identity.identifier) else {
+          beginFallbackTask(identifier: identity.identifier)
+          if fallbackTasks[identity.identifier] == nil {
+            markSubmission(identity.identifier, state: .deferred)
+          }
           return [
-            "started": fallbackTask != .invalid,
+            "started": fallbackTasks[identity.identifier] != nil,
             "mode": "fallback",
             "reason": "continued-processing-handler-unregistered",
-            "requestId": requestIdentifier,
+            "requestId": identity.identifier,
           ]
         }
-        currentIdentifier = requestIdentifier
-        claimedIdentifiers.insert(requestIdentifier)
+
+        claimedIdentifiers.insert(identity.identifier)
         let request = BGContinuedProcessingTaskRequest(
-          identifier: requestIdentifier,
+          identifier: identity.identifier,
           title: title,
           subtitle: subtitle
         )
-        // The engine begins now from this foreground user action. `.fail`
-        // makes a delayed/refused monitor observable rather than silently
-        // queueing another execution owner.
         request.strategy = .fail
         do {
           try BGTaskScheduler.shared.submit(request)
-          beginFallbackTask(meetingId: jobId)
+          beginFallbackTask(identifier: identity.identifier)
           return [
             "started": true,
             "mode": "continued-processing-requested",
-            "requestId": requestIdentifier,
+            "requestId": identity.identifier,
           ]
         } catch {
-          markSubmission(requestIdentifier, state: .deferred)
-          beginFallbackTask(meetingId: jobId)
+          beginFallbackTask(identifier: identity.identifier)
+          if fallbackTasks[identity.identifier] == nil {
+            markSubmission(identity.identifier, state: .deferred)
+          }
           return [
-            "started": fallbackTask != .invalid,
+            "started": fallbackTasks[identity.identifier] != nil,
             "mode": "fallback",
             "reason": "continued-processing-submit-\((error as NSError).code)",
-            "requestId": requestIdentifier,
+            "requestId": identity.identifier,
           ]
         }
       }
-      currentIdentifier = nil
-      beginFallbackTask(meetingId: jobId)
-      return ["started": fallbackTask != .invalid, "mode": "fallback"]
+
+      return [
+        "started": false,
+        "mode": "existing-background-owner",
+        "reason": "continued-processing-requires-foreground",
+      ]
     }
   }
 
-  func update(completedUnits: Int, totalUnits: Int, subtitle: String?) {
-    queue.async {
-      self.completedUnits = Int64(max(0, completedUnits))
-      self.totalUnits = Int64(max(1, totalUnits))
-      guard #available(iOS 26.0, *),
-        let identifier = self.currentIdentifier,
-        let task = self.gates[identifier],
-        task.isActive
-      else { return }
-      // BGTask itself is retained in CompletionGate; progress is obtained from
-      // the handler's concrete task while attached.
-      self.updateAttachedProgress(identifier: identifier, subtitle: subtitle)
-    }
-  }
-
-  func finish(success: Bool) {
-    queue.async {
-      if let identifier = self.currentIdentifier {
-        if let gate = self.gates[identifier] {
-          _ = gate.complete(success: success)
-          self.gates.removeValue(forKey: identifier)
-        } else {
-          BGTaskScheduler.shared.cancel(taskRequestWithIdentifier: identifier)
-        }
-        self.claimedIdentifiers.remove(identifier)
-        self.markSubmission(identifier, state: success ? .complete : .deferred)
-        self.currentIdentifier = nil
-      }
-      self.endFallbackTask()
-    }
-  }
-
-  func isActive(meetingId: String) -> Bool {
+  func bindRun(identifier: String, meetingId: String, asrGeneration: Int) -> Bool {
     queue.sync {
-      if UIApplication.shared.applicationState == .active { return true }
-      if fallbackTask != .invalid && fallbackMeetingId == meetingId { return true }
-      guard let submission = loadRegistry().last(where: {
-        $0.meetingId == meetingId && ($0.state == .pending || $0.state == .attached)
+      var registry = loadRegistry()
+      guard let index = registry.lastIndex(where: {
+        $0.identifier == identifier
+          && $0.meetingId == meetingId
+          && ($0.state == .pending || $0.state == .attached)
       }) else { return false }
-      return gates[submission.identifier]?.isActive == true
+      registry[index].asrGeneration = asrGeneration
+      registry[index].lifecycleUpdatedAt = Date().timeIntervalSince1970
+      saveRegistry(registry)
+      return true
+    }
+  }
+
+  func update(identifier: String, completedUnits: Int, totalUnits: Int, subtitle: String?) {
+    queue.async {
+      guard self.isIdentifierActive(identifier) else { return }
+      let progress = (Int64(max(0, completedUnits)), Int64(max(1, totalUnits)))
+      self.progressByIdentifier[identifier] = progress
+      guard #available(iOS 26.0, *), let gate = self.gates[identifier], gate.isActive else { return }
+      gate.updateProgress(completedUnits: progress.0, total: progress.1, subtitle: subtitle)
+    }
+  }
+
+  func finish(identifier: String, success: Bool) {
+    queue.async {
+      self.complete(identifier: identifier, success: success, state: success ? .complete : .deferred)
+    }
+  }
+
+  func acknowledgeDeferral(identifier: String, meetingId: String, asrGeneration: Int) -> Bool {
+    queue.sync {
+      let registry = loadRegistry()
+      guard registry.contains(where: {
+        $0.identifier == identifier
+          && $0.meetingId == meetingId
+          && $0.asrGeneration == asrGeneration
+          && $0.state == .deferralRequested
+      }) else { return false }
+      complete(identifier: identifier, success: false, state: .deferred)
+      return true
+    }
+  }
+
+  func isActive(identifier: String, meetingId: String) -> Bool {
+    queue.sync {
+      guard !identifier.isEmpty else { return false }
+      if fallbackTasks[identifier] != nil { return true }
+      guard let submission = loadRegistry().last(where: {
+        $0.identifier == identifier
+          && $0.meetingId == meetingId
+          && ($0.state == .pending || $0.state == .attached)
+      }) else { return false }
+      if gates[submission.identifier]?.isActive == true { return true }
+      return UIApplication.shared.applicationState == .active
     }
   }
 
   @available(iOS 26.0, *)
   private func registerExactIdentifierIfNeeded(_ identifier: String) -> Bool {
     if registeredIdentifiers.contains(identifier) { return true }
+    guard MainaIOSContinuedProcessingRetentionPolicy.mayRegister(
+      identifier: identifier,
+      registered: registeredIdentifiers
+    ) else { return false }
     let registered = BGTaskScheduler.shared.register(
       forTaskWithIdentifier: identifier,
       using: queue
@@ -238,70 +284,122 @@ public final class MainaIOSContinuedProcessing {
   }
 
   private func attach(_ task: BGTask, identifier: String) {
-    guard gates[identifier] == nil else {
+    let registry = loadRegistry()
+    guard registry.contains(where: {
+      $0.identifier == identifier && ($0.state == .pending || $0.state == .attached)
+    }), gates[identifier] == nil else {
       task.setTaskCompleted(success: false)
       return
     }
     let gate = CompletionGate(task: task)
     gates[identifier] = gate
-    currentIdentifier = identifier
     markSubmission(identifier, state: .attached)
-    endFallbackTask()
+    endFallbackTask(identifier: identifier)
     task.expirationHandler = { [weak self, weak gate] in
       guard let self, let gate else { return }
-      self.queue.async {
-        guard self.gates[identifier] === gate else { return }
-        _ = gate.complete(success: false)
-        self.gates.removeValue(forKey: identifier)
-        self.claimedIdentifiers.remove(identifier)
-        self.markSubmission(identifier, state: .deferred)
-        if self.currentIdentifier == identifier { self.currentIdentifier = nil }
-        self.endFallbackTask()
-      }
+      self.queue.async { self.requestDeferral(identifier: identifier, gate: gate) }
     }
-    if #available(iOS 26.0, *), let continued = task as? BGContinuedProcessingTask {
-      continued.progress.totalUnitCount = totalUnits
-      continued.progress.completedUnitCount = min(completedUnits, totalUnits)
+    if #available(iOS 26.0, *), let progress = progressByIdentifier[identifier],
+      let continued = task as? BGContinuedProcessingTask {
+      continued.progress.totalUnitCount = progress.total
+      continued.progress.completedUnitCount = min(progress.completed, progress.total)
     }
 
-    // A delivered task may relaunch before JS. If the same meeting does not
-    // claim it through begin(...) within ten seconds, complete false exactly
-    // once and leave the submission deferred for the durable recovery path.
     queue.asyncAfter(deadline: .now() + .seconds(10)) { [weak self, weak gate] in
       guard let self, let gate,
         self.gates[identifier] === gate,
         !self.claimedIdentifiers.contains(identifier)
       else { return }
-      _ = gate.complete(success: false)
-      self.gates.removeValue(forKey: identifier)
-      self.markSubmission(identifier, state: .deferred)
-      if self.currentIdentifier == identifier { self.currentIdentifier = nil }
+      self.complete(identifier: identifier, success: false, state: .deferred)
     }
   }
 
-  private func updateAttachedProgress(identifier: String, subtitle: String?) {
-    // This lookup is intentionally limited to the current handler. The task
-    // may already have expired; CompletionGate.isActive fences late updates.
-    guard let gate = gates[identifier], gate.isActive else { return }
-    if #available(iOS 26.0, *) {
-      gate.updateProgress(completedUnits: completedUnits, total: totalUnits, subtitle: subtitle)
+  private func requestDeferral(identifier: String, gate: CompletionGate) {
+    guard gates[identifier] === gate, gate.isActive else { return }
+    var registry = loadRegistry()
+    guard let index = registry.lastIndex(where: {
+      $0.identifier == identifier && ($0.state == .pending || $0.state == .attached)
+    }) else {
+      complete(identifier: identifier, success: false, state: .deferred)
+      return
+    }
+    let now = Date().timeIntervalSince1970
+    registry[index].state = .deferralRequested
+    registry[index].deferralRequestedAt = now
+    registry[index].lifecycleUpdatedAt = now
+    let submission = registry[index]
+    saveRegistry(registry)
+
+    if let generation = submission.asrGeneration {
+      deferralHandler?([
+        "requestId": identifier,
+        "meetingId": submission.meetingId,
+        "asrGeneration": generation,
+        "occurredAt": Int64(now * 1_000),
+      ])
+    }
+
+    queue.asyncAfter(deadline: .now() + .seconds(1)) { [weak self, weak gate] in
+      guard let self, let gate, self.gates[identifier] === gate, gate.isActive else { return }
+      self.complete(identifier: identifier, success: false, state: .deferred)
     }
   }
 
-  private func makeUniqueIdentifier(meetingId: String) -> String {
+  private func complete(identifier: String, success: Bool, state: Submission.State) {
+    if let gate = gates.removeValue(forKey: identifier) {
+      _ = gate.complete(success: success)
+    } else if #available(iOS 13.0, *) {
+      BGTaskScheduler.shared.cancel(taskRequestWithIdentifier: identifier)
+    }
+    claimedIdentifiers.remove(identifier)
+    progressByIdentifier.removeValue(forKey: identifier)
+    markSubmission(identifier, state: state)
+    endFallbackTask(identifier: identifier)
+  }
+
+  private func isIdentifierActive(_ identifier: String) -> Bool {
+    loadRegistry().contains(where: {
+      $0.identifier == identifier && ($0.state == .pending || $0.state == .attached)
+    })
+  }
+
+  private func makeUniqueIdentifier(meetingId: String) -> (identifier: String, sequence: Int) {
     let digest = SHA256.hash(data: Data(meetingId.utf8)).prefix(8)
       .map { String(format: "%02x", $0) }.joined()
-    let sequence = defaults.integer(forKey: Key.sequence) + 1
+    let sequence = max(defaults.integer(forKey: Key.sequence), defaults.integer(forKey: Key.legacySequence)) + 1
     defaults.set(sequence, forKey: Key.sequence)
     let nonce = UUID().uuidString.replacingOccurrences(of: "-", with: "").prefix(8).lowercased()
-    return "\(requestIdentifierPrefix).\(digest).\(sequence).\(nonce)"
+    return ("\(requestIdentifierPrefix).\(digest).\(sequence).\(nonce)", sequence)
   }
 
   private func loadRegistry() -> [Submission] {
-    guard let data = defaults.data(forKey: Key.registry),
-      let value = try? JSONDecoder().decode([Submission].self, from: data)
+    if let data = defaults.data(forKey: Key.registry),
+      let value = try? JSONDecoder().decode([Submission].self, from: data) {
+      return value
+    }
+    guard let data = defaults.data(forKey: Key.legacyRegistry),
+      let legacy = try? JSONDecoder().decode([LegacySubmission].self, from: data)
     else { return [] }
-    return value
+    let migrated = legacy.map { item in
+      let sequence = Int(item.identifier.split(separator: ".").dropLast().last ?? "0") ?? 0
+      return Submission(
+        identifier: item.identifier,
+        meetingId: item.meetingId,
+        runSequence: sequence,
+        asrGeneration: nil,
+        createdAt: item.createdAt,
+        attachedAt: item.state == .attached ? item.createdAt : nil,
+        deferralRequestedAt: nil,
+        deferredAt: item.state == .deferred ? (item.completedAt ?? item.createdAt) : nil,
+        completedAt: item.state == .complete ? (item.completedAt ?? item.createdAt) : nil,
+        lifecycleUpdatedAt: item.completedAt ?? item.createdAt,
+        state: item.state == .pending ? .pending
+          : item.state == .attached ? .attached
+          : item.state == .complete ? .complete : .deferred
+      )
+    }
+    saveRegistry(migrated)
+    return migrated
   }
 
   private func saveRegistry(_ registry: [Submission]) {
@@ -313,58 +411,63 @@ public final class MainaIOSContinuedProcessing {
   private func markSubmission(_ identifier: String, state: Submission.State) {
     var registry = loadRegistry()
     guard let index = registry.lastIndex(where: { $0.identifier == identifier }) else { return }
+    let now = Date().timeIntervalSince1970
     registry[index].state = state
-    registry[index].completedAt = state == .complete || state == .deferred
-      ? Date().timeIntervalSince1970
-      : nil
+    registry[index].lifecycleUpdatedAt = now
+    if state == .attached { registry[index].attachedAt = now }
+    if state == .deferralRequested { registry[index].deferralRequestedAt = now }
+    if state == .deferred { registry[index].deferredAt = now }
+    if state == .complete { registry[index].completedAt = now }
     pruneRegistry(&registry)
     saveRegistry(registry)
   }
 
   private func pruneRegistry(_ registry: inout [Submission]) {
     let now = Date().timeIntervalSince1970
-    registry = registry.filter {
-      switch $0.state {
-      case .pending, .attached:
-        return now - $0.createdAt < 24 * 60 * 60
-      case .deferred, .complete:
-        return now - ($0.completedAt ?? $0.createdAt) < 7 * 24 * 60 * 60
+    let originals = Dictionary(uniqueKeysWithValues: registry.map { ($0.identifier, $0) })
+    let retained = MainaIOSContinuedProcessingRetentionPolicy.prune(registry.map {
+      MainaIOSContinuedProcessingRetentionPolicy.Record(
+        identifier: $0.identifier,
+        state: .init(rawValue: $0.state.rawValue) ?? .deferred,
+        createdAt: $0.createdAt,
+        updatedAt: $0.completedAt ?? $0.deferredAt ?? $0.lifecycleUpdatedAt
+      )
+    }, now: now)
+    registry = retained.compactMap { record in
+      guard var submission = originals[record.identifier] else { return nil }
+      submission.state = .init(rawValue: record.state.rawValue) ?? .deferred
+      if submission.state == .deferred && submission.deferredAt == nil {
+        submission.deferredAt = record.updatedAt
+        submission.lifecycleUpdatedAt = record.updatedAt
       }
+      return submission
     }
-    if registry.count > 32 { registry = Array(registry.suffix(32)) }
   }
 
-  private func beginFallbackTask(meetingId: String) {
-    guard fallbackTask == .invalid else { return }
-    fallbackMeetingId = meetingId
+  private func beginFallbackTask(identifier: String) {
+    guard fallbackTasks[identifier] == nil else { return }
+    var task = UIBackgroundTaskIdentifier.invalid
     let start = {
-      self.fallbackTask = UIApplication.shared.beginBackgroundTask(withName: "Maina transcription") { [weak self] in
-        self?.expireFallbackTaskSynchronously()
+      task = UIApplication.shared.beginBackgroundTask(withName: "Maina transcription") { [weak self] in
+        self?.expireFallbackTaskSynchronously(identifier: identifier)
       }
     }
     if Thread.isMainThread { start() } else { DispatchQueue.main.sync(execute: start) }
+    if task != .invalid { fallbackTasks[identifier] = task }
   }
 
-  /** UIKit requires the task to be ended before its expiration handler returns. */
-  private func expireFallbackTaskSynchronously() {
-    let identifier: UIBackgroundTaskIdentifier = queue.sync {
-      let task = fallbackTask
-      fallbackTask = .invalid
-      fallbackMeetingId = nil
-      if let currentIdentifier {
-        markSubmission(currentIdentifier, state: .deferred)
-      }
-      return task
+  private func expireFallbackTaskSynchronously(identifier: String) {
+    let task: UIBackgroundTaskIdentifier = queue.sync {
+      let value = fallbackTasks.removeValue(forKey: identifier) ?? .invalid
+      markSubmission(identifier, state: .deferred)
+      return value
     }
-    if identifier != .invalid { UIApplication.shared.endBackgroundTask(identifier) }
+    if task != .invalid { UIApplication.shared.endBackgroundTask(task) }
   }
 
-  private func endFallbackTask() {
-    guard fallbackTask != .invalid else { return }
-    let identifier = fallbackTask
-    fallbackTask = .invalid
-    fallbackMeetingId = nil
-    let end = { UIApplication.shared.endBackgroundTask(identifier) }
+  private func endFallbackTask(identifier: String) {
+    guard let task = fallbackTasks.removeValue(forKey: identifier), task != .invalid else { return }
+    let end = { UIApplication.shared.endBackgroundTask(task) }
     if Thread.isMainThread { end() } else { DispatchQueue.main.async(execute: end) }
   }
 }

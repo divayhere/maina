@@ -11,6 +11,10 @@ const capture = path.join(moduleRoot, 'ios', 'MainaIOSNativeAudioCapture.swift')
 const module = path.join(moduleRoot, 'ios', 'MainaRecorderModule.swift');
 const qwen = path.join(moduleRoot, 'ios', 'MainaQwenAsr.swift');
 const continuedProcessing = path.join(moduleRoot, 'ios', 'MainaIOSContinuedProcessing.swift');
+const continuedProcessingPolicy = path.join(moduleRoot, 'ios', 'MainaIOSContinuedProcessingRetentionPolicy.swift');
+const continuedProcessingPolicyTests = path.join(project, 'scripts', 'fixtures', 'MainaIOSContinuedProcessingRetentionPolicyTests.swift');
+const callRecoveryPolicy = path.join(moduleRoot, 'ios', 'MainaIOSCallRecoveryPolicy.swift');
+const callRecoveryPolicyTests = path.join(project, 'scripts', 'fixtures', 'MainaIOSCallRecoveryPolicyTests.swift');
 const pipelineWake = path.join(moduleRoot, 'ios', 'MainaIOSPipelineWake.swift');
 const pipelineWakePolicy = path.join(moduleRoot, 'ios', 'MainaIOSPipelineWakePolicy.swift');
 const pipelineWakePolicyTests = path.join(project, 'scripts', 'fixtures', 'MainaIOSPipelineWakePolicyTests.swift');
@@ -20,7 +24,7 @@ const config = JSON.parse(readFileSync(path.join(moduleRoot, 'expo-module.config
 const appConfig = JSON.parse(readFileSync(path.join(project, 'app.json'), 'utf8'));
 const captureSource = readFileSync(capture, 'utf8');
 
-for (const file of [capture, module, qwen, continuedProcessing, pipelineWake, pipelineWakePolicy, pipelineWakePolicyTests, continuedProcessingPlugin]) {
+for (const file of [capture, module, qwen, continuedProcessing, continuedProcessingPolicy, continuedProcessingPolicyTests, callRecoveryPolicy, callRecoveryPolicyTests, pipelineWake, pipelineWakePolicy, pipelineWakePolicyTests, continuedProcessingPlugin]) {
   if (!existsSync(file) || readFileSync(file, 'utf8').trim().length === 0) {
     throw new Error(`Required iOS recorder source is missing: ${file}`);
   }
@@ -62,6 +66,11 @@ for (const token of [
   'expireRecoveryBackgroundTaskSynchronously',
   'route-change-observed',
   'recorder?.isRecording != true',
+  'CXCallObserver',
+  'capture-recovery-vetoed-by-call',
+  'MainaIOSCallRecoveryPolicy.action',
+  'chunk-allocated',
+  'next.record(), next.isRecording',
 ]) {
   if (!captureSource.includes(token)) {
     throw new Error(`iOS recorder reliability invariant missing: ${token}`);
@@ -94,9 +103,9 @@ for (const token of [
   'UIApplication.shared.applicationState == .active',
   'continued-processing-requires-foreground',
   'attach(_ task: BGTask, identifier:',
-  'beginFallbackTask(meetingId:',
-  'expireFallbackTaskSynchronously',
-  'UIApplication.shared.endBackgroundTask(identifier)',
+  'beginFallbackTask(identifier:',
+  'expireFallbackTaskSynchronously(identifier:',
+  'UIApplication.shared.endBackgroundTask(task)',
 ]) {
   if (!readFileSync(continuedProcessing, 'utf8').includes(token)) {
     throw new Error(`iOS continued-processing invariant missing: ${token}`);
@@ -136,6 +145,12 @@ for (const token of [
   'continued-processing-handler-unregistered',
   'claimedIdentifiers',
   'CompletionGate',
+  'maina.continuedProcessing.registry.v3',
+  'asrGeneration',
+  'deferralRequestedAt',
+  'onDeferralRequested',
+  '.now() + .seconds(1)',
+  'MainaIOSContinuedProcessingRetentionPolicy.prune',
 ]) {
   if (!readFileSync(continuedProcessing, 'utf8').includes(token)) {
     throw new Error(`iOS continued-processing invariant missing: ${token}`);
@@ -157,11 +172,11 @@ if (process.platform === 'darwin') {
   const sdk = execFileSync('xcrun', ['--sdk', 'iphoneos', '--show-sdk-path'], { encoding: 'utf8' }).trim();
   execFileSync('xcrun', [
     'swiftc', '-target', 'arm64-apple-ios16.4', '-sdk', sdk,
-    '-typecheck', capture,
+    '-typecheck', callRecoveryPolicy, capture,
   ], { stdio: 'inherit' });
   execFileSync('xcrun', [
     'swiftc', '-target', 'arm64-apple-ios16.4', '-sdk', sdk,
-    '-typecheck', continuedProcessing,
+    '-typecheck', continuedProcessingPolicy, continuedProcessing,
   ], { stdio: 'inherit' });
   execFileSync('xcrun', [
     'swiftc', '-target', 'arm64-apple-ios16.4', '-sdk', sdk,
@@ -177,6 +192,22 @@ if (process.platform === 'darwin') {
     execFileSync(policyTestExecutable, [], { stdio: 'inherit' });
   } finally {
     rmSync(policyTestDirectory, { recursive: true, force: true });
+  }
+  const callPolicyTestDirectory = mkdtempSync(path.join(tmpdir(), 'maina-ios-call-policy-'));
+  const callPolicyTestExecutable = path.join(callPolicyTestDirectory, 'call-policy-tests');
+  try {
+    execFileSync('xcrun', ['swiftc', callRecoveryPolicy, callRecoveryPolicyTests, '-o', callPolicyTestExecutable], { stdio: 'inherit' });
+    execFileSync(callPolicyTestExecutable, [], { stdio: 'inherit' });
+  } finally {
+    rmSync(callPolicyTestDirectory, { recursive: true, force: true });
+  }
+  const continuedPolicyTestDirectory = mkdtempSync(path.join(tmpdir(), 'maina-ios-continued-policy-'));
+  const continuedPolicyTestExecutable = path.join(continuedPolicyTestDirectory, 'continued-policy-tests');
+  try {
+    execFileSync('xcrun', ['swiftc', continuedProcessingPolicy, continuedProcessingPolicyTests, '-o', continuedPolicyTestExecutable], { stdio: 'inherit' });
+    execFileSync(continuedPolicyTestExecutable, [], { stdio: 'inherit' });
+  } finally {
+    rmSync(continuedPolicyTestDirectory, { recursive: true, force: true });
   }
   if (!existsSync(sherpaHeaders)) {
     throw new Error('Verified Sherpa iOS runtime is missing; run npm run ios:runtime first.');

@@ -1,4 +1,5 @@
 import AVFAudio
+import CallKit
 import Foundation
 import UIKit
 
@@ -12,7 +13,7 @@ import UIKit
  * impossible promises: a phone call or physical input switch can cause a
  * short measured gap, but it never turns that event into a second meeting.
  */
-final class MainaIOSNativeAudioCapture: NSObject, AVAudioRecorderDelegate {
+final class MainaIOSNativeAudioCapture: NSObject, AVAudioRecorderDelegate, CXCallObserverDelegate {
   static let shared = MainaIOSNativeAudioCapture()
 
   private enum CaptureState: String {
@@ -28,6 +29,7 @@ final class MainaIOSNativeAudioCapture: NSObject, AVAudioRecorderDelegate {
   private var interruptionObserver: NSObjectProtocol?
   private var mediaServicesResetObserver: NSObjectProtocol?
   private var appActiveObserver: NSObjectProtocol?
+  private let callObserver = CXCallObserver()
   private var state: CaptureState = .idle
   private var meetingId: String?
   private var directory: URL?
@@ -47,6 +49,7 @@ final class MainaIOSNativeAudioCapture: NSObject, AVAudioRecorderDelegate {
   private var peakDbfs: Float = -90
   private var deliberatelyPaused = false
   private var interrupted = false
+  private var communicationActive = false
   private var recoveryGeneration = 0
   private var recoveryBackgroundTask: UIBackgroundTaskIdentifier = .invalid
   private var lastStorageCheckUptime: TimeInterval = 0
@@ -61,6 +64,8 @@ final class MainaIOSNativeAudioCapture: NSObject, AVAudioRecorderDelegate {
 
   private override init() {
     super.init()
+    callObserver.setDelegate(self, queue: queue)
+    communicationActive = callObserver.calls.contains(where: { !$0.hasEnded })
   }
 
   func configure(onRouteChanged: @escaping ([String: Any]) -> Void) {
@@ -75,6 +80,13 @@ final class MainaIOSNativeAudioCapture: NSObject, AVAudioRecorderDelegate {
   ) throws -> [String: Any] {
     try queue.sync {
       guard state == .idle else { throw CaptureError.invalidState("A Maina recording is already active.") }
+      communicationActive = callObserver.calls.contains(where: { !$0.hasEnded })
+      guard MainaIOSCallRecoveryPolicy.manualResumeAllowed(
+        communicationActive: communicationActive,
+        observerCallActive: callObserver.calls.contains(where: { !$0.hasEnded })
+      ) else {
+        throw CaptureError.invalidState("The microphone is currently owned by a call.")
+      }
       let directory = Self.fileURL(directoryValue)
       try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
 
@@ -122,6 +134,7 @@ final class MainaIOSNativeAudioCapture: NSObject, AVAudioRecorderDelegate {
   func pause() throws -> [String: Any] {
     try queue.sync {
       guard state == .recording else { throw CaptureError.invalidState("Maina is not recording.") }
+      cancelSystemRecovery(reason: "manual-pause")
       state = .pausing
       deliberatelyPaused = true
       closeActiveChunk(reason: "pause", preserve: true)
@@ -138,24 +151,36 @@ final class MainaIOSNativeAudioCapture: NSObject, AVAudioRecorderDelegate {
   func resume() throws -> [String: Any] {
     try queue.sync {
       guard state == .paused else { throw CaptureError.invalidState("Maina is not paused.") }
-      guard !interrupted else {
+      communicationActive = callObserver.calls.contains(where: { !$0.hasEnded })
+      guard MainaIOSCallRecoveryPolicy.manualResumeAllowed(
+        communicationActive: communicationActive,
+        observerCallActive: callObserver.calls.contains(where: { !$0.hasEnded })
+      ) else {
         throw CaptureError.invalidState("The microphone is still owned by a call or system interruption.")
       }
+      cancelSystemRecovery(reason: "manual-resume")
       state = .resuming
       deliberatelyPaused = false
-      try configureAudioSession()
-      try openAndStartChunk(reason: "resume")
-      state = .recording
-      startTimers()
-      appendJournal("resumed", fields: [:])
-      return ["requested": true]
+      do {
+        try configureAudioSession()
+        try openAndStartChunk(reason: "resume")
+        state = .recording
+        interrupted = false
+        startTimers()
+        appendJournal("resumed", fields: [:])
+        return ["requested": true]
+      } catch {
+        state = .paused
+        interrupted = true
+        throw error
+      }
     }
   }
 
   func stop() -> [String: Any] {
     queue.sync {
       guard state != .idle else { return ["requested": true] }
-      recoveryGeneration += 1
+      cancelSystemRecovery(reason: "stop")
       state = .finalizing
       closeActiveChunk(reason: "stop", preserve: true)
       appendJournal("stopped", fields: [
@@ -171,7 +196,7 @@ final class MainaIOSNativeAudioCapture: NSObject, AVAudioRecorderDelegate {
   func abort() -> [String: Any] {
     queue.sync {
       guard state != .idle else { return ["requested": true] }
-      recoveryGeneration += 1
+      cancelSystemRecovery(reason: "abort")
       closeActiveChunk(reason: "abort", preserve: false)
       tearDownSession()
       resetIdle()
@@ -347,7 +372,20 @@ final class MainaIOSNativeAudioCapture: NSObject, AVAudioRecorderDelegate {
     let next = try AVAudioRecorder(url: partial, settings: settings)
     next.delegate = self
     next.isMeteringEnabled = true
-    guard next.prepareToRecord(), next.record() else {
+    guard next.prepareToRecord() else {
+      try? FileManager.default.removeItem(at: partial)
+      throw CaptureError.startFailed("iPhone could not begin microphone capture.")
+    }
+    // The monotonic file identity and recoverable PCM header exist durably
+    // before microphone ownership is requested. A failed start can therefore
+    // delete only a provably empty partial without exposing Recording state.
+    if let handle = try? FileHandle(forWritingTo: partial) {
+      try? handle.synchronize()
+      try? handle.close()
+    }
+    appendJournal("chunk-allocated", fields: ["index": chunkIndex, "reason": reason, "file": partial.lastPathComponent])
+    guard next.record(), next.isRecording else {
+      try? FileManager.default.removeItem(at: partial)
       throw CaptureError.startFailed("iPhone could not begin microphone capture.")
     }
     recorder = next
@@ -511,6 +549,13 @@ final class MainaIOSNativeAudioCapture: NSObject, AVAudioRecorderDelegate {
         "reason": String(describing: reason ?? .unknown),
         "route": routeDescription(),
       ])
+      guard MainaIOSCallRecoveryPolicy.manualResumeAllowed(
+        communicationActive: communicationActive,
+        observerCallActive: callObserver.calls.contains(where: { !$0.hasEnded })
+      ) else {
+        appendJournal("capture-recovery-vetoed-by-call", fields: ["signal": "route-change"])
+        return
+      }
       // Configuring our own session can emit a category-change notification.
       // Never let that reset an in-flight backoff chain to attempt zero.
       guard !routeRecoveryActive else { return }
@@ -540,15 +585,9 @@ final class MainaIOSNativeAudioCapture: NSObject, AVAudioRecorderDelegate {
       return
     }
 
-    recoveryStartedUptime = ProcessInfo.processInfo.systemUptime
-    routeRecoveryActive = true
     appendJournal("route-change", fields: ["reason": String(describing: reason ?? .unknown), "route": routeDescription()])
     onRouteChanged?(routeEvent(change: "active-route"))
-    closeActiveChunk(reason: "route-change", preserve: true)
-    chunkIndex += 1
-    stopTimers()
-    state = .paused
-    interrupted = true
+    beginSystemPause(reason: "route-change")
     scheduleRecovery(reason: "route-recovery")
   }
 
@@ -557,30 +596,27 @@ final class MainaIOSNativeAudioCapture: NSObject, AVAudioRecorderDelegate {
     guard let type = AVAudioSession.InterruptionType(rawValue: rawType) else { return }
     switch type {
     case .began:
-      guard state == .recording else { return }
-      interrupted = true
-      recoveryStartedUptime = ProcessInfo.processInfo.systemUptime
-      stopTimers()
-      closeActiveChunk(reason: "system-interruption", preserve: true)
-      chunkIndex += 1
-      state = .paused
-      recoveryGeneration += 1
-      appendJournal("interruption-began", fields: [:])
-      // Start the bounded watcher while iOS still grants execution time. The
-      // call interval remains excluded because every attempt must first regain
-      // AVAudioSession ownership before a new monotonic WAV chunk can open.
-      scheduleRecovery(reason: "interruption-began-recovery")
+      communicationActive = communicationActive || callObserver.calls.contains(where: { !$0.hasEnded })
+      if communicationActive { suspendRecoveryForActiveCall(reason: "interruption-began") }
+      beginSystemPause(reason: "system-interruption")
+      appendJournal("interruption-began", fields: ["communicationActive": communicationActive])
+      // Do not spend a finite UIKit assertion or retry budget while a call
+      // still owns the microphone. End/route/CallKit signals coalesce later.
     case .ended:
       let optionsValue = notification.userInfo?[AVAudioSessionInterruptionOptionKey] as? UInt ?? 0
       let options = AVAudioSession.InterruptionOptions(rawValue: optionsValue)
+      communicationActive = callObserver.calls.contains(where: { !$0.hasEnded })
       guard interrupted else { return }
       guard !deliberatelyPaused else {
         interrupted = false
         appendJournal("interruption-ended", fields: ["resumed": false])
         return
       }
-      appendJournal("interruption-ended", fields: ["systemSuggestedResume": options.contains(.shouldResume)])
-      scheduleRecovery(reason: "interruption-recovery")
+      appendJournal("interruption-ended", fields: [
+        "systemSuggestedResume": options.contains(.shouldResume),
+        "communicationActive": communicationActive,
+      ])
+      if !communicationActive { scheduleRecovery(reason: "interruption-recovery") }
     @unknown default:
       break
     }
@@ -589,18 +625,12 @@ final class MainaIOSNativeAudioCapture: NSObject, AVAudioRecorderDelegate {
   private func handleMediaServicesReset() {
     guard state != .idle, !deliberatelyPaused else { return }
     appendJournal("media-services-reset", fields: [:])
-    stopTimers()
-    closeActiveChunk(reason: "media-services-reset", preserve: true)
-    chunkIndex += 1
-    state = .paused
-    interrupted = true
-    recoveryStartedUptime = ProcessInfo.processInfo.systemUptime
-    recoveryGeneration += 1
+    beginSystemPause(reason: "media-services-reset")
     scheduleRecovery(reason: "media-services-reset-recovery")
   }
 
   private func recoverWhenAppBecomesActive() {
-    guard state == .paused, interrupted, !deliberatelyPaused else { return }
+    guard state == .paused, interrupted, !deliberatelyPaused, !communicationActive else { return }
     appendJournal("foreground-recovery-check", fields: [:])
     scheduleRecovery(reason: "foreground-recovery")
   }
@@ -612,13 +642,23 @@ final class MainaIOSNativeAudioCapture: NSObject, AVAudioRecorderDelegate {
    * instead of converting a temporary session race into terminal data loss.
    */
   private func scheduleRecovery(reason: String, attempt: Int = 0) {
-    guard state == .paused, interrupted, !deliberatelyPaused else { return }
-    if attempt == 0 {
-      if routeRecoveryActive {
+    let action = MainaIOSCallRecoveryPolicy.action(
+      paused: state == .paused,
+      interrupted: interrupted,
+      manuallyPaused: deliberatelyPaused,
+      communicationActive: communicationActive,
+      observerCallActive: callObserver.calls.contains(where: { !$0.hasEnded }),
+      recoveryLoopActive: routeRecoveryActive && attempt == 0
+    )
+    guard action == .start || attempt > 0 else {
+      if action == .coalesce {
         appendJournal("capture-recovery-signal-coalesced", fields: ["reason": reason])
-        return
+      } else if action == .vetoCommunication {
+        appendJournal("capture-recovery-vetoed-by-call", fields: ["signal": reason])
       }
-      recoveryGeneration += 1
+      return
+    }
+    if attempt == 0 {
       beginRecoveryBackgroundTaskIfNeeded(reason: reason)
     }
     let generation = recoveryGeneration
@@ -632,6 +672,10 @@ final class MainaIOSNativeAudioCapture: NSObject, AVAudioRecorderDelegate {
         self.interrupted,
         !self.deliberatelyPaused
       else { return }
+      if self.communicationActive || self.callObserver.calls.contains(where: { !$0.hasEnded }) {
+        self.suspendRecoveryForActiveCall(reason: "call-became-active")
+        return
+      }
       do {
         try self.configureAudioSession()
         try self.openAndStartChunk(reason: reason)
@@ -681,6 +725,7 @@ final class MainaIOSNativeAudioCapture: NSObject, AVAudioRecorderDelegate {
   }
 
   private func canContinueRecoveryWatcher() -> Bool {
+    if communicationActive || callObserver.calls.contains(where: { !$0.hasEnded }) { return false }
     if UIApplication.shared.applicationState == .active { return true }
     guard recoveryBackgroundTask != .invalid else { return false }
     return UIApplication.shared.backgroundTimeRemaining > 4
@@ -739,6 +784,53 @@ final class MainaIOSNativeAudioCapture: NSObject, AVAudioRecorderDelegate {
     interrupted = false
     routeRecoveryActive = false
     endRecoveryBackgroundTask()
+  }
+
+  private func beginSystemPause(reason: String) {
+    guard state == .recording else {
+      if state == .paused, !deliberatelyPaused { interrupted = true }
+      return
+    }
+    recoveryGeneration += 1
+    recoveryStartedUptime = ProcessInfo.processInfo.systemUptime
+    routeRecoveryActive = false
+    endRecoveryBackgroundTask()
+    interrupted = true
+    stopTimers()
+    closeActiveChunk(reason: reason, preserve: true)
+    chunkIndex += 1
+    state = .paused
+    appendJournal("system-paused", fields: ["reason": reason, "generation": recoveryGeneration])
+  }
+
+  private func cancelSystemRecovery(reason: String) {
+    recoveryGeneration += 1
+    routeRecoveryActive = false
+    endRecoveryBackgroundTask()
+    appendJournal("capture-recovery-cancelled", fields: ["reason": reason, "generation": recoveryGeneration])
+  }
+
+  private func suspendRecoveryForActiveCall(reason: String) {
+    routeRecoveryActive = false
+    endRecoveryBackgroundTask()
+    appendJournal("capture-recovery-suspended-for-call", fields: [
+      "reason": reason,
+      "generation": recoveryGeneration,
+    ])
+  }
+
+  func callObserver(_ callObserver: CXCallObserver, callChanged call: CXCall) {
+    let active = callObserver.calls.contains(where: { !$0.hasEnded })
+    guard communicationActive != active else { return }
+    communicationActive = active
+    appendJournal("call-state-changed", fields: ["active": active])
+    if active {
+      suspendRecoveryForActiveCall(reason: "call-observer-active")
+      beginSystemPause(reason: "call-observer")
+      return
+    }
+    guard state == .paused, interrupted, !deliberatelyPaused else { return }
+    scheduleRecovery(reason: "call-observer-ended")
   }
 
   private func fail(_ message: String, error: Error) {

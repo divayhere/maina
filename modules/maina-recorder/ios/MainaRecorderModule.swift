@@ -20,7 +20,12 @@ public final class MainaRecorderModule: Module {
   public func definition() -> ModuleDefinition {
     Name("MainaRecorder")
 
-    Events("onAudioRouteChanged", "onNativePostProcessingChanged", "onPipelineWakeRequested")
+    Events(
+      "onAudioRouteChanged",
+      "onNativePostProcessingChanged",
+      "onPipelineWakeRequested",
+      "onIOSPostProcessingDeferralRequested"
+    )
 
     OnCreate {
       self.capture.configure { [weak self] event in
@@ -28,6 +33,9 @@ public final class MainaRecorderModule: Module {
       }
       self.pipelineWake.configure { [weak self] event in
         self?.sendEvent("onPipelineWakeRequested", event)
+      }
+      self.continuedProcessing.configure { [weak self] event in
+        self?.sendEvent("onIOSPostProcessingDeferralRequested", event)
       }
     }
 
@@ -98,14 +106,34 @@ public final class MainaRecorderModule: Module {
     Function("beginIOSContinuedProcessing") { (jobId: String, title: String, subtitle: String, totalUnits: Int) in
       self.continuedProcessing.begin(jobId: jobId, title: title, subtitle: subtitle, totalUnits: totalUnits)
     }
-    Function("updateIOSContinuedProcessing") { (completedUnits: Int, totalUnits: Int, subtitle: String?) in
-      self.continuedProcessing.update(completedUnits: completedUnits, totalUnits: totalUnits, subtitle: subtitle)
+    Function("bindIOSContinuedProcessingRun") { (requestId: String, meetingId: String, asrGeneration: Int) in
+      self.continuedProcessing.bindRun(
+        identifier: requestId,
+        meetingId: meetingId,
+        asrGeneration: asrGeneration
+      )
     }
-    Function("finishIOSContinuedProcessing") { (success: Bool) in
-      self.continuedProcessing.finish(success: success)
+    Function("updateIOSContinuedProcessing") { (requestId: String, completedUnits: Int, totalUnits: Int, subtitle: String?) in
+      self.continuedProcessing.update(
+        identifier: requestId,
+        completedUnits: completedUnits,
+        totalUnits: totalUnits,
+        subtitle: subtitle
+      )
     }
-    Function("isIOSContinuedProcessingActive") { (meetingId: String) in
-      self.continuedProcessing.isActive(meetingId: meetingId)
+    Function("finishIOSContinuedProcessing") { (requestId: String, success: Bool) in
+      self.continuedProcessing.finish(identifier: requestId, success: success)
+    }
+    Function("acknowledgeIOSContinuedProcessingDeferral") {
+      (requestId: String, meetingId: String, asrGeneration: Int) in
+      self.continuedProcessing.acknowledgeDeferral(
+        identifier: requestId,
+        meetingId: meetingId,
+        asrGeneration: asrGeneration
+      )
+    }
+    Function("isIOSContinuedProcessingActive") { (requestId: String, meetingId: String) in
+      self.continuedProcessing.isActive(identifier: requestId, meetingId: meetingId)
         || self.pipelineWake.hasActiveExecution()
     }
     AsyncFunction("schedulePipelineWake") { (generation: Int, requiresNetwork: Bool, promise: Promise) in
