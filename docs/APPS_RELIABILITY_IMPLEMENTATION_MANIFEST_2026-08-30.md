@@ -22,6 +22,9 @@ Both Git worktrees were clean at the implementation boundary. Shared
 byte-identical between Android and iOS. Intentional native and harness
 differences remain outside that parity set.
 
+The sanitized phase handoff was subsequently recorded in shared coordination
+at `21fba09` without changing product code or any runtime contract.
+
 ## Plain-English included changes
 
 ### Android
