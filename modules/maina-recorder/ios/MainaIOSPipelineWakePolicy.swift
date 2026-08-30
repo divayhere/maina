@@ -2,24 +2,74 @@ import Foundation
 
 enum MainaIOSPipelineWakeScheduleAction: Equatable {
   case activeOwnsGeneration
-  case ensurePendingRequest
+  case keepPendingRequest
+  case replacePendingRequest
+  case submitPendingRequest
 }
 
 /**
  * Pure ownership decisions for the single static BGProcessing identifier.
- * Keeping this separate makes the N -> N+1 handoff testable without faking
- * BGTask objects or introducing a second native queue.
+ * SQLite remains the durable queue; this policy only decides whether the one
+ * native request already represents the exact generation/revision/due tuple.
  */
 enum MainaIOSPipelineWakePolicy {
+  static let schedulerProtocolVersion = 2
+
+  static func shouldResetLegacyScheduler(
+    storedProtocolVersion: Int,
+    requestedProtocolVersion: Int,
+    hasUnfinishedSQLiteWork: Bool,
+    active: Bool
+  ) -> Bool {
+    requestedProtocolVersion == schedulerProtocolVersion
+      && storedProtocolVersion < schedulerProtocolVersion
+      && hasUnfinishedSQLiteWork
+      && !active
+  }
+
   static func scheduleAction(
     active: Bool,
     activeGeneration: Int,
-    requestedGeneration: Int
+    requestedGeneration: Int,
+    requestedRevision: Int,
+    requestedNotBeforeAt: Int64,
+    pendingRequestExists: Bool,
+    storedGeneration: Int,
+    storedRevision: Int,
+    storedNotBeforeAt: Int64
   ) -> MainaIOSPipelineWakeScheduleAction {
     if active && requestedGeneration <= activeGeneration {
       return .activeOwnsGeneration
     }
-    return .ensurePendingRequest
+    guard pendingRequestExists else { return .submitPendingRequest }
+    if storedGeneration != requestedGeneration || storedRevision != requestedRevision {
+      return .replacePendingRequest
+    }
+    if requestedNotBeforeAt < storedNotBeforeAt {
+      return .replacePendingRequest
+    }
+    return .keepPendingRequest
+  }
+
+  static func storedTupleMatchesPreviousOrCurrent(
+    storedGeneration: Int,
+    storedRevision: Int,
+    storedNotBeforeAt: Int64,
+    requestedGeneration: Int,
+    requestedRevision: Int,
+    requestedNotBeforeAt: Int64,
+    previousRevision: Int?,
+    previousNotBeforeAt: Int64?
+  ) -> Bool {
+    let matchesCurrent = storedGeneration == requestedGeneration
+      && storedRevision == requestedRevision
+      && storedNotBeforeAt == requestedNotBeforeAt
+    let matchesPrevious = previousRevision != nil
+      && previousNotBeforeAt != nil
+      && storedGeneration == requestedGeneration
+      && storedRevision == previousRevision
+      && storedNotBeforeAt == previousNotBeforeAt
+    return matchesCurrent || matchesPrevious
   }
 
   static func retainedGenerationAfterCompletion(
@@ -31,12 +81,5 @@ enum MainaIOSPipelineWakePolicy {
       return 0
     }
     return requestedGeneration
-  }
-
-  static func shouldSubmitPendingRequest(
-    action: MainaIOSPipelineWakeScheduleAction,
-    pendingRequestExists: Bool
-  ) -> Bool {
-    action == .ensurePendingRequest && !pendingRequestExists
   }
 }

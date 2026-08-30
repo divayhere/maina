@@ -5,36 +5,122 @@ enum MainaIOSPipelineWakePolicyTests {
   static func main() {
     let generationN = 8
     let generationNPlusOne = 9
+    let due = Int64(1_777_777_777_000)
 
     precondition(
       MainaIOSPipelineWakePolicy.scheduleAction(
         active: true,
         activeGeneration: generationN,
-        requestedGeneration: generationN
+        requestedGeneration: generationN,
+        requestedRevision: 4,
+        requestedNotBeforeAt: due,
+        pendingRequestExists: false,
+        storedGeneration: generationN,
+        storedRevision: 4,
+        storedNotBeforeAt: due
       ) == .activeOwnsGeneration
     )
-
-    let successorAction = MainaIOSPipelineWakePolicy.scheduleAction(
-      active: true,
-      activeGeneration: generationN,
-      requestedGeneration: generationNPlusOne
+    precondition(
+      MainaIOSPipelineWakePolicy.scheduleAction(
+        active: true,
+        activeGeneration: generationN,
+        requestedGeneration: generationNPlusOne,
+        requestedRevision: 5,
+        requestedNotBeforeAt: due,
+        pendingRequestExists: false,
+        storedGeneration: generationN,
+        storedRevision: 4,
+        storedNotBeforeAt: due
+      ) == .submitPendingRequest
     )
-    precondition(successorAction == .ensurePendingRequest)
+    precondition(
+      MainaIOSPipelineWakePolicy.scheduleAction(
+        active: false,
+        activeGeneration: 0,
+        requestedGeneration: generationNPlusOne,
+        requestedRevision: 5,
+        requestedNotBeforeAt: due - 60_000,
+        pendingRequestExists: true,
+        storedGeneration: generationNPlusOne,
+        storedRevision: 5,
+        storedNotBeforeAt: due
+      ) == .replacePendingRequest
+    )
+    precondition(
+      MainaIOSPipelineWakePolicy.scheduleAction(
+        active: false,
+        activeGeneration: 0,
+        requestedGeneration: generationNPlusOne,
+        requestedRevision: 5,
+        requestedNotBeforeAt: due + 60_000,
+        pendingRequestExists: true,
+        storedGeneration: generationNPlusOne,
+        storedRevision: 5,
+        storedNotBeforeAt: due
+      ) == .keepPendingRequest
+    )
 
-    // MainaIOSPipelineWake queries the one static identifier before submit.
-    // Repeated N+1 repairs therefore retain exactly one actual pending request.
-    var pendingRequestExists = false
-    var submittedRequests = 0
-    for _ in 0..<2 where successorAction == .ensurePendingRequest {
-      if MainaIOSPipelineWakePolicy.shouldSubmitPendingRequest(
-        action: successorAction,
-        pendingRequestExists: pendingRequestExists
-      ) {
-        pendingRequestExists = true
-        submittedRequests += 1
-      }
-    }
-    precondition(submittedRequests == 1)
+    precondition(
+      MainaIOSPipelineWakePolicy.shouldResetLegacyScheduler(
+        storedProtocolVersion: 1,
+        requestedProtocolVersion: 2,
+        hasUnfinishedSQLiteWork: true,
+        active: false
+      )
+    )
+    precondition(
+      !MainaIOSPipelineWakePolicy.shouldResetLegacyScheduler(
+        storedProtocolVersion: 2,
+        requestedProtocolVersion: 2,
+        hasUnfinishedSQLiteWork: true,
+        active: false
+      )
+    )
+    precondition(
+      !MainaIOSPipelineWakePolicy.shouldResetLegacyScheduler(
+        storedProtocolVersion: 1,
+        requestedProtocolVersion: 2,
+        hasUnfinishedSQLiteWork: true,
+        active: true
+      )
+    )
+
+    precondition(
+      MainaIOSPipelineWakePolicy.storedTupleMatchesPreviousOrCurrent(
+        storedGeneration: generationN,
+        storedRevision: 4,
+        storedNotBeforeAt: due,
+        requestedGeneration: generationN,
+        requestedRevision: 5,
+        requestedNotBeforeAt: due - 60_000,
+        previousRevision: 4,
+        previousNotBeforeAt: due
+      )
+    )
+    precondition(
+      MainaIOSPipelineWakePolicy.storedTupleMatchesPreviousOrCurrent(
+        storedGeneration: generationN,
+        storedRevision: 5,
+        storedNotBeforeAt: due - 60_000,
+        requestedGeneration: generationN,
+        requestedRevision: 5,
+        requestedNotBeforeAt: due - 60_000,
+        previousRevision: 4,
+        previousNotBeforeAt: due
+      )
+    )
+    precondition(
+      !MainaIOSPipelineWakePolicy.storedTupleMatchesPreviousOrCurrent(
+        storedGeneration: generationN,
+        storedRevision: 99,
+        storedNotBeforeAt: due,
+        requestedGeneration: generationN,
+        requestedRevision: 5,
+        requestedNotBeforeAt: due - 60_000,
+        previousRevision: 4,
+        previousNotBeforeAt: due
+      )
+    )
 
     precondition(
       MainaIOSPipelineWakePolicy.retainedGenerationAfterCompletion(

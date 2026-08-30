@@ -136,8 +136,28 @@ public final class MainaRecorderModule: Module {
       self.continuedProcessing.isActive(identifier: requestId, meetingId: meetingId)
         || self.pipelineWake.hasActiveExecution()
     }
-    AsyncFunction("schedulePipelineWake") { (generation: Int, requiresNetwork: Bool, promise: Promise) in
-      self.pipelineWake.schedule(generation: generation, requiresNetwork: requiresNetwork) { result in
+    AsyncFunction("schedulePipelineWake") {
+      (
+        generation: Int,
+        requiresNetwork: Bool,
+        notBeforeAt: Double,
+        scheduleRevision: Int,
+        previousWorkId: String?,
+        previousNotBeforeAt: Double?,
+        previousScheduleRevision: Int?,
+        schedulerProtocolVersion: Int,
+        promise: Promise
+      ) in
+      self.pipelineWake.schedule(
+        generation: generation,
+        requiresNetwork: requiresNetwork,
+        notBeforeAt: Int64(notBeforeAt),
+        scheduleRevision: scheduleRevision,
+        previousWorkId: previousWorkId,
+        previousNotBeforeAt: previousNotBeforeAt.map(Int64.init),
+        previousScheduleRevision: previousScheduleRevision,
+        schedulerProtocolVersion: schedulerProtocolVersion
+      ) { result in
         promise.resolve(result)
       }
     }
