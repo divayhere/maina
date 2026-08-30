@@ -17,8 +17,9 @@ vi.mock('@/services/mkc-memory-cache', () => ({ clearMkcMemoryCacheForOwner: moc
 import {
   MainaCloudApiError,
   clearMainaCloudSession,
-  formatMainaCloudPairingCode,
+  createMainaCloudPairing,
   exchangeMainaCloudPairing,
+  formatMainaCloudPairingCode,
   getMainaCloudSession,
   mainaCloudFetch,
   saveMainaCloudSession,
@@ -56,6 +57,58 @@ describe('mainaCloudSession', () => {
     expect(formatMainaCloudPairingCode(code)).toBe(code);
   });
 
+  it('accepts the deployed pairing exchange user.id contract', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      access_token: 'scoped-mobile-session',
+      expires_at: '2030-01-01T00:00:00.000Z',
+      user: { id: 'user-production-shape', email: 'owner@maina.local', display_name: 'Divay', role: 'owner' },
+    }), { status: 200 })));
+
+    const session = await exchangeMainaCloudPairing({
+      pairingId: 'mobile_pairing_test',
+      verificationCode: 'mp_aB9z_Xy-17Q',
+      expiresAt: '2030-01-01T00:00:00.000Z',
+    });
+
+    expect(session.user.userId).toBe('user-production-shape');
+    expect(await getMainaCloudSession()).toEqual(session);
+  });
+
+  it('uses a platform-neutral fallback label for either mobile client', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({
+      pairing_id: 'pairing-1',
+      verification_code: 'mp_case-sensitive',
+      expires_at: '2030-01-01T00:00:00.000Z',
+    }), { status: 201 }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    await createMainaCloudPairing('');
+
+    expect(JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body))).toEqual({
+      device_label: 'Maina mobile',
+    });
+  });
+
+  it('never exposes a transport hostname during pairing or exchange', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(
+      new TypeError('Failed to fetch https://private-backend.example'),
+    ));
+
+    await expect(createMainaCloudPairing('iPhone')).rejects.toEqual(expect.objectContaining({
+      name: 'MainaCloudApiError',
+      status: 0,
+      failureClass: 'transport_unknown',
+      message: 'Waiting for internet. Maina will continue automatically.',
+    } satisfies Partial<MainaCloudApiError>));
+    await expect(exchangeMainaCloudPairing({
+      pairingId: 'pairing-1',
+      verificationCode: 'mp_secret',
+      expiresAt: '2030-01-01T00:00:00.000Z',
+    })).rejects.toEqual(expect.not.objectContaining({
+      message: expect.stringContaining('private-backend.example'),
+    }));
+  });
+
   it('removes an expired session before any cloud call', async () => {
     await saveMainaCloudSession({ ...validSession, expiresAt: '2020-01-01T00:00:00.000Z' });
     expect(await getMainaCloudSession()).toBeNull();
@@ -69,23 +122,5 @@ describe('mainaCloudSession', () => {
       message: 'Reconnect Maina Cloud. Your recording and transcript are safe.',
     } satisfies Partial<MainaCloudApiError>));
     expect(await getMainaCloudSession()).toBeNull();
-  });
-
-  it('accepts the canonical mobile exchange user.id response and persists the session', async () => {
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({
-      access_token: 'new-scoped-token',
-      token_type: 'Bearer',
-      expires_at: '2030-01-01T00:00:00.000Z',
-      user: { id: 'user-1', email: 'owner@maina.local', display_name: 'Divay', role: 'owner' },
-    }), { status: 200 })));
-
-    const session = await exchangeMainaCloudPairing({
-      pairingId: 'mobile_pairing_1',
-      verificationCode: 'mp_one-time-code',
-      expiresAt: '2030-01-01T00:00:00.000Z',
-    });
-
-    expect(session.user.userId).toBe('user-1');
-    expect(await getMainaCloudSession()).toEqual(session);
   });
 });

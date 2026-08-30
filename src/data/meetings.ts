@@ -2206,9 +2206,18 @@ export async function resetMeetingTranscript(meetingId: string): Promise<void> {
   const db = await getDb();
   await db.withTransactionAsync(async () => {
     await db.runAsync(`DELETE FROM transcript_blocks WHERE meeting_id = ?`, [meetingId]);
+    // An explicit re-transcription owns a new ASR generation. Remove only this
+    // meeting's derived window claims so durable audio is decoded again; the
+    // recording/chunk source remains untouched.
+    await db.runAsync(`DELETE FROM local_asr_windows WHERE meeting_id = ?`, [meetingId]);
+    await db.runAsync(`DELETE FROM local_asr_run_claims WHERE meeting_id = ?`, [meetingId]);
     await db.runAsync(
       `UPDATE meetings
-       SET transcript = NULL, transcribed_segments = 0, updated_at = ?, last_error = NULL, summary_status = 'idle'
+       SET transcript = NULL, transcribed_segments = 0,
+           transcription_window_count = 0, transcription_completed_windows = 0,
+           transcription_failed_windows = 0, transcription_recovery_rounds = 0,
+           capture_heartbeat_terminal_at = NULL,
+           updated_at = ?, last_error = NULL, summary_status = 'idle'
        WHERE id = ?`,
       [Date.now(), meetingId],
     );
