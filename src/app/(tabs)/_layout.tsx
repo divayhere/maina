@@ -23,11 +23,6 @@ export default function TabsLayout() {
           title: 'To-dos',
         }}
       />
-      <Tabs.Screen name="settings" options={{ href: null }} />
-      <Tabs.Screen name="notifications" options={{ href: null }} />
-      <Tabs.Screen name="diagnostics" options={{ href: null }} />
-      <Tabs.Screen name="help" options={{ href: null }} />
-      <Tabs.Screen name="memory" options={{ href: null }} />
     </Tabs>
   );
 }

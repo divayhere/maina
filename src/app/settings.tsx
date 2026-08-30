@@ -13,7 +13,7 @@ import { useAppTheme } from '@/design/theme';
 import { space } from '@/design/tokens';
 import { getQwenAsrStatus, getRemoteControlStatus, openRemoteAccessibilitySettings } from '@/hardware/recording/foreground';
 import { describeRemoteHealth } from '@/hardware/trigger/remoteHealth';
-import type { QwenAsrStatus, RemoteControlStatus } from '../../../modules/maina-recorder/src';
+import type { QwenAsrStatus, RemoteControlStatus } from '../../modules/maina-recorder/src';
 import { DEFAULT_CONFIG, getAppConfig, saveAppConfig, type AppConfig } from '@/services/config';
 import { createMainaCloudPairing, exchangeMainaCloudPairing, formatMainaCloudPairingCode, getMainaCloudConnection, signOutMainaCloud, type MainaCloudPairingRequest, type MainaCloudSession } from '@/services/mainaCloudSession';
 import { queueEligibleMainaKnowledgeCloudSyncs } from '@/services/mainaKnowledgeCloud';

@@ -21,7 +21,7 @@ import {
 } from '@/services/remoteLog';
 import { isSentryConfigured } from '@/services/sentry';
 import { formatStorageBytes, getStorageSnapshot } from '@/services/storageBudget';
-import type { DiagnosticsStatus, NativeCaptureStatus, QwenAsrStatus } from '../../../modules/maina-recorder/src';
+import type { DiagnosticsStatus, NativeCaptureStatus, QwenAsrStatus } from '../../modules/maina-recorder/src';
 
 function Row({ label, value, warning = false }: { label: string; value: string; warning?: boolean }) {
   const { theme } = useAppTheme();
