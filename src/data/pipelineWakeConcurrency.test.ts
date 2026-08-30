@@ -5,6 +5,10 @@ const sqlite = vi.hoisted(() => {
   type Row = Record<string, number | string | null>;
   let row: Row;
   let transactionTail: Promise<unknown>;
+  let contenders = 0;
+  let maxContenders = 0;
+  let activeTransactions = 0;
+  let maxActiveTransactions = 0;
 
   const reset = () => {
     row = {
@@ -28,6 +32,10 @@ const sqlite = vi.hoisted(() => {
       updated_at: 0,
     };
     transactionTail = Promise.resolve();
+    contenders = 0;
+    maxContenders = 0;
+    activeTransactions = 0;
+    maxActiveTransactions = 0;
   };
   reset();
 
@@ -75,16 +83,43 @@ const sqlite = vi.hoisted(() => {
     // snapshot before either write began.
     getFirstAsync: vi.fn(async () => ({ ...row })),
     withExclusiveTransactionAsync: vi.fn(<T>(work: (value: typeof transaction) => Promise<T>) => {
-      const result = transactionTail.then(() => work(transaction));
+      contenders += 1;
+      maxContenders = Math.max(maxContenders, contenders);
+      const result = transactionTail.then(async () => {
+        activeTransactions += 1;
+        maxActiveTransactions = Math.max(maxActiveTransactions, activeTransactions);
+        try {
+          return await work(transaction);
+        } finally {
+          activeTransactions -= 1;
+          contenders -= 1;
+        }
+      });
       transactionTail = result.then(() => undefined, () => undefined);
       return result;
     }),
   };
 
-  return { db, reset, snapshot: () => ({ ...row }), transaction };
+  return {
+    db,
+    reset,
+    snapshot: () => ({ ...row }),
+    contention: () => ({ maxContenders, maxActiveTransactions }),
+    transaction,
+  };
 });
 
-vi.mock('@/data/db', () => ({ getDb: vi.fn(async () => sqlite.db) }));
+vi.mock('@/data/db', () => ({
+  getDb: vi.fn(async () => sqlite.db),
+  // Two callers enter concurrently. The fake BEGIN IMMEDIATE lock is acquired
+  // only inside this function, so stale reads would be visible if transaction
+  // ownership were not held until commit.
+  withDurableWakeTransaction: vi.fn(
+    <T>(work: (value: typeof sqlite.transaction) => Promise<T>) => (
+      sqlite.db.withExclusiveTransactionAsync(work)
+    ),
+  ),
+}));
 
 import { persistPipelineConnectivity } from './pipelineWake';
 import { createPipelineWakeCoordinator } from '@/services/pipelineWakeCoordinator';
@@ -95,6 +130,21 @@ beforeEach(() => {
 });
 
 describe('atomic connectivity transition', () => {
+  it('lets two contenders arrive but permits only one BEGIN IMMEDIATE owner to read at a time', async () => {
+    await Promise.all([
+      persistPipelineConnectivity(true),
+      persistPipelineConnectivity(true),
+    ]);
+
+    expect(sqlite.contention()).toEqual({ maxContenders: 2, maxActiveTransactions: 1 });
+    expect(sqlite.snapshot()).toMatchObject({
+      signal_sequence: 1,
+      requested_generation: 1,
+      connectivity_epoch: 1,
+      last_connected: 1,
+    });
+  });
+
   it('turns concurrent true callbacks into one epoch, generation and effective outbox drain', async () => {
     const repairNativeScheduling = vi.fn(async () => undefined);
     const packetJobs = new Set<string>();

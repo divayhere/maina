@@ -8,6 +8,13 @@ import { log } from '../services/logger';
 
 let dbPromise: Promise<SQLite.SQLiteDatabase> | null = null;
 
+export const DURABLE_WAKE_BUSY_TIMEOUT_MS = 5_000;
+
+type DurableWakeTransactionOptions = {
+  openConnection?: () => Promise<SQLite.SQLiteDatabase>;
+  busyTimeoutMs?: number;
+};
+
 export function getDb(): Promise<SQLite.SQLiteDatabase> {
   // Android can keep the app process alive while React Native recreates its
   // runtime. expo-sqlite SDK 57 has an open issue around reusing a cached
@@ -16,6 +23,55 @@ export function getDb(): Promise<SQLite.SQLiteDatabase> {
   // connection for the lifetime of this runtime.
   if (!dbPromise) dbPromise = SQLite.openDatabaseAsync('maina.db', { useNewConnection: true });
   return dbPromise;
+}
+
+/**
+ * Runs one short durable-wake read/modify/write transaction on the connection
+ * that actually owns the write lock. Expo's exclusive helper begins a deferred
+ * transaction on a fresh connection before callers can configure that handle;
+ * two startup writers can therefore both read and then race while upgrading to
+ * a write transaction. BEGIN IMMEDIATE acquires ownership before the first read.
+ *
+ * The finite busy timeout is SQLite's only bounded contention wait. Exhaustion
+ * remains a truthful failure for the existing startup/periodic repair paths;
+ * this helper never retries indefinitely or marks work complete after failure.
+ */
+export async function withDurableWakeTransaction<T>(
+  task: (transaction: SQLite.SQLiteDatabase) => Promise<T>,
+  options: DurableWakeTransactionOptions = {},
+): Promise<T> {
+  const timeout = Math.max(
+    0,
+    Math.trunc(options.busyTimeoutMs ?? DURABLE_WAKE_BUSY_TIMEOUT_MS),
+  );
+  const transaction = await (options.openConnection?.()
+    ?? SQLite.openDatabaseAsync('maina.db', { useNewConnection: true }));
+  let began = false;
+  let primaryFailure: unknown = null;
+
+  try {
+    await transaction.execAsync(`PRAGMA busy_timeout = ${timeout};`);
+    await transaction.execAsync('PRAGMA foreign_keys = ON;');
+    await transaction.execAsync('BEGIN IMMEDIATE;');
+    began = true;
+    const result = await task(transaction);
+    await transaction.execAsync('COMMIT;');
+    began = false;
+    return result;
+  } catch (cause) {
+    primaryFailure = cause;
+    if (began) {
+      await transaction.execAsync('ROLLBACK;').catch(() => undefined);
+      began = false;
+    }
+    throw cause;
+  } finally {
+    try {
+      await transaction.closeAsync();
+    } catch (closeFailure) {
+      if (primaryFailure == null) throw closeFailure;
+    }
+  }
 }
 
 type Migration = (db: SQLite.SQLiteDatabase) => Promise<void>;

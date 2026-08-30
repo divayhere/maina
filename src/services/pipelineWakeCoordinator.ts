@@ -23,6 +23,13 @@ export function createPipelineWakeCoordinator(
   dependencies: PipelineWakeCoordinatorDependencies,
 ) {
   let inFlight: Promise<void> | null = null;
+  let durableMutationTail: Promise<void> = Promise.resolve();
+
+  const mutateDurably = <T>(operation: () => Promise<T>): Promise<T> => {
+    const mutation = durableMutationTail.then(operation, operation);
+    durableMutationTail = mutation.then(() => undefined, () => undefined);
+    return mutation;
+  };
 
   const run = (generation: number): Promise<void> => {
     if (inFlight) return inFlight;
@@ -39,13 +46,26 @@ export function createPipelineWakeCoordinator(
     return work;
   };
 
+  const beginSignal = async (reason: SignalReason): Promise<{
+    generation: number;
+    completion: Promise<void>;
+  }> => {
+    const { generation } = await mutateDurably(
+      () => dependencies.requestSignal({ reason, scheduleNative: false }),
+    );
+    return { generation, completion: run(generation) };
+  };
+
   return {
+    beginSignal,
     async signal(reason: SignalReason): Promise<void> {
-      const { generation } = await dependencies.requestSignal({ reason, scheduleNative: false });
-      return run(generation);
+      const started = await beginSignal(reason);
+      return started.completion;
     },
     async connectivityChanged(connected: boolean): Promise<void> {
-      const { reconnectGeneration } = await dependencies.persistConnectivity(connected);
+      const { reconnectGeneration } = await mutateDurably(
+        () => dependencies.persistConnectivity(connected),
+      );
       if (reconnectGeneration == null) return;
       await dependencies.repairNativeScheduling();
       return run(reconnectGeneration);
