@@ -20,6 +20,14 @@ generation. The revised design has one durable truth and bounded ownership:
 No foreground service, Expo-private Worker, exact alarm, second outbox,
 second JS engine, new permission, backend contract, or Web change is added.
 
+The canonical MKC integration registry was audited after implementation. This
+amendment changes no repository ownership, endpoint, API contract, source key,
+connector, non-secret cloud resource ID, binding, environment/secret name,
+required scope, deployment version, provider/prompt ownership, or correction
+lineage, so no registry entry is required. The optional Documents mirror and
+its workstate were unavailable through macOS permissions; that mirror is not a
+build/deploy prerequisite and no attempt was made to overwrite it.
+
 Frozen external inputs remain:
 
 - Backend source: `6b2bcf43c2e8c4fb7c40a6cb6fb49e643099f93b`
