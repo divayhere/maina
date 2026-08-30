@@ -16,7 +16,7 @@ npm run lint
 npx expo install --check
 "$PROJECT_DIR/scripts/prebuild-android.sh"
 
-MEETING_DETAIL="$PROJECT_DIR/src/app/(tabs)/meeting/[id].tsx"
+MEETING_DETAIL="$PROJECT_DIR/src/app/meeting/[id].tsx"
 if [[ ! -f "$MEETING_DETAIL" ]]; then
   echo "Meeting detail screen not found at expected route" >&2
   exit 1
