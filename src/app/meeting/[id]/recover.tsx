@@ -35,6 +35,11 @@ export default function MeetingRecoveryScreen() {
       setBlockCount(summary.blockCount);
       setAudioSegments(segments.length);
       setAudioAvailable(segments.length > 0 || !!nextMeeting?.audioUri);
+      if (nextMeeting?.captureHeartbeatTerminalAt
+        && !['recording', 'interrupted'].includes(nextMeeting.status)
+      ) {
+        router.replace(`/meeting/${nextMeeting.id}?allowInterrupted=1`);
+      }
     })();
   }, [id]);
 
@@ -106,10 +111,10 @@ export default function MeetingRecoveryScreen() {
           {audioAvailable ? (
             <PrimaryButton
               label="Re-transcribe from saved audio"
-              onPress={() => router.push(`/meeting/${id}?allowInterrupted=1&startRepass=1`)}
+              onPress={() => router.replace(`/meeting/${id}?allowInterrupted=1&startRepass=1`)}
             />
           ) : null}
-          <SecondaryButton label="Open saved transcript" onPress={() => router.push(`/meeting/${id}?allowInterrupted=1`)} />
+          <SecondaryButton label="Open saved transcript" onPress={() => router.replace(`/meeting/${id}?allowInterrupted=1`)} />
           <SecondaryButton
             label={accepting ? 'Keeping saved result...' : 'Keep saved result'}
             disabled={accepting}

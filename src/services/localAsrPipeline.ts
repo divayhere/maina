@@ -1,7 +1,10 @@
 import { planAsrWindows, removeExactTextOverlap } from '@/core/transcription/asr/windowing';
 import { transcriptWordCount } from '@/core/transcription/transcript';
 import {
+  beginLocalAsrRun,
+  claimLocalAsrWindow,
   commitTranscriptFinalBlocks,
+  completeLocalAsrRun,
   finishRecordingSegment,
   getLastFinalTranscriptText,
   getTranscriptSummary,
@@ -20,6 +23,7 @@ import {
   transcribeWithQwen,
 } from '@/hardware/recording/foreground';
 import { log } from '@/services/logger';
+import { cleanupTerminalMeetingAudio } from '@/services/audioRetention';
 import { queueAudioArtifact } from '@/services/remoteLog';
 import { localAsrWindowKey, shouldProcessLocalAsrWindow } from '@/services/localAsrCheckpointCore';
 
@@ -132,6 +136,7 @@ async function runLocalAsrPipelineNow(input: LocalAsrPipelineInput): Promise<Loc
   }
 
   const durations = await getPcmWavDurationsMs(chunks).catch(() => ({} as Record<string, number | null>));
+  const runClaim = await beginLocalAsrRun(input.meetingId);
   const totalWindows = chunks.reduce((sum, uri) => sum + planAsrWindows(durations[uri] ?? 0).length, 0);
   await updateMeeting(input.meetingId, {
     transcriptionWindowCount: totalWindows,
@@ -172,6 +177,20 @@ async function runLocalAsrPipelineNow(input: LocalAsrPipelineInput): Promise<Loc
         const ordinal = windowCount - windows.length + windowIndex + 1;
         if (!shouldProcessLocalAsrWindow(completedWindowKeys, windowKey)) continue;
         try {
+          const windowClaim = await claimLocalAsrWindow({
+            ...runClaim,
+            windowKey,
+            chunkIndex,
+            windowIndex,
+            startedMs: window.startMs,
+            endedMs: window.endMs,
+          });
+          if (windowClaim === 'committed') {
+            completedWindowKeys.add(windowKey);
+            completedWindows = completedWindowKeys.size;
+            continue;
+          }
+          if (windowClaim === 'lost') throw new Error('Local ASR run ownership ended.');
           const result = await transcribeWithQwen(uri, window.startMs, window.endMs);
           const rawText = result.text.trim();
           const text = removeExactTextOverlap(previousText, rawText);
@@ -202,19 +221,23 @@ async function runLocalAsrPipelineNow(input: LocalAsrPipelineInput): Promise<Loc
                 windowIndex,
                 startedMs: window.startMs,
                 endedMs: window.endMs,
+                asrGeneration: runClaim.generation,
+                claimToken: runClaim.token,
               },
             });
+            if (blocks.length === 0) throw new Error('Local ASR window ownership ended before commit.');
             input.onBlocks?.(blocks);
             previousText = rawText;
           } else if (!suspicious) {
-            await markLocalAsrWindowComplete({
-              meetingId: input.meetingId,
+            const committed = await markLocalAsrWindowComplete({
+              ...runClaim,
               windowKey,
               chunkIndex,
               windowIndex,
               startedMs: window.startMs,
               endedMs: window.endMs,
             });
+            if (!committed) throw new Error('Local ASR window ownership ended before empty-window commit.');
           }
           if (!suspicious) {
             completedWindowKeys.add(windowKey);
@@ -278,6 +301,11 @@ async function runLocalAsrPipelineNow(input: LocalAsrPipelineInput): Promise<Loc
     await releaseQwenAsr().catch(() => {});
   }
 
+  const runCompleted = await completeLocalAsrRun(runClaim);
+  if (!runCompleted) {
+    throw new Error('Local ASR run ownership ended before completion.');
+  }
+
   const summary = await getTranscriptSummary(input.meetingId);
   const coverageComplete = windowCount > 0 && failedWindows === 0 && completedWindows === windowCount;
   const finalError = coverageComplete ? null : (lastError ?? 'Local transcription coverage is incomplete.');
@@ -290,8 +318,12 @@ async function runLocalAsrPipelineNow(input: LocalAsrPipelineInput): Promise<Loc
     transcriptionWindowCount: totalWindows,
     transcriptionCompletedWindows: completedWindows,
     transcriptionFailedWindows: failedWindows,
+    captureHeartbeatTerminalAt: Date.now(),
     lastError: finalError,
   });
+  if (coverageComplete) {
+    await cleanupTerminalMeetingAudio(input.meetingId);
+  }
   return {
     hasText: summary.hasText,
     wordCount: summary.wordCount,

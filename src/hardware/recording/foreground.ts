@@ -198,6 +198,10 @@ export function isRecordingForegroundServiceRunning(): boolean {
   return Platform.OS === 'android' && !!MainaRecorder?.isForegroundSessionRunning();
 }
 
+export function isNativePostProcessingServiceRunning(): boolean {
+  return Platform.OS === 'android' && !!MainaRecorder?.isNativePostProcessingServiceRunning?.();
+}
+
 export async function repairWavFiles(uris: string[]): Promise<number> {
   if (!MainaRecorder || uris.length === 0) return 0;
   return MainaRecorder.repairWavFiles(uris);

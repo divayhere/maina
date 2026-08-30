@@ -26,8 +26,7 @@ import { AppText, PrimaryButton } from '@/design/components';
 import { useAppTheme } from '@/design/theme';
 import {
   getPcmWavDurationsMs,
-  getIOSAutomationScenario,
-  getNativeCaptureStatusAsync,
+  getNativeCaptureStatus,
   armRemoteControl,
   inspectNativeCaptureDirectory,
   repairWavFiles,
@@ -46,20 +45,29 @@ import {
   installRemoteLog,
   queueAudioArtifact,
 } from '@/services/remoteLog';
-import { reconcilePendingMainaKnowledgeCloudSyncs } from '@/services/mainaKnowledgeCloud';
-import { reconcilePendingMainaKnowledgeCloudCorrections } from '@/services/mainaKnowledgeCloudCorrections';
-import { queueEligibleMeetingPackets, reconcilePendingMeetingPackets } from '@/services/meetingPacket';
+import { reconcilePendingMeetingPackets } from '@/services/meetingPacket';
 import { subscribeMeetingPipelineChanges } from '@/services/meetingPipelineSignals';
-import { exchangeMainaCloudPairing } from '@/services/mainaCloudSession';
 import { initSentry, Sentry } from '@/services/sentry';
 import { installWatchdog } from '@/services/watchdog';
 import { clearLegacyDirectAiConfiguration } from '@/services/config';
 import {
   registerBackgroundPipelineRecovery,
-  runPipelineRecoveryCycle,
+  runDurablePipelineWake,
 } from '@/services/backgroundPipeline';
+import {
+  registerNativePipelineWakeScheduler,
+  repairDurablePipelineScheduling,
+  requestDurablePipelineWake,
+} from '@/services/pipelineWakeScheduler';
+import { scheduleNativePipelineWake } from '@/hardware/pipelineWake';
+import { persistPipelineConnectivity } from '@/data/pipelineWake';
+import { createPipelineWakeCoordinator } from '@/services/pipelineWakeCoordinator';
 
 initSentry();
+
+export const unstable_settings = {
+  initialRouteName: '(tabs)',
+};
 
 function RootLayout() {
   const { theme } = useAppTheme();
@@ -113,7 +121,7 @@ function RootLayout() {
         );
         const liveMeetingIds: string[] = [];
         for (const meeting of activeMeetings) {
-          const liveCapture = await getNativeCaptureStatusAsync().catch(() => null);
+          const liveCapture = getNativeCaptureStatus();
           if (liveCapture?.meetingId === meeting.id && liveCapture.state !== 'idle' && liveCapture.state !== 'error') {
             liveMeetingIds.push(meeting.id);
             log.info('recovery', 'active native capture left untouched during UI restart', {
@@ -210,24 +218,19 @@ function RootLayout() {
 
         const deletedAudioMeetingIds = await getMeetingsWithDeletedAudio();
         await markMeetingsAudioDeleted(deletedAudioMeetingIds);
-        await enforceAudioRetentionPolicy();
+        await enforceAudioRetentionPolicy('startup');
         if (Platform.OS === 'android' && Platform.Version >= 33) {
           await PermissionsAndroid.request(PermissionsAndroid.PERMISSIONS.POST_NOTIFICATIONS).catch(() => null);
         }
-        if (Platform.OS === 'android') {
-          const microphoneReady = await requestSpeechPermissions();
-          if (microphoneReady) {
-            const control = await armRemoteControl();
-            log.info('trigger', 'remote control armed', {
-              notificationsEnabled: control.notificationsEnabled,
-              inputDevices: control.inputDevices,
-            });
-          } else {
-            log.warn('trigger', 'remote control not armed because microphone permission is missing');
-          }
-          void provisionCoreLanguages().catch((cause) => {
-            log.warn('native-speech', 'background language provisioning failed', { err: String(cause) });
+        const microphoneReady = await requestSpeechPermissions();
+        if (microphoneReady) {
+          const control = await armRemoteControl();
+          log.info('trigger', 'remote control armed', {
+            notificationsEnabled: control.notificationsEnabled,
+            inputDevices: control.inputDevices,
           });
+        } else {
+          log.warn('trigger', 'remote control not armed because microphone permission is missing');
         }
         if (resumedNativeMeetings > 0) {
           log.warn('recovery', 'native post-processing resumed from startup reconciliation', {
@@ -235,6 +238,9 @@ function RootLayout() {
             repaired,
           });
         }
+        void provisionCoreLanguages().catch((cause) => {
+          log.warn('native-speech', 'background language provisioning failed', { err: String(cause) });
+        });
         setReady(true);
       } catch (e) {
         const message = e instanceof Error ? e.message : String(e);
@@ -246,19 +252,16 @@ function RootLayout() {
 
   useEffect(() => {
     if (!ready) return;
-    let pipelineInFlight: Promise<void> | null = null;
+    const unregisterNativeScheduler = registerNativePipelineWakeScheduler(scheduleNativePipelineWake);
     let packetPollInFlight: Promise<void> | null = null;
     let packetPollTimer: ReturnType<typeof setTimeout> | null = null;
     let stopped = false;
-    const schedulePipelineSync = () => {
-      if (pipelineInFlight) return pipelineInFlight;
-      let work: Promise<void>;
-      work = runPipelineRecoveryCycle().then(() => undefined).finally(() => {
-        if (pipelineInFlight === work) pipelineInFlight = null;
-      });
-      pipelineInFlight = work;
-      return work;
-    };
+    const pipelineCoordinator = createPipelineWakeCoordinator({
+      requestSignal: requestDurablePipelineWake,
+      persistConnectivity: persistPipelineConnectivity,
+      runGeneration: (generation) => runDurablePipelineWake({ expectedGeneration: generation }),
+      repairNativeScheduling: repairDurablePipelineScheduling,
+    });
     const schedulePacketPoll = () => {
       if (stopped || packetPollInFlight) return packetPollInFlight;
       if (packetPollTimer) return Promise.resolve();
@@ -286,39 +289,40 @@ function RootLayout() {
       packetPollInFlight = work;
       return work;
     };
-    const runPipelineFromSignal = () => {
-      void schedulePipelineSync()
+    const runPipelineFromSignal = (
+      reason: 'foreground' | 'native_progress',
+    ) => {
+      void pipelineCoordinator.signal(reason)
         .then(() => schedulePacketPoll())
         .catch((cause) => {
           log.warn('meetings', 'pipeline reconciliation failed', { err: String(cause) });
         });
     };
-    runPipelineFromSignal();
+    runPipelineFromSignal('foreground');
     const subscription = AppState.addEventListener('change', (state) => {
       if (state !== 'active') return;
-      runPipelineFromSignal();
+      runPipelineFromSignal('foreground');
     });
-    let wasConnected: boolean | null = null;
     const unsubscribeNetwork = NetInfo.addEventListener((state) => {
       const connected = state.isConnected === true && state.isInternetReachable !== false;
-      if (connected && wasConnected === false) {
-        log.info('background-pipeline', 'connectivity restored; draining durable pipeline');
-        runPipelineFromSignal();
-      }
-      wasConnected = connected;
+      void pipelineCoordinator.connectivityChanged(connected)
+        .then(() => schedulePacketPoll())
+        .catch((cause) => {
+          log.warn('background-pipeline', 'connectivity state reconciliation deferred', {
+            causeName: cause instanceof Error ? cause.name : typeof cause,
+          });
+        });
     });
     const unsubscribeNative = subscribeNativePostProcessingChanges((event) => {
       log.info('recovery', 'native post-processing state changed', {
         meetingId: event.meetingId,
         state: event.state,
       });
-      runPipelineFromSignal();
+      runPipelineFromSignal('native_progress');
     });
-    const unsubscribePackets = subscribeMeetingPipelineChanges((meetingId) => {
+    const unsubscribePipeline = subscribeMeetingPipelineChanges((meetingId) => {
       log.info('summary', 'meeting pipeline state changed; waking poller', { meetingId });
-      if (packetPollTimer) {
-        clearTimeout(packetPollTimer);
-      }
+      if (packetPollTimer) clearTimeout(packetPollTimer);
       packetPollTimer = setTimeout(() => {
         packetPollTimer = null;
         void schedulePacketPoll();
@@ -329,42 +333,14 @@ function RootLayout() {
       subscription.remove();
       unsubscribeNetwork();
       unsubscribeNative();
-      unsubscribePackets();
+      unsubscribePipeline();
+      unregisterNativeScheduler();
       if (packetPollTimer) clearTimeout(packetPollTimer);
     };
   }, [ready]);
 
   useEffect(() => {
     if (!ready) return;
-    const scenario = getIOSAutomationScenario();
-    if (scenario === 'record-lifecycle' || scenario === 'record-interrupted' || scenario?.startsWith('record-soak:')) {
-      log.info('ios-qualification', 'launching recording scenario', { scenario });
-      router.push('/record');
-      return;
-    }
-    if (scenario?.startsWith('cloud-exchange|')) {
-      const [, pairingId, verificationCode] = scenario.split('|');
-      void (async () => {
-        if (!pairingId || !verificationCode) throw new Error('Cloud exchange scenario is malformed.');
-        const session = await exchangeMainaCloudPairing({
-          pairingId,
-          verificationCode,
-          expiresAt: new Date(Date.now() + 10 * 60_000).toISOString(),
-        });
-        const [notes, sources, corrections] = await Promise.all([
-          queueEligibleMeetingPackets().catch(() => 0),
-          reconcilePendingMainaKnowledgeCloudSyncs().then(() => 0).catch(() => 0),
-          reconcilePendingMainaKnowledgeCloudCorrections().then(() => 0).catch(() => 0),
-        ]);
-        log.info('ios-qualification', 'cloud pairing exchange completed', {
-          userId: session.user.userId,
-          queuedWork: notes + sources + corrections,
-        });
-      })().catch((cause) => {
-        log.error('ios-qualification', 'cloud pairing exchange failed', { err: String(cause) });
-      });
-      return;
-    }
     return installHardwareTriggerListener((event) => {
       const action = resolveRemoteAction('idle', event.command);
       log.info('trigger', 'idle remote action resolved', { command: event.command, action });
@@ -392,6 +368,7 @@ function RootLayout() {
           ) : ready ? (
             <Stack screenOptions={{ headerShown: false, contentStyle: { backgroundColor: theme.bg } }}>
               <Stack.Screen name="(tabs)" />
+              <Stack.Screen name="meeting" />
               <Stack.Screen name="record" options={{ presentation: 'modal' }} />
             </Stack>
           ) : (

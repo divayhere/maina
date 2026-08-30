@@ -3,7 +3,7 @@ import * as FileSystem from 'expo-file-system/legacy';
 import { router, useFocusEffect } from 'expo-router';
 import { useSpeechRecognitionEvent } from 'expo-speech-recognition';
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { Alert, AppState, Platform, Pressable, StyleSheet, View } from 'react-native';
+import { Alert, AppState, Pressable, StyleSheet, View } from 'react-native';
 import Animated, { Easing, useAnimatedStyle, useReducedMotion, useSharedValue, withTiming } from 'react-native-reanimated';
 
 import {
@@ -26,6 +26,7 @@ import {
   shouldPreserveTerminalNativeMeeting,
 } from '@/core/recording/nativeCaptureReconciliation';
 import { nativeCapturePresentation } from '@/core/recording/nativeCapturePresentation';
+import { openNewlySavedMeetingRoute } from '@/core/navigation/navigationPolicy';
 import {
   commitTranscriptFinalBlocks,
   createMeeting,
@@ -45,12 +46,10 @@ import { useAppTheme } from '@/design/theme';
 import { space } from '@/design/tokens';
 import {
   abortNativeCapture,
-  getNativeCaptureStatusAsync,
-  getIOSAutomationScenario,
+  getNativeCaptureStatus,
   getQwenAsrStatus,
   listAudioInputs,
   pauseNativeCapture,
-  requestNativeCapturePermission,
   resumeNativeCapture,
   setNativeCaptureState,
   startNativeCapture,
@@ -66,7 +65,6 @@ import { recordingDir, segmentIndexFromUri, segmentPath } from '@/hardware/recor
 import { registerActiveTriggerHandler } from '@/hardware/trigger/hardwareTrigger';
 import { resolveRemoteAction } from '@/hardware/trigger/remoteControl';
 import { log } from '@/services/logger';
-import { reconcilePendingNativeMeetingWork } from '@/services/meetingCaptureLifecycle';
 import { getNativeCaptureMetrics } from '@/services/nativeCaptureMetrics';
 import {
   clearDiagnosticContext,
@@ -88,8 +86,6 @@ const END_FALLBACK_MS = 2500;
 const FINAL_RESULT_TIMEOUT_MS = 6000;
 const RECENT_BLOCK_WINDOW = 24;
 const CAPTURE_ENGINE = 'native-qwen';
-
-const delay = (durationMs: number) => new Promise<void>((resolve) => setTimeout(resolve, durationMs));
 
 interface EndWaiter {
   resolve: () => void;
@@ -130,6 +126,13 @@ function describeRecordingProblem(message?: string | null): { title: string; bod
     title: 'Recording stopped early',
     body: 'Maina saved what it had. You can keep that part or delete it.',
   };
+}
+
+function openNewlySavedMeeting(meetingId: string) {
+  // A global recording is never a child of an older meeting. Dismiss to the
+  // Home root first, then push the newly saved detail so native Back returns
+  // to Home and cannot expose an unrelated meeting underneath.
+  openNewlySavedMeetingRoute(router, meetingId, (work) => requestAnimationFrame(work));
 }
 
 export default function RecordScreen() {
@@ -222,14 +225,8 @@ export default function RecordScreen() {
 
   useEffect(() => {
     if (CAPTURE_ENGINE !== 'native-qwen') return;
-    let cancelled = false;
-    let requestInFlight = false;
-    const updatePulse = async () => {
-      if (requestInFlight) return;
-      requestInFlight = true;
-      const status = await getNativeCaptureStatusAsync().catch(() => null);
-      requestInFlight = false;
-      if (cancelled) return;
+    const updatePulse = () => {
+      const status = getNativeCaptureStatus();
       const normalized = recordingLevelFromDbfs(
         status?.rmsDbfs,
         !pausedRef.current && status?.state === 'recording',
@@ -239,12 +236,9 @@ export default function RecordScreen() {
         easing: Easing.bezier(0.23, 1, 0.32, 1),
       }));
     };
-    const timer = setInterval(() => void updatePulse(), 250);
-    void updatePulse();
-    return () => {
-      cancelled = true;
-      clearInterval(timer);
-    };
+    const timer = setInterval(updatePulse, 250);
+    updatePulse();
+    return () => clearInterval(timer);
   }, [audioPulse]);
 
   const showCaptureNote = useCallback((message: string | null, durationMs = 8000) => {
@@ -261,7 +255,7 @@ export default function RecordScreen() {
     }
   }, []);
 
-  const reportNativeCaptureStall = useCallback((status: Awaited<ReturnType<typeof getNativeCaptureStatusAsync>>) => {
+  const reportNativeCaptureStall = useCallback((status: ReturnType<typeof getNativeCaptureStatus>) => {
     if (nativeStallReportedRef.current) return;
     nativeStallReportedRef.current = true;
     activeRef.current = false;
@@ -596,9 +590,7 @@ export default function RecordScreen() {
       try {
         const storageDecision = await ensureStorageBudget('record');
         if (!storageDecision.ok) throw new Error(storageDecision.message);
-        const granted = Platform.OS === 'ios'
-          ? await requestNativeCapturePermission()
-          : await requestSpeechPermissions();
+        const granted = await requestSpeechPermissions();
         if (!granted) throw new Error('Microphone permission was not granted.');
 
         const dir = recordingDir(idRef.current);
@@ -696,7 +688,7 @@ export default function RecordScreen() {
             offlineOnly: true,
             captureOwner: CAPTURE_ENGINE,
             qwenReady: !!qwenStatus?.ready,
-            nativeStatus: await getNativeCaptureStatusAsync().catch(() => null),
+            nativeStatus: getNativeCaptureStatus(),
           });
           return;
         }
@@ -768,24 +760,12 @@ export default function RecordScreen() {
   useEffect(() => {
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout> | null = null;
-    const tick = async () => {
+    const tick = () => {
       const now = Date.now();
-      const nativeStatus = CAPTURE_ENGINE === 'native-qwen'
-        ? await getNativeCaptureStatusAsync().catch(() => null)
-        : null;
-      if (cancelled) return;
-      if (
-        meetingCreatedRef.current
-        && nativeStatus
-        && ['recording', 'pausing', 'paused', 'resuming'].includes(nativeStatus.state)
-      ) {
-        // Native capture owns the durable session. React navigation and app
-        // lifecycle transitions must not leave the visible timer or controls
-        // believing an otherwise healthy native recording has stopped.
-        activeRef.current = true;
-      }
+      const nativeStatus = CAPTURE_ENGINE === 'native-qwen' ? getNativeCaptureStatus() : null;
       const nativePresentation = nativeCapturePresentation(nativeStatus?.state);
       if (nativePresentation === 'recording' && (pausedRef.current || !listeningRef.current)) {
+        if (pausedRef.current) healthRef.current.pauseEnded(now);
         pausedRef.current = false;
         listeningRef.current = true;
         setPaused(false);
@@ -795,6 +775,7 @@ export default function RecordScreen() {
           routeRecoveryActive: nativeStatus?.routeRecoveryActive,
         });
       } else if (nativePresentation === 'paused' && (!pausedRef.current || listeningRef.current)) {
+        if (!pausedRef.current) healthRef.current.pauseStarted(now);
         pausedRef.current = true;
         listeningRef.current = false;
         setPaused(true);
@@ -844,11 +825,11 @@ export default function RecordScreen() {
       }
 
       if (!cancelled) {
-        const backgroundOrPaused = appStateRef.current !== 'active' || pausedRef.current || !activeRef.current;
-        timer = setTimeout(() => void tick(), backgroundOrPaused ? 5000 : 1000);
+        const backgroundOrIdle = appStateRef.current !== 'active' || !activeRef.current;
+        timer = setTimeout(tick, backgroundOrIdle ? 5000 : 1000);
       }
     };
-    timer = setTimeout(() => void tick(), 1000);
+    timer = setTimeout(tick, 1000);
     return () => {
       cancelled = true;
       if (timer) clearTimeout(timer);
@@ -867,13 +848,13 @@ export default function RecordScreen() {
         // Reconcile presentation state from the native foreground service
         // after a locked-screen command. The service is the source of truth;
         // JS may have been paused while a clicker command completed.
-        void (async () => {
-          const status = await getNativeCaptureStatusAsync().catch(() => null);
-          if (isNativeCaptureStalled(status, Date.now())) {
-            reportNativeCaptureStall(status);
-            return;
-          }
-          if (status?.state === 'idle' && meetingCreatedRef.current) {
+        const status = getNativeCaptureStatus();
+        if (isNativeCaptureStalled(status, Date.now())) {
+          reportNativeCaptureStall(status);
+          return;
+        }
+        if (status?.state === 'idle' && meetingCreatedRef.current) {
+          void (async () => {
             const currentMeeting = await getMeeting(idRef.current).catch(() => null);
             if (currentMeeting && shouldPreserveTerminalNativeMeeting(currentMeeting)) {
               // Audio cleanup after a complete transcript is intentional. The
@@ -883,7 +864,7 @@ export default function RecordScreen() {
               setListening(false);
               setPaused(false);
               await refresh();
-              router.replace(`/meeting/${idRef.current}`);
+              openNewlySavedMeeting(idRef.current);
               return;
             }
             const metrics = dirRef.current
@@ -898,9 +879,12 @@ export default function RecordScreen() {
               finalizedChunkCount: metrics.finalizedUris.length,
             }))) {
               await updateMeeting(idRef.current, {
-                durationMs: metrics.wallDurationMs,
+                durationMs: metrics.audioDurationMs > 0 ? metrics.audioDurationMs : currentMeeting?.durationMs ?? 0,
                 audioDurationMs: metrics.audioDurationMs,
-                captureEndedAt: metrics.stoppedAt ?? Date.now(),
+                ...(metrics.stoppedAt != null ? { captureEndedAt: metrics.stoppedAt } : {}),
+                captureGapMs: metrics.captureGapMs,
+                captureDisposition: 'complete',
+                capturePauseReason: null,
                 segmentCount: metrics.finalizedUris.length,
                 restartCount: metrics.routeRestartCount,
                 status: metrics.finalizedUris.length > 0 ? 'transcribing' : 'interrupted',
@@ -908,27 +892,27 @@ export default function RecordScreen() {
               }).catch(() => {});
             }
             await refresh();
-            router.replace(`/meeting/${idRef.current}`);
-            return;
-          }
-          if (status?.state === 'paused') {
-            pausedRef.current = true;
-            setPaused(true);
-            listeningRef.current = false;
-            setListening(false);
-            log.info('record', 'native state reconciled after foreground', { nativeStatus: status });
-          } else if (status?.state === 'recording') {
-            pausedRef.current = false;
-            setPaused(false);
-            listeningRef.current = true;
-            setListening(true);
-            log.info('record', 'native state reconciled after foreground', { nativeStatus: status });
-          } else if (status?.state === 'error') {
-            const message = status.lastError || 'The phone could not continue recording.';
-            log.error('record', 'native capture reported an error after foreground', { nativeStatus: status });
-            setError(`Recording problem: ${message}. Audio saved before the issue remains available.`);
-          }
-        })();
+            openNewlySavedMeeting(idRef.current);
+          })();
+          return;
+        }
+        if (status?.state === 'paused') {
+          pausedRef.current = true;
+          setPaused(true);
+          listeningRef.current = false;
+          setListening(false);
+          log.info('record', 'native state reconciled after foreground', { nativeStatus: status });
+        } else if (status?.state === 'recording') {
+          pausedRef.current = false;
+          setPaused(false);
+          listeningRef.current = true;
+          setListening(true);
+          log.info('record', 'native state reconciled after foreground', { nativeStatus: status });
+        } else if (status?.state === 'error') {
+          const message = status.lastError || 'The phone could not continue recording.';
+          log.error('record', 'native capture reported an error after foreground', { nativeStatus: status });
+          setError(`Recording problem: ${message}. Audio saved before the issue remains available.`);
+        }
       }
     });
     return () => subscription.remove();
@@ -959,12 +943,7 @@ export default function RecordScreen() {
     });
 
   const pauseRecording = async () => {
-    const nativeStatus = CAPTURE_ENGINE === 'native-qwen'
-      ? await getNativeCaptureStatusAsync().catch(() => null)
-      : null;
-    const nativeIsRecording = nativeStatus?.state === 'recording' || nativeStatus?.state === 'resuming';
-    if ((!activeRef.current && !nativeIsRecording) || pausedRef.current || savingRef.current || controlBusyRef.current) return;
-    if (nativeIsRecording) activeRef.current = true;
+    if (!activeRef.current || pausedRef.current || savingRef.current || controlBusyRef.current) return;
     controlBusyRef.current = true;
     pausedRef.current = true;
     setPaused(true);
@@ -977,9 +956,7 @@ export default function RecordScreen() {
         // Do not await JS timer-based confirmation here. A second clicker
         // press must remain available on the lock screen while the native
         // service serialises pause/resume itself.
-        log.info('record', 'native pause requested', {
-          nativeStatus: await getNativeCaptureStatusAsync().catch(() => null),
-        });
+        log.info('record', 'native pause requested', { nativeStatus: getNativeCaptureStatus() });
       } catch (cause) {
         pausedRef.current = false;
         setPaused(false);
@@ -1014,30 +991,28 @@ export default function RecordScreen() {
   };
 
   const resumeRecording = async () => {
-    const nativeStatus = CAPTURE_ENGINE === 'native-qwen'
-      ? await getNativeCaptureStatusAsync().catch(() => null)
-      : null;
-    const nativeIsPaused = nativeStatus?.state === 'paused' || nativeStatus?.state === 'pausing';
-    if ((!activeRef.current && !nativeIsPaused) || (!pausedRef.current && !nativeIsPaused) || savingRef.current || controlBusyRef.current) return;
-    if (nativeIsPaused) {
-      activeRef.current = true;
-      pausedRef.current = true;
-    }
+    if (!activeRef.current || !pausedRef.current || savingRef.current || controlBusyRef.current) return;
     controlBusyRef.current = true;
     try {
       await artifactQueueRef.current.catch(() => {});
+      if (CAPTURE_ENGINE === 'native-qwen') {
+        await resumeNativeCapture();
+        // Resume can be denied while a call still owns the microphone. Keep
+        // the screen paused until the service proves AudioRecord ownership.
+        const nativeStatus = getNativeCaptureStatus();
+        if (nativeCapturePresentation(nativeStatus?.state) === 'recording') {
+          pausedRef.current = false;
+          setPaused(false);
+          healthRef.current.pauseEnded(Date.now());
+          listeningRef.current = true;
+          setListening(true);
+        }
+        log.info('record', 'native resume requested', { nativeStatus: getNativeCaptureStatus() });
+        return;
+      }
       pausedRef.current = false;
       setPaused(false);
       healthRef.current.pauseEnded(Date.now());
-      if (CAPTURE_ENGINE === 'native-qwen') {
-        await resumeNativeCapture();
-        listeningRef.current = true;
-        setListening(true);
-        log.info('record', 'native resume requested', {
-          nativeStatus: await getNativeCaptureStatusAsync().catch(() => null),
-        });
-        return;
-      }
       await beginSession(sessionRef.current + 1);
       log.info('record', 'meeting resumed', { index: sessionRef.current });
     } catch (cause) {
@@ -1062,7 +1037,7 @@ export default function RecordScreen() {
     if (CAPTURE_ENGINE === 'native-qwen') {
       showCaptureNote('Saving audio and starting local transcription...', 60_000);
       await stopNativeCapture().then(async () => {
-        const finalStatus = await waitForNativeCaptureState(getNativeCaptureStatusAsync, 'idle', {
+        const finalStatus = await waitForNativeCaptureState(getNativeCaptureStatus, 'idle', {
           timeoutMs: 20_000,
         });
         log.info('record', 'native capture finalization acknowledged', { nativeStatus: finalStatus });
@@ -1088,10 +1063,14 @@ export default function RecordScreen() {
           return null;
         });
         if (metrics) {
+          const persistedMeeting = await getMeeting(id);
           await updateMeeting(id, {
-            durationMs: metrics.wallDurationMs,
+            durationMs: metrics.audioDurationMs > 0 ? metrics.audioDurationMs : persistedMeeting?.durationMs ?? 0,
             audioDurationMs: metrics.audioDurationMs,
-            captureEndedAt: metrics.stoppedAt ?? Date.now(),
+            ...(metrics.stoppedAt != null ? { captureEndedAt: metrics.stoppedAt } : {}),
+            captureGapMs: metrics.captureGapMs,
+            captureDisposition: 'complete',
+            capturePauseReason: null,
             segmentCount: metrics.finalizedUris.length,
             restartCount: metrics.routeRestartCount,
             status: metrics.finalizedUris.length > 0 ? 'transcribing' : 'interrupted',
@@ -1120,19 +1099,7 @@ export default function RecordScreen() {
       });
       clearDiagnosticContext();
       await setNativeCaptureState('idle').catch(() => {});
-      router.replace(`/meeting/${id}`);
-      if (Platform.OS === 'ios' && CAPTURE_ENGINE === 'native-qwen') {
-        // iOS has no Android-style foreground post-processing service. Wake
-        // the durable queue after the WAV and meeting checkpoint are committed
-        // so a foreground save starts ASR without requiring an app relaunch.
-        // Reconciliation is idempotent and still resumes safely on relaunch.
-        void reconcilePendingNativeMeetingWork().catch((cause) => {
-          log.warn('recovery', 'iOS post-processing wake after save failed', {
-            meetingId: id,
-            err: String(cause),
-          });
-        });
-      }
+      openNewlySavedMeeting(id);
     } catch (cause) {
       const message = cause instanceof Error ? cause.message : String(cause);
       setError('Maina could not finish the database checkpoint. Your WAV files remain on the phone.');
@@ -1147,65 +1114,6 @@ export default function RecordScreen() {
     pauseRef.current = pauseRecording;
     resumeRef.current = resumeRecording;
   });
-
-  useEffect(() => {
-    const scenario = getIOSAutomationScenario();
-    if (scenario !== 'record-lifecycle' && scenario !== 'record-interrupted' && !scenario?.startsWith('record-soak:')) return;
-    let cancelled = false;
-    void (async () => {
-      try {
-        const started = await waitForNativeCaptureState(getNativeCaptureStatusAsync, 'recording', {
-          timeoutMs: 30_000,
-        });
-        if (cancelled) return;
-        log.info('ios-qualification', 'recording scenario reached recording', { scenario, nativeStatus: started });
-
-        if (scenario === 'record-interrupted') {
-          log.info('ios-qualification', 'interruption scenario waiting for external process termination');
-          return;
-        }
-
-        if (scenario?.startsWith('record-soak:')) {
-          const requestedSeconds = Number(scenario.slice('record-soak:'.length));
-          const durationMs = Math.max(15_000, Math.min(3 * 60 * 60_000, Number.isFinite(requestedSeconds) ? requestedSeconds * 1_000 : 60_000));
-          await delay(durationMs);
-          if (cancelled) return;
-          await stopAndSaveRef.current();
-          log.info('ios-qualification', 'recording soak requested stop and save', { durationMs });
-          return;
-        }
-
-        await delay(6_000);
-        if (cancelled) return;
-
-        await pauseRef.current();
-        const pausedStatus = await waitForNativeCaptureState(getNativeCaptureStatusAsync, 'paused', {
-          timeoutMs: 15_000,
-        });
-        if (cancelled) return;
-        log.info('ios-qualification', 'record lifecycle reached paused', { nativeStatus: pausedStatus });
-        await delay(3_000);
-        if (cancelled) return;
-
-        await resumeRef.current();
-        const resumed = await waitForNativeCaptureState(getNativeCaptureStatusAsync, 'recording', {
-          timeoutMs: 15_000,
-        });
-        if (cancelled) return;
-        log.info('ios-qualification', 'record lifecycle reached resumed recording', { nativeStatus: resumed });
-        await delay(7_000);
-        if (cancelled) return;
-
-        await stopAndSaveRef.current();
-        log.info('ios-qualification', 'record lifecycle requested stop and save');
-      } catch (cause) {
-        log.error('ios-qualification', 'record lifecycle scenario failed', { err: String(cause) });
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, []);
   useFocusEffect(
     useCallback(() => registerActiveTriggerHandler((event) => {
       const state = savingRef.current
@@ -1230,7 +1138,7 @@ export default function RecordScreen() {
     if (restartTimerRef.current) clearTimeout(restartTimerRef.current);
     if (CAPTURE_ENGINE === 'native-qwen') {
       await abortNativeCapture()
-        .then(() => waitForNativeCaptureState(getNativeCaptureStatusAsync, 'idle', { timeoutMs: 20_000 }))
+        .then(() => waitForNativeCaptureState(getNativeCaptureStatus, 'idle', { timeoutMs: 20_000 }))
         .catch((cause) => {
           log.warn('record', 'native discard finalization was not acknowledged', { err: String(cause) });
         });

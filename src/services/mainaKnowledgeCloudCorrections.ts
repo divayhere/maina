@@ -13,6 +13,8 @@ import {
 import { getMainaKnowledgeCloudSettings } from '@/services/config';
 import { log } from '@/services/logger';
 import { clearMainaCloudSession } from '@/services/mainaCloudSession';
+import { safeCloudFailureMessage } from '@/core/pipeline/cloudFailure';
+import { armPipelineNetworkRecovery } from '@/services/pipelineWakeScheduler';
 import {
   buildMainaKnowledgeCloudCorrectionPackage,
   packetCorrectionSnapshots,
@@ -48,6 +50,8 @@ async function syncCorrection(correctionKey: string): Promise<void> {
   if (correction.syncStatus === 'sync_failed_auth') return;
   if (correction.syncStatus === 'sync_failed_conflict') return;
   if (correction.syncStatus === 'sync_failed_validation') return;
+
+  await armPipelineNetworkRecovery();
 
   await updateKnowledgeCloudCorrection(correctionKey, {
     syncStatus: 'syncing',
@@ -99,20 +103,24 @@ async function syncCorrection(correctionKey: string): Promise<void> {
             ? 'sync_blocked_budget'
             : 'sync_failed_retryable';
     if (syncStatus === 'sync_failed_auth') await clearMainaCloudSession();
+    const safeError = syncStatus === 'sync_failed_auth'
+      ? safeCloudFailureMessage('auth')
+      : syncStatus === 'sync_failed_retryable' || syncStatus === 'sync_blocked_budget'
+        ? safeCloudFailureMessage('backend_retryable')
+        : safeCloudFailureMessage('backend_terminal');
     await updateKnowledgeCloudCorrection(correctionKey, {
       syncStatus,
-      error: result.message,
+      error: safeError,
     });
   } catch (cause) {
-    const message = cause instanceof Error ? cause.message : String(cause);
     await updateKnowledgeCloudCorrection(correctionKey, {
       syncStatus: 'sync_failed_retryable',
-      error: message,
+      error: safeCloudFailureMessage('transport_unknown'),
     });
     log.warn('maina-cloud-correction', 'meeting knowledge correction sync failed', {
       meetingId: correction.meetingId,
       correctionKey,
-      err: message,
+      causeName: cause instanceof Error ? cause.name : typeof cause,
     });
   }
 }

@@ -18,7 +18,13 @@ export function cloudRetryDue(nextRetryAt: number | null | undefined, now = Date
 }
 
 export function isRetryableCloudFailure(error: unknown): boolean {
-  const cloudError = error as { name?: unknown; status?: unknown } | null;
+  const cloudError = error as { name?: unknown; status?: unknown; failureClass?: unknown } | null;
+  if (typeof cloudError?.failureClass === 'string') {
+    return [
+      'offline', 'dns', 'tls', 'socket', 'timeout', 'transport_unknown',
+      'http_retryable', 'backend_retryable',
+    ].includes(cloudError.failureClass);
+  }
   if (typeof cloudError?.status === 'number') {
     return cloudError.status === 0
       || cloudError.status === 408
@@ -26,9 +32,9 @@ export function isRetryableCloudFailure(error: unknown): boolean {
       || cloudError.status === 429
       || cloudError.status >= 500;
   }
-  // Parsing or malformed-success errors are safe to retry because meeting
-  // packet creation is idempotent by its stable source and packet version.
-  return true;
+  // Unknown failures fail closed: do not bypass auth/provider/validation
+  // backoff merely because a runtime omitted structured transport fields.
+  return false;
 }
 
 export function nextCloudRetry(input: { attemptCount: number; now?: number }) {

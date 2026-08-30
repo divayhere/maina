@@ -71,10 +71,9 @@ export interface NativeCaptureStatus {
   routedDeviceName?: string | null;
   lastRouteChangeElapsedMs?: number | null;
   captureGapMs?: number;
+  pauseReason?: 'manual' | 'communication' | string | null;
   rmsDbfs?: number;
   peakDbfs?: number;
-  freeStorageBytes?: number;
-  storageReserveBytes?: number;
 }
 
 export interface NativeCaptureDirectoryInspection {
@@ -112,6 +111,7 @@ export interface NativePostProcessingResult {
   windowCount: number;
   completedWindows: number;
   failedWindows: number;
+  recoveryRounds: number;
   routeRestartCount: number;
   captureGapMs: number;
   lastError?: string | null;
@@ -268,8 +268,16 @@ interface MainaRecorderNativeModule {
   stopNativeCapture(): Promise<{ requested: boolean }>;
   abortNativeCapture(): Promise<{ requested: boolean }>;
   startNativePostProcessing(request: NativePostProcessingRequest): Promise<{ requested: boolean }>;
+  isNativePostProcessingServiceRunning?(): boolean;
   readNativePostProcessingResult(meetingId: string): Promise<NativePostProcessingResult | null>;
   acknowledgeNativePostProcessingResult(meetingId: string, runId: string): Promise<{ acknowledged: boolean }>;
+  schedulePipelineWake(generation: number, requiresNetwork: boolean): Promise<{
+    scheduled: boolean;
+    workId?: string | null;
+    errorCode?: string | null;
+  }>;
+  completePipelineWake(attemptToken: string, succeeded: boolean): Promise<{ completed: boolean }>;
+  isPipelineWakeAttemptActive(attemptToken: string): Promise<{ active: boolean }>;
   getNativeCaptureStatus(): NativeCaptureStatus;
   getNativeCaptureStatusAsync?(): Promise<NativeCaptureStatus>;
   inspectNativeCaptureDirectory(directory: string, recoverPartials: boolean): Promise<NativeCaptureDirectoryInspection>;
@@ -277,7 +285,12 @@ interface MainaRecorderNativeModule {
   getQwenAsrStatus(): Promise<QwenAsrStatus>;
   transcribeWithQwen(uri: string, startMs: number, endMs: number): Promise<QwenAsrResult>;
   releaseQwenAsr(): Promise<void>;
-  beginIOSContinuedProcessing?(jobId: string, title: string, subtitle: string, totalUnits: number): { started: boolean; mode: string; reason?: string; requestId?: string };
+  beginIOSContinuedProcessing?(jobId: string, title: string, subtitle: string, totalUnits: number): {
+    started: boolean;
+    mode: string;
+    reason?: string;
+    requestId?: string;
+  };
   updateIOSContinuedProcessing?(completedUnits: number, totalUnits: number, subtitle?: string | null): void;
   finishIOSContinuedProcessing?(success: boolean): void;
   getRemoteControlStatus(): Promise<RemoteControlStatus>;

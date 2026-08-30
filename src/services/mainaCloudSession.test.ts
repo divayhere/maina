@@ -65,7 +65,8 @@ describe('mainaCloudSession', () => {
     await saveMainaCloudSession(validSession);
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({ error: { code: 'auth_invalid', message: 'expired' } }), { status: 401 })));
     await expect(mainaCloudFetch('/v1/auth/me')).rejects.toEqual(expect.objectContaining({
-      name: 'MainaCloudApiError', status: 401, code: 'auth_invalid', message: 'expired',
+      name: 'MainaCloudApiError', status: 401, code: 'auth_invalid', failureClass: 'auth',
+      message: 'Reconnect Maina Cloud. Your recording and transcript are safe.',
     } satisfies Partial<MainaCloudApiError>));
     expect(await getMainaCloudSession()).toBeNull();
   });

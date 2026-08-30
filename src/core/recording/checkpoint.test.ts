@@ -34,24 +34,21 @@ describe('recording checkpoint ownership', () => {
   it('repairs finalized meetings whose duration grew until app reopen', () => {
     expect(completedCaptureDurationRepair({
       status: 'summarized',
-      startedAt: 100_000,
-      captureEndedAt: 136_000,
       durationMs: 262_000,
+      audioDurationMs: 36_000,
     })).toBe(36_000);
   });
 
   it('does not rewrite live or already accurate durations', () => {
     expect(completedCaptureDurationRepair({
       status: 'recording',
-      startedAt: 100_000,
-      captureEndedAt: 136_000,
       durationMs: 262_000,
+      audioDurationMs: 36_000,
     })).toBeNull();
     expect(completedCaptureDurationRepair({
       status: 'transcribed',
-      startedAt: 100_000,
-      captureEndedAt: 136_000,
       durationMs: 35_500,
+      audioDurationMs: 36_000,
     })).toBeNull();
   });
 });

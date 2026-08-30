@@ -1,5 +1,10 @@
 import { describe, expect, it, vi } from 'vitest';
-import { executePipelineRecovery, type PipelineRecoveryDependencies } from './backgroundPipelineCore';
+
+import {
+  createCoalescedPipelineRunner,
+  executePipelineRecovery,
+  type PipelineRecoveryDependencies,
+} from './backgroundPipelineCore';
 
 function dependencies(events: string[]): PipelineRecoveryDependencies {
   const step = <T>(name: string, result: T) => vi.fn(async () => { events.push(name); return result; });
@@ -28,17 +33,56 @@ describe('unattended pipeline recovery', () => {
     ]);
     expect(result).toEqual({ nativeMeetings: 1, pendingPackets: 2, eligiblePackets: 3, repairedReferences: 2 });
   });
-  it('does not advance when local ASR recovery fails', async () => {
+
+  it('does not advance to notes when local ASR recovery fails', async () => {
     const events: string[] = [];
     const deps = dependencies(events);
-    deps.reconcilePendingNativeMeetingWork = vi.fn(async () => { throw new Error('deferred'); });
+    deps.reconcilePendingNativeMeetingWork = vi.fn(async () => {
+      events.push('asr-failed');
+      throw new Error('deferred');
+    });
     await expect(executePipelineRecovery(deps)).rejects.toThrow('deferred');
     expect(events).not.toContain('notes-poll');
     expect(events).not.toContain('source-sync');
   });
-  it('tolerates diagnostics being offline', async () => {
-    const deps = dependencies([]);
+
+  it('does not fail useful recovery merely because diagnostics are unavailable', async () => {
+    const events: string[] = [];
+    const deps = dependencies(events);
     deps.flushDiagnostics = vi.fn(async () => { throw new Error('offline'); });
     await expect(executePipelineRecovery(deps)).resolves.toMatchObject({ nativeMeetings: 1 });
+  });
+
+  it('coalesces concurrent signals into one effective outbox drain', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const execute = vi.fn(async () => {
+      await gate;
+      return { completed: true };
+    });
+    const run = createCoalescedPipelineRunner(execute);
+    const first = run();
+    const second = run();
+    expect(first).toBe(second);
+    expect(execute).toHaveBeenCalledTimes(1);
+    release();
+    await expect(Promise.all([first, second])).resolves.toEqual([
+      { completed: true },
+      { completed: true },
+    ]);
+  });
+
+  it('checks ownership between every recovery stage', async () => {
+    const events: string[] = [];
+    const deps = dependencies(events);
+    let checkpoints = 0;
+    deps.assertActive = vi.fn(async () => {
+      checkpoints += 1;
+      if (checkpoints === 6) throw new Error('lease-ended');
+    });
+    await expect(executePipelineRecovery(deps)).rejects.toThrow('lease-ended');
+    expect(events).toContain('asr');
+    expect(events).not.toContain('notes-eligible');
+    expect(events).not.toContain('source-sync');
   });
 });

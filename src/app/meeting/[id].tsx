@@ -5,9 +5,10 @@ import { FlashList } from '@shopify/flash-list';
 import { router, useFocusEffect, useLocalSearchParams } from 'expo-router';
 import { useSpeechRecognitionEvent } from 'expo-speech-recognition';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ActivityIndicator, Alert, AppState, KeyboardAvoidingView, Modal, Platform, Pressable, StyleSheet, TextInput, View } from 'react-native';
+import { ActivityIndicator, Alert, AppState, KeyboardAvoidingView, Modal, Platform, Pressable, RefreshControl, StyleSheet, TextInput, View } from 'react-native';
 
 import { MEETING_TITLE_MAX_LENGTH, normalizeMeetingTitle } from '@/core/meeting/meetingWorkspace';
+import { safeCloudFailureMessage, safePersistedCloudMessage } from '@/core/pipeline/cloudFailure';
 import { chooseRecognitionLanguage, startFileSession, stopSession, supportsOnDevice } from '@/core/transcription/nativeSpeech';
 import { appendWithoutOverlap } from '@/core/transcription/transcript';
 import {
@@ -47,6 +48,7 @@ import {
 import { maybeQueueMeetingPacket, runMeetingPacketGeneration } from '@/services/meetingPacket';
 import { subscribeMeetingPipelineChanges } from '@/services/meetingPipelineSignals';
 import { describeMeetingPresentation } from '@/services/meetingPresentation';
+import { formatCoveragePercent, transcriptCoverage } from '@/services/transcriptCoverage';
 import { log } from '@/services/logger';
 import { ensureStorageBudget } from '@/services/storageBudget';
 import { retryNativeMeetingTranscription } from '@/services/meetingCaptureLifecycle';
@@ -59,11 +61,12 @@ const PAGE_SIZE = 60;
 
 type MeetingTab = 'notes' | 'todos' | 'transcript';
 
-function formatMeetingLength(meeting: Pick<Meeting, 'durationMs' | 'audioDurationMs'>): string {
+function formatMeetingLength(meeting: Pick<Meeting, 'durationMs' | 'audioDurationMs' | 'captureGapMs'>): string {
   const elapsedMs = Math.max(0, meeting.durationMs);
   const recordedMs = Math.max(0, meeting.audioDurationMs ?? 0);
-  if (recordedMs > 0 && Math.abs(elapsedMs - recordedMs) >= 5_000) {
-    return `${formatDuration(recordedMs)} recorded · ${formatDuration(elapsedMs)} elapsed`;
+  const gapMs = Math.max(0, meeting.captureGapMs ?? 0);
+  if (recordedMs > 0 && gapMs >= 1_000) {
+    return `${formatDuration(recordedMs)} recorded · ${formatDuration(gapMs)} interrupted`;
   }
   return formatDuration(recordedMs || elapsedMs);
 }
@@ -165,8 +168,7 @@ function TabChip({
         color={active ? theme.primaryForeground : theme.textSoft}
         numberOfLines={1}
         adjustsFontSizeToFit
-        minimumFontScale={0.85}
-        style={{ flexShrink: 1, minWidth: 0, textAlign: 'center' }}
+        minimumFontScale={0.86}
       >
         {label}
       </AppText>
@@ -230,9 +232,10 @@ function TodoPreviewRow({
 }
 
 function formatPacketError(message?: string | null): string {
-  const normalized = message?.trim() ?? '';
-  if (!normalized) return 'Notes are temporarily unavailable. Maina will retry safely.';
-  return normalized;
+  return safePersistedCloudMessage(
+    message,
+    safeCloudFailureMessage('protocol'),
+  );
 }
 
 export default function MeetingDetail() {
@@ -265,6 +268,7 @@ export default function MeetingDetail() {
   const [titleEditorOpen, setTitleEditorOpen] = useState(false);
   const [titleDraft, setTitleDraft] = useState('');
   const [savingTitle, setSavingTitle] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
 
   const repassRef = useRef(false);
   const repassChainRef = useRef<Promise<void>>(Promise.resolve());
@@ -336,52 +340,61 @@ export default function MeetingDetail() {
     setTranscriptSummary(summary);
   }, []);
 
-  const load = useCallback(() => {
+  const load = useCallback(async () => {
     if (!id) return;
-    getMeeting(id).then(async (initialMeeting) => {
-      let m = initialMeeting;
-      if (m?.status === 'transcribed' && m.summaryStatus === 'idle') {
-        await maybeQueueMeetingPacket(m.id).catch((cause) => {
-          log.warn('summary', 'meeting detail auto-summary handoff failed', {
-            meetingId: m?.id,
-            err: String(cause),
-          });
-        });
-        m = await getMeeting(id);
-      }
-      setMeeting(m);
-      meetingRef.current = m;
-      if (!m) return;
-      if (m.status === 'interrupted' && allowInterrupted !== '1') {
-        router.replace(`/meeting/${m.id}/recover`);
-        return;
-      }
-      await Promise.all([
-        loadTranscript(m.id),
-        listMeetingTodos(m.id).then(setTodos),
-        listKnowledgeCloudCorrections(m.id).then(setCloudCorrections),
-      ]);
-      if (!m.audioUri || m.segmentCount === 0) {
-        setAudioAvailable(false);
-        return;
-      }
-      const rows = await listRecordingSegments(m.id);
-      const uris = rows.length > 0
-        ? rows.map((segment) => segment.audioUri)
-        : Array.from({ length: m.segmentCount }, (_, index) => segmentPath(m.audioUri!, index));
-      // Native capture files live in Maina's private app storage. Expo's file
-      // API cannot reliably stat those URIs, even though the native recorder
-      // can still read and reprocess them. Prefer the native inspector so a
-      // recoverable transcript always exposes its recovery action.
-      const nativeInspection = await inspectNativeCaptureDirectory(m.audioUri, true).catch(() => null);
-      if (nativeInspection) {
-        setAudioAvailable(nativeInspection.finalizedUris.length > 0);
-        return;
-      }
-      const checks = await Promise.all(uris.map((uri) => FileSystem.getInfoAsync(uri).catch(() => ({ exists: false }))));
-      setAudioAvailable(checks.length > 0 && checks.every((info) => info.exists));
-    });
+    const m = await getMeeting(id);
+    setMeeting(m);
+    meetingRef.current = m;
+    if (!m) return;
+    if (m.status === 'interrupted' && allowInterrupted !== '1') {
+      router.replace(`/meeting/${m.id}/recover`);
+      return;
+    }
+    await Promise.all([
+      loadTranscript(m.id),
+      listMeetingTodos(m.id).then(setTodos),
+      listKnowledgeCloudCorrections(m.id).then(setCloudCorrections),
+    ]);
+    if (!m.audioUri || m.segmentCount === 0) {
+      setAudioAvailable(false);
+      return;
+    }
+    const rows = await listRecordingSegments(m.id);
+    const uris = rows.length > 0
+      ? rows.map((segment) => segment.audioUri)
+      : Array.from({ length: m.segmentCount }, (_, index) => segmentPath(m.audioUri!, index));
+    // Native capture files live in Maina's private app storage. Expo's file
+    // API cannot reliably stat those URIs, even though the native recorder
+    // can still read and reprocess them. Prefer the native inspector so a
+    // recoverable transcript always exposes its recovery action.
+    const nativeInspection = await inspectNativeCaptureDirectory(m.audioUri, false).catch(() => null);
+    if (nativeInspection) {
+      setAudioAvailable(nativeInspection.finalizedUris.length > 0);
+      return;
+    }
+    const checks = await Promise.all(uris.map((uri) => FileSystem.getInfoAsync(uri).catch(() => ({ exists: false }))));
+    setAudioAvailable(checks.length > 0 && checks.every((info) => info.exists));
   }, [allowInterrupted, id, loadTranscript]);
+
+  const refreshLocal = useCallback(async () => {
+    setRefreshing(true);
+    try {
+      // A gesture reloads canonical local projections only. It never starts
+      // ASR, creates/polls a cloud job, resets backoff, or repairs audio.
+      await Promise.all([load(), refresh()]);
+    } finally {
+      setRefreshing(false);
+    }
+  }, [load, refresh]);
+
+  const localRefreshControl = (
+    <RefreshControl
+      refreshing={refreshing}
+      onRefresh={() => void refreshLocal()}
+      tintColor={theme.primary}
+      colors={[theme.primary]}
+    />
+  );
 
   useFocusEffect(useCallback(() => { load(); }, [load]));
 
@@ -400,24 +413,6 @@ export default function MeetingDetail() {
     load();
     refresh();
   }), [id, load, refresh]);
-
-  useEffect(() => {
-    if (!meeting) return;
-    const packetPending = meeting.status === 'transcribing'
-      || meeting.summaryStatus === 'queued'
-      || meeting.summaryStatus === 'running';
-    const sourceSyncPending = meeting.knowledgeCloudSyncStatus === 'sync_queued'
-      || meeting.knowledgeCloudSyncStatus === 'syncing';
-    const correctionSyncPending = cloudCorrections.some(
-      (correction) => correction.syncStatus === 'sync_queued' || correction.syncStatus === 'syncing',
-    );
-    if (!packetPending && !sourceSyncPending && !correctionSyncPending) return;
-    const timer = setTimeout(() => {
-      load();
-      refresh();
-    }, 1500);
-    return () => clearTimeout(timer);
-  }, [cloudCorrections, load, meeting, refresh]);
 
   const loadMore = useCallback(async () => {
     if (!id || !hasMore || loadingMore) return;
@@ -706,7 +701,7 @@ export default function MeetingDetail() {
           }
           await deleteMeeting(id);
           await refresh();
-          router.back();
+          router.dismissTo('/');
         },
       },
     ]);
@@ -777,10 +772,22 @@ export default function MeetingDetail() {
   };
 
   const titleEditor = (
-    <Modal animationType="fade" transparent visible={titleEditorOpen} onRequestClose={() => setTitleEditorOpen(false)}>
-      <KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : 'height'} style={styles.modalKeyboard}>
+    <Modal
+      animationType="fade"
+      transparent
+      visible={titleEditorOpen}
+      onRequestClose={() => setTitleEditorOpen(false)}
+    >
+      <KeyboardAvoidingView
+        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+        style={styles.modalKeyboard}
+      >
         <Pressable style={[styles.modalScrim, { backgroundColor: theme.overlay }]} onPress={() => setTitleEditorOpen(false)}>
-          <Pressable accessibilityRole="none" onPress={(event) => event.stopPropagation()} style={[styles.titleEditor, { backgroundColor: theme.surface, borderColor: theme.border }]}>
+          <Pressable
+            accessibilityRole="none"
+            onPress={(event) => event.stopPropagation()}
+            style={[styles.titleEditor, { backgroundColor: theme.surface, borderColor: theme.border }]}
+          >
             <View style={{ gap: 4 }}>
               <AppText variant="title">Rename meeting</AppText>
               <AppText variant="meta" muted>Use a short title you can find later.</AppText>
@@ -799,10 +806,21 @@ export default function MeetingDetail() {
               style={[styles.titleInput, { backgroundColor: theme.bg, borderColor: theme.border, color: theme.text }]}
             />
             <View style={styles.modalActions}>
-              <Pressable accessibilityRole="button" accessibilityLabel="Cancel rename" onPress={() => setTitleEditorOpen(false)} style={styles.modalButton}>
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="Cancel rename"
+                onPress={() => setTitleEditorOpen(false)}
+                style={styles.modalButton}
+              >
                 <AppText variant="bodyStrong" color={theme.textSoft}>Cancel</AppText>
               </Pressable>
-              <Pressable accessibilityRole="button" accessibilityLabel="Save meeting title" disabled={savingTitle} onPress={() => void saveTitle()} style={[styles.modalButton, { backgroundColor: theme.primary, opacity: savingTitle ? 0.6 : 1 }]}>
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="Save meeting title"
+                disabled={savingTitle}
+                onPress={() => void saveTitle()}
+                style={[styles.modalButton, { backgroundColor: theme.primary, opacity: savingTitle ? 0.6 : 1 }]}
+              >
                 <AppText variant="bodyStrong" color={theme.primaryForeground}>{savingTitle ? 'Saving…' : 'Save'}</AppText>
               </Pressable>
             </View>
@@ -837,7 +855,13 @@ export default function MeetingDetail() {
             {meeting.language ? <Chip label={meeting.language} tone="muted" /> : null}
           </View>
           {hasCompleteTranscript ? (
-            <Pressable accessibilityRole="button" accessibilityLabel="Rewrite notes" disabled={packetBusy || meeting.summaryStatus === 'running'} onPress={() => void generatePacket()} style={({ pressed }) => [styles.rewriteAction, { opacity: pressed ? 0.7 : 1 }]}>
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel="Rewrite notes"
+              disabled={packetBusy || meeting.summaryStatus === 'running'}
+              onPress={() => void generatePacket()}
+              style={({ pressed }) => [styles.rewriteAction, { opacity: pressed ? 0.7 : 1 }]}
+            >
               <Ionicons name="refresh-outline" size={19} color={theme.primary} />
               <AppText variant="bodyStrong" color={theme.primary}>Rewrite notes</AppText>
             </Pressable>
@@ -870,7 +894,10 @@ export default function MeetingDetail() {
   if (tab === 'transcript') {
     const hasText = transcriptSummary?.hasText ?? false;
     const hasAudio = !!meeting?.audioUri && meeting.segmentCount > 0 && audioAvailable;
-    const transcriptionActive = presentation?.phase === 'transcribing';
+    const transcriptionActive = presentation?.phase === 'transcribing'
+      || (presentation?.phase === 'transcript_partial' && presentation.working);
+    const coverage = meeting ? transcriptCoverage(meeting) : null;
+    const coverageLabel = formatCoveragePercent(coverage?.ratio ?? null);
     return (
       <>
         <KeyboardAvoidingView
@@ -886,6 +913,7 @@ export default function MeetingDetail() {
           onEndReached={loadMore}
           onEndReachedThreshold={0.4}
           drawDistance={400}
+          refreshControl={localRefreshControl}
           ListHeaderComponent={
             <View>
               {header}
@@ -894,8 +922,18 @@ export default function MeetingDetail() {
                   <View style={styles.sectionHeader}>
                     <SectionLabel>Transcript</SectionLabel>
                     <View style={styles.inlineIconActions}>
-                      <MeetingIconButton icon="copy-outline" label={copyingTranscript ? 'Copying transcript' : 'Copy transcript'} onPress={() => void copyTranscript()} disabled={copyingTranscript || !hasText} />
-                      <MeetingIconButton icon="share-outline" label={sharing ? 'Preparing meeting share' : 'Share meeting'} onPress={() => void shareMeeting()} disabled={sharing || !hasText} />
+                      <MeetingIconButton
+                        icon="copy-outline"
+                        label={copyingTranscript ? 'Copying transcript' : 'Copy transcript'}
+                        onPress={() => void copyTranscript()}
+                        disabled={copyingTranscript || !hasText}
+                      />
+                      <MeetingIconButton
+                        icon="share-outline"
+                        label={sharing ? 'Preparing meeting share' : 'Share meeting'}
+                        onPress={() => void shareMeeting()}
+                        disabled={sharing || !hasText}
+                      />
                     </View>
                   </View>
                   {transcriptionActive && !repassing ? (
@@ -944,7 +982,7 @@ export default function MeetingDetail() {
                     />
                     <AppText variant="meta" muted>
                       {hasText
-                        ? `${transcriptSummary?.blockCount ?? blocks.length} transcript blocks`
+                        ? `${transcriptSummary?.blockCount ?? blocks.length} transcript blocks${meeting?.status === 'transcript_partial' && coverageLabel ? ` · ${coverageLabel} audio coverage` : ''}`
                         : transcriptionActive
                           ? 'Transcription in progress'
                           : 'No transcript'}
@@ -979,26 +1017,45 @@ export default function MeetingDetail() {
   if (tab === 'todos') {
     return (
       <>
-        <KeyboardAvoidingView style={{ flex: 1, backgroundColor: theme.bg }} behavior={Platform.OS === 'ios' ? 'padding' : 'height'} keyboardVerticalOffset={topBarHeight}>
+        <KeyboardAvoidingView
+          style={{ flex: 1, backgroundColor: theme.bg }}
+          behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+          keyboardVerticalOffset={topBarHeight}
+        >
           {topBar}
           <FlashList
             data={['todos']}
             keyExtractor={(item) => item}
             ListHeaderComponent={header}
+            refreshControl={localRefreshControl}
             contentContainerStyle={{ paddingBottom: contentBottomPadding, paddingHorizontal: 16 }}
             renderItem={() => (
               <Card style={{ gap: space.lg, marginBottom: space.lg }}>
                 <View style={styles.sectionHeader}>
                   <AppText variant="title">To-dos</AppText>
-                  <ActionLink label="Open all" color={theme.primary} onPress={() => router.push('/todos')} />
+                  <ActionLink label="Open all" color={theme.primary} onPress={() => router.dismissTo('/todos')} />
                 </View>
                 <View style={{ gap: space.md }}>
                   {todos.length ? todos.map((todo) => (
-                    <TodoPreviewRow key={todo.id} todo={todo} onToggle={(value) => void updateTodoDone(todo.id, value).then(() => load()).then(() => refresh())} onDelete={() => void deleteTodo(todo.id).then(() => load()).then(() => refresh())} />
+                    <TodoPreviewRow
+                      key={todo.id}
+                      todo={todo}
+                      onToggle={(value) => void updateTodoDone(todo.id, value).then(() => load()).then(() => refresh())}
+                      onDelete={() => void deleteTodo(todo.id).then(() => load()).then(() => refresh())}
+                    />
                   )) : <AppText variant="body" muted>No to-dos yet.</AppText>}
                 </View>
                 <View style={{ gap: space.sm }}>
-                  <TextInput accessibilityLabel="New to-do" value={manualTodo} onChangeText={setManualTodo} placeholder="Add your own next step" placeholderTextColor={theme.textSoft} returnKeyType="done" onSubmitEditing={() => void addManualTodo()} style={[styles.todoInput, { borderColor: theme.border, backgroundColor: theme.surface, color: theme.text }]} />
+                  <TextInput
+                    accessibilityLabel="New to-do"
+                    value={manualTodo}
+                    onChangeText={setManualTodo}
+                    placeholder="Add your own next step"
+                    placeholderTextColor={theme.textSoft}
+                    returnKeyType="done"
+                    onSubmitEditing={() => void addManualTodo()}
+                    style={[styles.todoInput, { borderColor: theme.border, backgroundColor: theme.surface, color: theme.text }]}
+                  />
                   <PrimaryButton label="Add to-do" onPress={() => void addManualTodo()} />
                 </View>
               </Card>
@@ -1019,12 +1076,17 @@ export default function MeetingDetail() {
 
   return (
     <>
-      <KeyboardAvoidingView style={{ flex: 1, backgroundColor: theme.bg }} behavior={Platform.OS === 'ios' ? 'padding' : 'height'} keyboardVerticalOffset={topBarHeight}>
+      <KeyboardAvoidingView
+        style={{ flex: 1, backgroundColor: theme.bg }}
+        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+        keyboardVerticalOffset={topBarHeight}
+      >
         {topBar}
       <FlashList
         data={overviewSections}
         keyExtractor={(item) => item}
         ListHeaderComponent={header}
+        refreshControl={localRefreshControl}
         contentContainerStyle={{ paddingBottom: contentBottomPadding, paddingHorizontal: 16 }}
         renderItem={({ item }) => {
           if (item === 'summary') {
@@ -1267,12 +1329,41 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16,
     paddingVertical: space.md,
   },
-  modalKeyboard: { flex: 1 },
-  modalScrim: { flex: 1, justifyContent: 'center', padding: space.xl },
-  titleEditor: { borderWidth: 1, borderRadius: radius.lg, padding: space.xl, gap: space.lg },
-  titleInput: { minHeight: 52, borderWidth: 1, borderRadius: radius.md, paddingHorizontal: 16, paddingVertical: space.md, fontSize: 17 },
-  modalActions: { flexDirection: 'row', justifyContent: 'flex-end', gap: space.sm },
-  modalButton: { minWidth: 96, minHeight: 48, borderRadius: radius.pill, alignItems: 'center', justifyContent: 'center', paddingHorizontal: space.lg },
+  modalKeyboard: {
+    flex: 1,
+  },
+  modalScrim: {
+    flex: 1,
+    justifyContent: 'center',
+    padding: space.xl,
+  },
+  titleEditor: {
+    borderWidth: 1,
+    borderRadius: radius.lg,
+    padding: space.xl,
+    gap: space.lg,
+  },
+  titleInput: {
+    minHeight: 52,
+    borderWidth: 1,
+    borderRadius: radius.md,
+    paddingHorizontal: 16,
+    paddingVertical: space.md,
+    fontSize: 17,
+  },
+  modalActions: {
+    flexDirection: 'row',
+    justifyContent: 'flex-end',
+    gap: space.sm,
+  },
+  modalButton: {
+    minWidth: 96,
+    minHeight: 48,
+    borderRadius: radius.pill,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: space.lg,
+  },
   audioTag: {
     flexDirection: 'row',
     alignItems: 'center',
