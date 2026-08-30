@@ -53,13 +53,23 @@ export function persistDeferredWakeSignal(
   const liveCurrentOwner = state.activeAttemptToken != null
     && state.activeAttemptGeneration === currentGeneration
     && (state.activeAttemptLeaseUntil ?? 0) > now;
+  const expiredCurrentOwner = state.activeAttemptToken != null
+    && state.activeAttemptGeneration === currentGeneration
+    && (state.activeAttemptLeaseUntil ?? 0) <= now;
   let currentScheduleChanged = false;
 
   if (currentGeneration == null) {
     currentGeneration = state.completedGeneration + 1;
     currentRetryNotBeforeAt = input.notBeforeAt;
     currentScheduleChanged = true;
-  } else if (liveCurrentOwner) {
+  } else if (liveCurrentOwner || expiredCurrentOwner) {
+    if (expiredCurrentOwner) {
+      // N's dead lease must be reclaimable now. The arriving signal still
+      // belongs to N+1; its possibly later due must never postpone recovery N.
+      const reclaimDue = minDue(currentRetryNotBeforeAt, now);
+      currentScheduleChanged = reclaimDue !== currentRetryNotBeforeAt;
+      currentRetryNotBeforeAt = reclaimDue;
+    }
     const successor = currentGeneration + 1;
     if (pendingGeneration == null) {
       pendingGeneration = successor;

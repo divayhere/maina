@@ -238,7 +238,10 @@ describe('Maina Knowledge Cloud correction service', () => {
       const existing = state.get(key);
       if (existing) state.set(key, { ...existing, ...patch });
     });
-    mocks.cloudRequest.mockRejectedValue(new TypeError('Network request failed'));
+    mocks.cloudRequest.mockRejectedValue(Object.assign(
+      new Error('Waiting for internet. Maina will continue automatically.'),
+      { status: 0, code: 'network_error', failureClass: 'transport_unknown' },
+    ));
 
     const attempted = await reconcileCorrectionsForMeeting('meeting-1');
 
@@ -265,5 +268,43 @@ describe('Maina Knowledge Cloud correction service', () => {
 
     expect(mocks.cloudRequest).not.toHaveBeenCalled();
     expect(mocks.updateCorrection).not.toHaveBeenCalled();
+  });
+
+  it('terminalizes malformed successful JSON without retrying or changing correction lineage', async () => {
+    let correction = {
+      correctionKey: 'correction:stable',
+      meetingId: 'meeting-1',
+      sourceKey: 'meeting:maina:meeting-1',
+      fieldPath: 'content.summary',
+      versionTag: 'summary.v2',
+      payloadJson: '{"correction_key":"correction:stable"}',
+      syncStatus: 'sync_queued',
+      retryCount: 0,
+      nextRetryAt: null,
+    };
+    mocks.getMeeting.mockResolvedValue({ id: 'meeting-1', knowledgeCloudSyncStatus: 'sync_succeeded' });
+    mocks.getCorrection.mockImplementation(async () => correction);
+    mocks.updateCorrection.mockImplementation(async (_key: string, patch: Record<string, unknown>) => {
+      correction = { ...correction, ...patch } as typeof correction;
+    });
+    mocks.cloudRequest.mockRejectedValue(Object.assign(
+      new Error('Cloud notes need attention. Your recording and transcript are safe.'),
+      { status: 200, code: 'invalid_json_response', failureClass: 'protocol' },
+    ));
+
+    await runCorrectionSync(correction.correctionKey);
+    await runCorrectionSync(correction.correctionKey);
+
+    expect(mocks.cloudRequest).toHaveBeenCalledTimes(1);
+    expect(mocks.persistCorrectionRetry).not.toHaveBeenCalled();
+    expect(correction).toMatchObject({
+      correctionKey: 'correction:stable',
+      sourceKey: 'meeting:maina:meeting-1',
+      syncStatus: 'sync_failed_validation',
+      failureClass: 'protocol',
+      nextRetryAt: null,
+      error: 'Cloud notes need attention. Your recording and transcript are safe.',
+    });
+    expect(String((correction as { error?: unknown }).error)).not.toContain('invalid_json_response');
   });
 });

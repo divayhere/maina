@@ -206,6 +206,32 @@ class MainaPipelineWakePolicyTest {
     }
 
     @Test
+    fun `early native delivery remains retryable while truthful success terminates`() {
+        assertEquals(
+            MainaPipelineWorkerCompletionDisposition.RETRY,
+            MainaPipelineWakePolicy.workerCompletionDisposition(false, 0),
+        )
+        assertEquals(
+            MainaPipelineWorkerCompletionDisposition.RETRY,
+            MainaPipelineWakePolicy.workerCompletionDisposition(null, 0),
+        )
+        assertEquals(
+            MainaPipelineWorkerCompletionDisposition.TERMINAL_FAILURE,
+            MainaPipelineWakePolicy.workerCompletionDisposition(
+                false,
+                MainaPipelineWakePolicy.MAX_RUN_ATTEMPTS - 1,
+            ),
+        )
+        assertEquals(
+            MainaPipelineWorkerCompletionDisposition.SUCCESS,
+            MainaPipelineWakePolicy.workerCompletionDisposition(
+                true,
+                MainaPipelineWakePolicy.MAX_RUN_ATTEMPTS - 1,
+            ),
+        )
+    }
+
+    @Test
     fun `native completion has one owner and one terminal result`() {
         val completion = MainaPipelineWakeCompletion.register("token-a")
         assertNotNull(completion)

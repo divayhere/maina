@@ -16,7 +16,7 @@ import { log } from '@/services/logger';
 import { clearMainaCloudSession, mainaCloudRequestJson } from '@/services/mainaCloudSession';
 import { classifyTransportCause, safeCloudFailureMessage } from '@/core/pipeline/cloudFailure';
 import { armPipelineNetworkRecovery } from '@/services/pipelineWakeScheduler';
-import { nextCloudRetry } from '@/services/cloudRetryPolicy';
+import { isRetryableCloudFailure, nextCloudRetry } from '@/services/cloudRetryPolicy';
 import {
   buildMainaKnowledgeCloudCorrectionPackage,
   packetCorrectionSnapshots,
@@ -120,17 +120,31 @@ async function syncCorrection(correctionKey: string): Promise<void> {
       });
     }
   } catch (cause) {
-    const failureClass = classifyTransportCause(cause);
-    const retry = nextCloudRetry({ attemptCount: correction.retryCount ?? 0 });
-    await persistKnowledgeCloudCorrectionRetry({
-      correctionKey,
-      syncStatus: 'sync_failed_retryable',
-      retryCount: retry.attemptCount,
-      lastRetryAt: retry.lastRetryAt,
-      nextRetryAt: retry.nextRetryAt,
-      failureClass,
-      visibleError: safeCloudFailureMessage(failureClass),
-    });
+    const classified = classifyTransportCause(cause);
+    const retryable = isRetryableCloudFailure(cause);
+    const failureClass = retryable || ['auth', 'http_terminal', 'backend_terminal', 'protocol'].includes(classified)
+      ? classified
+      : 'protocol';
+    if (retryable) {
+      const retry = nextCloudRetry({ attemptCount: correction.retryCount ?? 0 });
+      await persistKnowledgeCloudCorrectionRetry({
+        correctionKey,
+        syncStatus: 'sync_failed_retryable',
+        retryCount: retry.attemptCount,
+        lastRetryAt: retry.lastRetryAt,
+        nextRetryAt: retry.nextRetryAt,
+        failureClass,
+        visibleError: safeCloudFailureMessage(failureClass),
+      });
+    } else {
+      if (failureClass === 'auth') await clearMainaCloudSession();
+      await updateKnowledgeCloudCorrection(correctionKey, {
+        syncStatus: failureClass === 'auth' ? 'sync_failed_auth' : 'sync_failed_validation',
+        error: safeCloudFailureMessage(failureClass),
+        failureClass,
+        nextRetryAt: null,
+      });
+    }
     log.warn('maina-cloud-correction', 'meeting knowledge correction sync failed', {
       meetingId: correction.meetingId,
       correctionKey,

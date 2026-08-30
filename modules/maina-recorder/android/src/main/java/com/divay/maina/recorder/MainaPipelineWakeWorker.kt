@@ -76,6 +76,7 @@ internal data class MainaPipelineScheduleResult(
 )
 
 internal enum class MainaPipelineWakeRetryDisposition { RETRY, TERMINAL_FAILURE }
+internal enum class MainaPipelineWorkerCompletionDisposition { SUCCESS, RETRY, TERMINAL_FAILURE }
 internal enum class MainaPipelineScheduleAction { ENQUEUE_NEW, KEEP_EXISTING, UPDATE_PENDING }
 internal data class MainaScheduledWorkSnapshot(
     val id: UUID,
@@ -139,6 +140,16 @@ internal object MainaPipelineWakePolicy {
         } else {
             MainaPipelineWakeRetryDisposition.TERMINAL_FAILURE
         }
+
+    fun workerCompletionDisposition(
+        succeeded: Boolean?,
+        runAttemptCount: Int,
+    ): MainaPipelineWorkerCompletionDisposition = when {
+        succeeded == true -> MainaPipelineWorkerCompletionDisposition.SUCCESS
+        retryDisposition(runAttemptCount) == MainaPipelineWakeRetryDisposition.RETRY ->
+            MainaPipelineWorkerCompletionDisposition.RETRY
+        else -> MainaPipelineWorkerCompletionDisposition.TERMINAL_FAILURE
+    }
 
     fun scheduleAction(
         state: WorkInfo.State?,
@@ -514,10 +525,7 @@ internal class MainaPipelineWakeWorker(
                 retryOrFail()
             } else {
                 val succeeded = withTimeoutOrNull(WORKER_COMPLETION_TIMEOUT_MS) { completion.await() }
-                when (succeeded) {
-                    true -> Result.success()
-                    false, null -> retryOrFail()
-                }
+                resultForCompletion(succeeded)
             }
         } catch (cancelled: CancellationException) {
             throw cancelled
@@ -531,6 +539,14 @@ internal class MainaPipelineWakeWorker(
     ) {
         MainaPipelineWakeRetryDisposition.RETRY -> Result.retry()
         MainaPipelineWakeRetryDisposition.TERMINAL_FAILURE -> Result.failure()
+    }
+
+    private fun resultForCompletion(succeeded: Boolean?): Result = when (
+        MainaPipelineWakePolicy.workerCompletionDisposition(succeeded, runAttemptCount)
+    ) {
+        MainaPipelineWorkerCompletionDisposition.SUCCESS -> Result.success()
+        MainaPipelineWorkerCompletionDisposition.RETRY -> Result.retry()
+        MainaPipelineWorkerCompletionDisposition.TERMINAL_FAILURE -> Result.failure()
     }
 
     companion object {

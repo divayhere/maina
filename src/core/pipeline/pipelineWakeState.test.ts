@@ -108,7 +108,7 @@ describe('durable pipeline current and successor generations', () => {
     };
     const retry = persistDeferredWakeSignal(active, {
       requiresNetwork: true,
-      notBeforeAt: 2_000,
+      notBeforeAt: 90_000,
     }, 2_000);
     expect(retry).toMatchObject({
       currentGeneration: 5,
@@ -118,6 +118,11 @@ describe('durable pipeline current and successor generations', () => {
     });
     expect(decidePipelineWakeClaim(retry, 6, 2_000).status).toBe('busy');
     expect(decidePipelineWakeClaim(retry, 5, 2_000).status).toBe('reclaimed');
+    expect(generationNeedingNativeSchedule(retry, 2_000)).toEqual({
+      generation: 5,
+      notBeforeAt: 2_000,
+      scheduleRevision: 1,
+    });
   });
 
   it('keeps failed N retryable and preserves its exact successor', () => {
