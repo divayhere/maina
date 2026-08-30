@@ -22,13 +22,15 @@ device_line="$($ADB devices -l | awk -v serial="$MAINA_ADB_SERIAL" '$1 == serial
   echo "Configured Wi-Fi Pixel is not connected: $MAINA_ADB_SERIAL" >&2
   exit 1
 }
+actual_endpoint="$(awk '{print $1}' <<<"$device_line")"
 hardware_serial="$($ADB -s "$MAINA_ADB_SERIAL" shell getprop ro.serialno | tr -d '\r')"
 model="$($ADB -s "$MAINA_ADB_SERIAL" shell getprop ro.product.model | tr -d '\r')"
 [[ "$hardware_serial" == "$MAINA_DEVICE_SERIAL" && "$model" == "Pixel 9 Pro" ]] || {
   echo "Wi-Fi target identity mismatch: serial=$hardware_serial model=$model" >&2
   exit 1
 }
-[[ "$($ADB -s "$MAINA_ADB_SERIAL" shell pm list packages "$PACKAGE_NAME" | tr -d '\r')" == "package:$PACKAGE_NAME" ]] || {
+installed_package_line="$($ADB -s "$MAINA_ADB_SERIAL" shell pm list packages "$PACKAGE_NAME" | tr -d '\r')"
+[[ "$installed_package_line" == "package:$PACKAGE_NAME" ]] || {
   echo "Installed package mismatch or missing: $PACKAGE_NAME" >&2
   exit 1
 }
@@ -39,16 +41,24 @@ $ADB -s "$MAINA_ADB_SERIAL" pull "$installed_path" "$installed_copy" >/dev/null
 installed_signer="$($APKSIGNER verify --print-certs "$installed_copy" | awk -F': ' '/Signer #1 certificate SHA-256 digest/ {print $2; exit}')"
 candidate_signer="$($APKSIGNER verify --print-certs "$APK" | awk -F': ' '/Signer #1 certificate SHA-256 digest/ {print $2; exit}')"
 candidate_package="$($AAPT dump badging "$APK" | sed -n "s/^package: name='\([^']*\)'.*/\1/p")"
-node --input-type=module - "$MAINA_ADB_SERIAL" "$MAINA_DEVICE_SERIAL" "$hardware_serial" "$PACKAGE_NAME" "$installed_signer" "$candidate_signer" "$candidate_package" <<'NODE'
+installed_package="${installed_package_line#package:}"
+node --input-type=module - "$actual_endpoint" "$MAINA_ADB_SERIAL" "$MAINA_DEVICE_SERIAL" "$hardware_serial" "$model" "$PACKAGE_NAME" "$installed_package" "$candidate_package" "$installed_signer" "$candidate_signer" <<'NODE'
 import { validateAndroidUpdate } from './scripts/lib/renewal-core.mjs';
-const [, , serial, expectedHardwareSerial, hardwareSerial, expectedPackageName, installedSigner, candidateSigner, packageName] = process.argv;
+const [
+  , , serial, expectedSerial, expectedHardwareSerial, hardwareSerial, model,
+  expectedPackageName, installedPackageName, candidatePackageName,
+  installedSigner, candidateSigner,
+] = process.argv;
 validateAndroidUpdate({
   serial,
-  expectedSerial: serial,
+  expectedSerial,
   connection: 'wifi-adb',
   hardwareSerial,
   expectedHardwareSerial,
-  packageName,
+  model,
+  expectedModel: 'Pixel 9 Pro',
+  installedPackageName,
+  candidatePackageName,
   expectedPackageName,
   installedSigner,
   candidateSigner,
