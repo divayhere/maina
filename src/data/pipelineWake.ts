@@ -131,20 +131,58 @@ export async function persistPipelineConnectivity(connected: boolean): Promise<{
   reconnectGeneration: number | null;
 }> {
   const db = await getDb();
-  const current = await getPipelineWakeState();
-  if (connected && current.lastConnected === false) {
-    const state = await persistPipelineWakeSignal({
-      reason: 'connectivity_restored',
-      connected: true,
-      requiresNetwork: true,
-    });
-    return { state, reconnectGeneration: state.requestedGeneration };
-  }
-  await db.runAsync(
-    'UPDATE pipeline_wake_state SET last_connected = ?, updated_at = ? WHERE singleton_id = 1',
-    [connected ? 1 : 0, Date.now()],
-  );
-  return { state: await getPipelineWakeState(), reconnectGeneration: null };
+  const now = Date.now();
+  let result: { state: PipelineWakeState; reconnectGeneration: number | null } | null = null;
+  // Observation and mutation must share one exclusive transaction. Two
+  // concurrent `true` callbacks may both have been dispatched from NetInfo,
+  // but only the first transaction may observe the durable false->true edge.
+  await db.withExclusiveTransactionAsync(async (transaction) => {
+    const row = await transaction.getFirstAsync<PipelineWakeRow>(SELECT_WAKE);
+    if (!row) throw new Error('Pipeline wake state is unavailable.');
+    const current = toState(row);
+    if (connected && current.lastConnected === false) {
+      const decision = persistWakeSignal(current, { connected: true, requiresNetwork: true });
+      await transaction.runAsync(
+        `UPDATE pipeline_wake_state SET
+          signal_sequence = ?, requested_generation = ?, enqueue_required = ?,
+          connectivity_epoch = ?, last_connected = 1, pending_requires_network = ?,
+          native_schedule_state = ?, native_schedule_attempts = ?,
+          last_reason = 'connectivity_restored', last_error_code = NULL,
+          updated_at = ? WHERE singleton_id = 1`,
+        [
+          decision.signalSequence,
+          decision.requestedGeneration,
+          decision.enqueueRequired ? 1 : 0,
+          decision.connectivityEpoch,
+          decision.requiresNetwork ? 1 : 0,
+          decision.nativeScheduleState,
+          decision.nativeScheduleAttempts,
+          now,
+        ],
+      );
+      result = {
+        state: {
+          ...current,
+          ...decision,
+          lastReason: 'connectivity_restored',
+          lastErrorCode: null,
+          updatedAt: now,
+        },
+        reconnectGeneration: decision.requestedGeneration,
+      };
+      return;
+    }
+    await transaction.runAsync(
+      'UPDATE pipeline_wake_state SET last_connected = ?, updated_at = ? WHERE singleton_id = 1',
+      [connected ? 1 : 0, now],
+    );
+    result = {
+      state: { ...current, lastConnected: connected, updatedAt: now },
+      reconnectGeneration: null,
+    };
+  });
+  if (!result) throw new Error('Pipeline connectivity state was not persisted.');
+  return result;
 }
 
 export type PipelineWakeAttempt =
