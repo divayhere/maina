@@ -1,5 +1,8 @@
 import assert from 'node:assert/strict';
-import { validateAndroidUpdate } from './lib/renewal-core.mjs';
+import {
+  validateAndroidUpdate,
+  validateInstalledAndroidArtifact,
+} from './lib/renewal-core.mjs';
 
 const valid = {
   serial: 'adb-47011FDAP000VE-test._adb-tls-connect._tcp',
@@ -28,4 +31,16 @@ assert.throws(() => validateAndroidUpdate({ ...valid, model: 'Pixel 8' }), /mode
 assert.throws(() => validateAndroidUpdate({ ...valid, installedPackageName: 'other.package' }), /package/);
 assert.throws(() => validateAndroidUpdate({ ...valid, candidatePackageName: 'other.package' }), /package/);
 assert.throws(() => validateAndroidUpdate({ ...valid, installedSigner: '' }), /certificate/);
+
+const installed = {
+  candidateSha256: 'hash', installedSha256: 'hash',
+  candidateSigner: 'signer', installedSigner: 'signer',
+  candidateVersionCode: '65', installedVersionCode: '65',
+  candidateVersionName: '0.10.39', installedVersionName: '0.10.39',
+};
+assert.equal(validateInstalledAndroidArtifact(installed), true);
+assert.throws(() => validateInstalledAndroidArtifact({ ...installed, installedSha256: 'different' }), /hash/);
+assert.throws(() => validateInstalledAndroidArtifact({ ...installed, installedSigner: 'different' }), /certificate/);
+assert.throws(() => validateInstalledAndroidArtifact({ ...installed, installedVersionCode: '64' }), /version code/);
+assert.throws(() => validateInstalledAndroidArtifact({ ...installed, installedVersionName: '0.10.38' }), /version name/);
 console.log('Android renewal safety policy verified.');

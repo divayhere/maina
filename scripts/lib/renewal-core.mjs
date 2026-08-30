@@ -26,3 +26,19 @@ export function validateAndroidUpdate(input) {
   }
   return true;
 }
+
+export function validateInstalledAndroidArtifact(input) {
+  if (!input.candidateSha256 || input.installedSha256 !== input.candidateSha256) {
+    throw new Error('Installed APK hash does not match the approved candidate.');
+  }
+  if (!input.candidateSigner || input.installedSigner !== input.candidateSigner) {
+    throw new Error('Installed Android signing certificate does not match the approved candidate.');
+  }
+  if (!input.candidateVersionCode || input.installedVersionCode !== input.candidateVersionCode) {
+    throw new Error('Installed Android version code does not match the approved candidate.');
+  }
+  if (!input.candidateVersionName || input.installedVersionName !== input.candidateVersionName) {
+    throw new Error('Installed Android version name does not match the approved candidate.');
+  }
+  return true;
+}

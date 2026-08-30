@@ -73,7 +73,7 @@
     "ios:renew-personal": "bash scripts/renew-ios-personal.sh",
     "android:prepare": "bash scripts/prebuild-android.sh",
     "android:install-preserving": "bash scripts/install-android-preserving-data.sh",
-    "verify:renewal": "node scripts/verify-renewal-core.mjs",
+    "verify:renewal": "node scripts/verify-renewal-core.mjs && node scripts/verify-android-install-single-flight.mjs",
     "verify:release": "bash scripts/verify-release.sh",
     "postinstall": "patch-package"
   },
