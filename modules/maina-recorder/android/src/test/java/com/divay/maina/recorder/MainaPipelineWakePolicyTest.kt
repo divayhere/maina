@@ -1,6 +1,7 @@
 package com.divay.maina.recorder
 
 import androidx.work.ExistingWorkPolicy
+import androidx.work.WorkInfo
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -10,6 +11,7 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
+import java.util.UUID
 
 class MainaPipelineWakePolicyTest {
     @Before
@@ -47,12 +49,125 @@ class MainaPipelineWakePolicyTest {
 
     @Test
     fun `worker data round trips and malformed requests fail closed`() {
-        val shared = requireNotNull(MainaPipelineWakePolicy.shared(11))
+        val shared = requireNotNull(MainaPipelineWakePolicy.shared(11, true, 42_000L, 3L))
         val native = requireNotNull(MainaPipelineWakePolicy.nativeResult("meeting-a", "run-a"))
         assertEquals(shared, MainaPipelineWakeScheduler.decode(MainaPipelineWakeScheduler.encode(shared)))
         assertEquals(native, MainaPipelineWakeScheduler.decode(MainaPipelineWakeScheduler.encode(native)))
         assertNull(MainaPipelineWakePolicy.shared(-1))
         assertNull(MainaPipelineWakePolicy.nativeResult("", "run"))
+    }
+
+    @Test
+    fun `due scheduling updates only the exact pending work id and never replaces running work`() {
+        assertEquals(
+            MainaPipelineScheduleAction.UPDATE_PENDING,
+            MainaPipelineWakePolicy.scheduleAction(WorkInfo.State.ENQUEUED, true, 50_000L, 10_000L),
+        )
+        assertEquals(
+            MainaPipelineScheduleAction.KEEP_EXISTING,
+            MainaPipelineWakePolicy.scheduleAction(WorkInfo.State.RUNNING, true, 50_000L, 10_000L),
+        )
+        assertEquals(
+            MainaPipelineScheduleAction.KEEP_EXISTING,
+            MainaPipelineWakePolicy.scheduleAction(WorkInfo.State.ENQUEUED, false, 50_000L, 10_000L),
+        )
+        assertEquals(
+            MainaPipelineScheduleAction.ENQUEUE_NEW,
+            MainaPipelineWakePolicy.scheduleAction(WorkInfo.State.SUCCEEDED, true, 50_000L, 10_000L),
+        )
+    }
+
+    @Test
+    fun `scheduler refuses a supplied work id whose uuid or encoded input is not exact`() {
+        val request = requireNotNull(MainaPipelineWakePolicy.shared(11, true, 10_000L, 3L))
+        val storedId = UUID.randomUUID()
+        val otherId = UUID.randomUUID()
+        val prior = request.copy(notBeforeAt = 50_000L, scheduleRevision = 2L)
+        val named = listOf(
+            MainaScheduledWorkSnapshot(
+                storedId,
+                WorkInfo.State.ENQUEUED,
+                setOf(MainaPipelineWakePolicy.scheduleIdentityTag(prior)),
+            ),
+        )
+
+        assertEquals(
+            "previous_work_not_found",
+            MainaPipelineWakeScheduler.resolveExisting(
+                request, otherId.toString(), 50_000L, 2L, named,
+            ).errorCode,
+        )
+        assertEquals(
+            "previous_work_identity_mismatch",
+            MainaPipelineWakeScheduler.resolveExisting(
+                request,
+                storedId.toString(),
+                50_000L,
+                99L,
+                named,
+            ).errorCode,
+        )
+    }
+
+    @Test
+    fun `scheduler preserves the exact uuid across pending update and running race`() {
+        val request = requireNotNull(MainaPipelineWakePolicy.shared(11, true, 10_000L, 3L))
+        val storedId = UUID.randomUUID()
+        val prior = request.copy(notBeforeAt = 50_000L, scheduleRevision = 2L)
+        val priorTag = MainaPipelineWakePolicy.scheduleIdentityTag(prior)
+        val pending = MainaPipelineWakeScheduler.resolveExisting(
+            request,
+            storedId.toString(),
+            50_000L,
+            2L,
+            listOf(MainaScheduledWorkSnapshot(storedId, WorkInfo.State.ENQUEUED, setOf(priorTag))),
+        )
+        val running = MainaPipelineWakeScheduler.resolveExisting(
+            request,
+            storedId.toString(),
+            50_000L,
+            2L,
+            listOf(MainaScheduledWorkSnapshot(storedId, WorkInfo.State.RUNNING, setOf(priorTag))),
+        )
+
+        assertEquals(MainaPipelineScheduleAction.UPDATE_PENDING, pending.action)
+        assertEquals(storedId, pending.existingId)
+        assertEquals(MainaPipelineScheduleAction.KEEP_EXISTING, running.action)
+        assertEquals(storedId, running.existingId)
+    }
+
+    @Test
+    fun `terminal exact work permits one KEEP enqueue while current matching work is reused`() {
+        val request = requireNotNull(MainaPipelineWakePolicy.shared(11, true, 10_000L, 3L))
+        val storedId = UUID.randomUUID()
+        val prior = request.copy(notBeforeAt = 50_000L, scheduleRevision = 2L)
+        val terminal = MainaPipelineWakeScheduler.resolveExisting(
+            request,
+            storedId.toString(),
+            50_000L,
+            2L,
+            listOf(MainaScheduledWorkSnapshot(
+                storedId,
+                WorkInfo.State.SUCCEEDED,
+                setOf(MainaPipelineWakePolicy.scheduleIdentityTag(prior)),
+            )),
+        )
+        val currentId = UUID.randomUUID()
+        val current = MainaPipelineWakeScheduler.resolveExisting(
+            request,
+            null,
+            null,
+            null,
+            listOf(MainaScheduledWorkSnapshot(
+                currentId,
+                WorkInfo.State.ENQUEUED,
+                setOf(MainaPipelineWakePolicy.scheduleIdentityTag(request)),
+            )),
+        )
+
+        assertEquals(MainaPipelineScheduleAction.ENQUEUE_NEW, terminal.action)
+        assertEquals(MainaPipelineScheduleAction.KEEP_EXISTING, current.action)
+        assertEquals(currentId, current.existingId)
     }
 
     @Test

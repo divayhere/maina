@@ -219,9 +219,27 @@ class MainaRecorderModule : Module() {
             )
         }
 
-        AsyncFunction("schedulePipelineWake") { generation: Long, requiresNetwork: Boolean ->
+        AsyncFunction("schedulePipelineWake") {
+                generation: Long,
+                requiresNetwork: Boolean,
+                notBeforeAt: Long,
+                scheduleRevision: Long,
+                previousWorkId: String?,
+                previousNotBeforeAt: Long?,
+                previousScheduleRevision: Long?,
+                schedulerProtocolVersion: Int,
+            ->
+            if (schedulerProtocolVersion != 2) {
+                return@AsyncFunction mapOf(
+                    "scheduled" to false,
+                    "workId" to previousWorkId,
+                    "errorCode" to "unsupported_scheduler_protocol",
+                )
+            }
             val result = MainaPipelineWakeScheduler.enqueueShared(
-                requireContext(), generation, requiresNetwork,
+                requireContext(), generation, requiresNetwork, notBeforeAt,
+                scheduleRevision, previousWorkId, previousNotBeforeAt,
+                previousScheduleRevision,
             )
             mapOf(
                 "scheduled" to result.scheduled,
