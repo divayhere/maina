@@ -52,6 +52,13 @@ type LocalAsrPipelineInput = {
   isExecutionActive?: () => Promise<boolean> | boolean;
 };
 
+class LocalAsrOwnershipEndedError extends Error {
+  constructor() {
+    super('Local ASR execution ownership ended; the in-flight window remains replayable.');
+    this.name = 'LocalAsrOwnershipEndedError';
+  }
+}
+
 // Qwen owns one native inference runtime and Expo SQLite exposes one shared
 // connection. A recovery task and a newly-finished meeting therefore must not
 // transcribe concurrently. Serialising complete post-call jobs prevents the
@@ -142,7 +149,7 @@ async function runLocalAsrPipelineNow(input: LocalAsrPipelineInput): Promise<Loc
   const assertExecutionActive = async () => {
     if (!input.isExecutionActive || await input.isExecutionActive()) return;
     await invalidateLocalAsrRun(runClaim).catch(() => false);
-    throw new Error('Local ASR execution ownership ended; the in-flight window remains replayable.');
+    throw new LocalAsrOwnershipEndedError();
   };
   const totalWindows = chunks.reduce((sum, uri) => sum + planAsrWindows(durations[uri] ?? 0).length, 0);
   await updateMeeting(input.meetingId, {
@@ -279,6 +286,7 @@ async function runLocalAsrPipelineNow(input: LocalAsrPipelineInput): Promise<Loc
             suspicious,
           });
         } catch (cause) {
+          if (cause instanceof LocalAsrOwnershipEndedError) throw cause;
           const message = cause instanceof Error ? cause.message : String(cause);
           failedWindows += 1;
           lastError = message;
