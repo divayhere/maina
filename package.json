@@ -1,7 +1,7 @@
 {
   "name": "maina",
   "main": "index.js",
-  "version": "0.10.34",
+  "version": "0.10.36",
   "dependencies": {
     "@expo/ui": "~57.0.14",
     "@expo/vector-icons": "^15.0.2",
