@@ -4,9 +4,9 @@ import type { Meeting } from '@/data/meetings';
 import {
   didTranscriptCoverageImprove,
   formatCoveragePercent,
+  isRecoveryBudgetExhausted,
   isTerminalNoSpeechMeeting,
   isTerminalPartialTranscript,
-  isRecoveryBudgetExhausted,
   transcriptCoverage,
 } from './transcriptCoverage';
 
@@ -26,7 +26,7 @@ describe('transcript coverage policy', () => {
     expect(formatCoveragePercent(coverage.ratio)).toBe('99.8%');
   });
 
-  it('recognizes a bounded terminal partial without making it cloud-eligible', () => {
+  it('recognizes a bounded terminal partial without claiming complete ASR', () => {
     expect(isTerminalPartialTranscript(meeting())).toBe(true);
   });
 
@@ -44,14 +44,14 @@ describe('transcript coverage policy', () => {
     expect(isTerminalPartialTranscript(damaged)).toBe(false);
   });
 
-  it('recognizes a fully checked recording with no speech text as terminal', () => {
+  it('recognizes fully checked audio with no speech as terminal', () => {
     expect(isTerminalNoSpeechMeeting(meeting({
       status: 'recorded', transcriptionWindowCount: 2,
       transcriptionCompletedWindows: 2, transcriptionFailedWindows: 0,
     }))).toBe(true);
   });
 
-  it('regenerates only after completed coverage increases', () => {
+  it('regenerates notes only after completed coverage increases', () => {
     expect(didTranscriptCoverageImprove(meeting(), meeting({
       transcriptionCompletedWindows: 645, transcriptionFailedWindows: 0,
     }))).toBe(true);

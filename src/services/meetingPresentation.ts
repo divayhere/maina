@@ -1,9 +1,9 @@
 import type { Meeting } from '@/data/meetings';
 import {
   formatCoveragePercent,
+  isRecoveryBudgetExhausted,
   isTerminalNoSpeechMeeting,
   isTerminalPartialTranscript,
-  isRecoveryBudgetExhausted,
   transcriptCoverage,
 } from '@/services/transcriptCoverage';
 

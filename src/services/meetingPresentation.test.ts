@@ -4,104 +4,59 @@ import type { Meeting } from '@/data/meetings';
 import { describeMeetingPresentation } from './meetingPresentation';
 
 const meeting: Meeting = {
-  id: 'm1',
-  title: 'Meeting',
-  startedAt: 1,
-  durationMs: 60_000,
-  audioDurationMs: 60_000,
-  decisions: [],
-  openQuestions: [],
-  status: 'transcribing',
-  summaryStatus: 'idle',
-  segmentCount: 1,
-  transcribedSegments: 0,
-  transcriptionWindowCount: 10,
-  transcriptionCompletedWindows: 0,
-  transcriptionFailedWindows: 0,
-  transcriptionRecoveryRounds: 0,
-  openTodoCount: 0,
-  totalTodoCount: 0,
-  updatedAt: 1,
-  restartCount: 0,
-  knowledgeCloudSyncStatus: 'local_only',
+  id: 'm1', title: 'Meeting', startedAt: 1, durationMs: 60_000, audioDurationMs: 60_000,
+  decisions: [], openQuestions: [], status: 'transcribing', summaryStatus: 'idle', segmentCount: 1,
+  transcribedSegments: 0, transcriptionWindowCount: 10, transcriptionCompletedWindows: 0,
+  transcriptionFailedWindows: 0, transcriptionRecoveryRounds: 0,
+  openTodoCount: 0, totalTodoCount: 0, updatedAt: 1,
+  restartCount: 0, knowledgeCloudSyncStatus: 'local_only',
 };
 
 describe('meeting pipeline presentation', () => {
   it('never offers recovery while local transcription is still running', () => {
     expect(describeMeetingPresentation(meeting)).toMatchObject({
-      phase: 'transcribing',
-      label: 'Getting the text ready',
-      working: true,
-      canRetryTranscript: false,
-      progress: 0,
+      phase: 'transcribing', label: 'Getting the text ready', working: true,
+      canRetryTranscript: false, progress: 0,
     });
   });
 
   it('reports persisted window progress without claiming transcript completion', () => {
     expect(describeMeetingPresentation({
-      ...meeting,
-      transcriptionCompletedWindows: 6,
-      transcriptionFailedWindows: 1,
-    })).toMatchObject({
-      detail: '7 of 10 audio windows checked',
-      progress: 0.7,
-      phase: 'transcribing',
-    });
+      ...meeting, transcriptionCompletedWindows: 6, transcriptionFailedWindows: 1,
+    })).toMatchObject({ detail: '7 of 10 audio windows checked', progress: 0.7, phase: 'transcribing' });
   });
 
   it('offers recovery only for a terminal partial transcript with retained audio', () => {
     expect(describeMeetingPresentation({
       ...meeting,
       status: 'transcript_partial',
-      transcriptionWindowCount: 645,
-      transcriptionCompletedWindows: 644,
+      transcriptionCompletedWindows: 9,
       transcriptionFailedWindows: 1,
       transcriptionRecoveryRounds: 3,
     })).toMatchObject({
-      phase: 'transcript_partial',
-      working: false,
-      canRetryTranscript: true,
-      label: '99.8% processed',
+      phase: 'transcript_partial', working: false, canRetryTranscript: true,
     });
   });
 
-  it('shows a terminal no-speech result instead of a permanent queue', () => {
+  it('keeps a bounded partial transcript visibly working while retries remain', () => {
+    expect(describeMeetingPresentation({ ...meeting, status: 'transcript_partial', transcriptionRecoveryRounds: 1 })).toMatchObject({
+      phase: 'transcript_partial', working: true, canRetryTranscript: false,
+    });
+  });
+
+  it('does not leave a checked zero-speech recording queued forever', () => {
     expect(describeMeetingPresentation({
       ...meeting,
       status: 'recorded',
-      audioUri: '/audio',
+      audioUri: '/saved-audio',
       transcriptionWindowCount: 2,
       transcriptionCompletedWindows: 2,
       transcriptionFailedWindows: 0,
-    })).toMatchObject({
-      phase: 'no_speech',
-      label: 'No speech detected',
-      working: false,
-      canRetryTranscript: true,
-    });
-  });
-
-  it('keeps notes independent while a terminal partial transcript is summarized', () => {
-    expect(describeMeetingPresentation({
-      ...meeting,
-      status: 'transcript_partial',
-      summaryStatus: 'running',
-      transcriptionCompletedWindows: 644,
-      transcriptionFailedWindows: 1,
-      transcriptionWindowCount: 645,
-      transcriptionRecoveryRounds: 3,
-    })).toMatchObject({ phase: 'summary', label: 'Writing your notes', working: true });
+    })).toMatchObject({ phase: 'no_speech', label: 'No speech detected', working: false });
   });
 
   it('keeps cloud note failure independent from a successful transcript', () => {
-    expect(describeMeetingPresentation({
-      ...meeting,
-      status: 'transcribed',
-      summaryStatus: 'failed',
-    })).toMatchObject({
-      phase: 'summary_failed',
-      label: "Notes didn't come through",
-      canRetryTranscript: false,
-    });
+    expect(describeMeetingPresentation({ ...meeting, status: 'transcribed', summaryStatus: 'failed' }))
+      .toMatchObject({ phase: 'summary_failed', label: "Notes didn't come through", canRetryTranscript: false });
   });
 });

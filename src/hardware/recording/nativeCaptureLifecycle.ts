@@ -10,7 +10,7 @@ const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve,
 
 /** Waits for the service-owned recorder to acknowledge a command. */
 export async function waitForNativeCaptureState(
-  getStatus: () => NativeCaptureStatus | null,
+  getStatus: () => NativeCaptureStatus | null | Promise<NativeCaptureStatus | null>,
   expected: NativeCaptureStatus['state'],
   options: NativeCaptureWaitOptions = {},
 ): Promise<NativeCaptureStatus> {
@@ -18,10 +18,10 @@ export async function waitForNativeCaptureState(
   const pollMs = options.pollMs ?? 100;
   const delay = options.delay ?? sleep;
   const deadline = Date.now() + timeoutMs;
-  let lastStatus = getStatus();
+  let lastStatus = await getStatus();
 
   while (Date.now() <= deadline) {
-    lastStatus = getStatus();
+    lastStatus = await getStatus();
     if (lastStatus?.state === expected) return lastStatus;
     if (lastStatus?.state === 'error') {
       throw new Error(lastStatus.lastError || 'Native audio capture failed');
@@ -34,7 +34,7 @@ export async function waitForNativeCaptureState(
   // can wake up well after its nominal deadline.  Always take one fresh
   // native snapshot before declaring a timeout; otherwise a completed native
   // command gets reported as an error simply because JavaScript woke late.
-  lastStatus = getStatus();
+  lastStatus = await getStatus();
   if (lastStatus?.state === expected) return lastStatus;
   if (lastStatus?.state === 'error') {
     throw new Error(lastStatus.lastError || 'Native audio capture failed');

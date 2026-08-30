@@ -3,7 +3,10 @@ import { transcriptWordCount } from '@/core/transcription/transcript';
 import {
   commitTranscriptFinalBlocks,
   finishRecordingSegment,
+  getLastFinalTranscriptText,
   getTranscriptSummary,
+  listCompletedLocalAsrWindowKeys,
+  markLocalAsrWindowComplete,
   resetMeetingTranscript,
   startRecordingSegment,
   type TranscriptBlock,
@@ -18,6 +21,7 @@ import {
 } from '@/hardware/recording/foreground';
 import { log } from '@/services/logger';
 import { queueAudioArtifact } from '@/services/remoteLog';
+import { localAsrWindowKey, shouldProcessLocalAsrWindow } from '@/services/localAsrCheckpointCore';
 
 export interface LocalAsrPipelineResult {
   hasText: boolean;
@@ -39,6 +43,7 @@ type LocalAsrPipelineInput = {
   recoverPartials: boolean;
   resetTranscript?: boolean;
   onBlocks?: (blocks: TranscriptBlock[]) => void;
+  onProgress?: (completedWindows: number, totalWindows: number) => void;
 };
 
 // Qwen owns one native inference runtime and Expo SQLite exposes one shared
@@ -68,13 +73,17 @@ async function runLocalAsrPipelineNow(input: LocalAsrPipelineInput): Promise<Loc
     recoverPartials: input.recoverPartials,
   });
 
-  if (input.resetTranscript) await resetMeetingTranscript(input.meetingId);
+  let completedWindowKeys = await listCompletedLocalAsrWindowKeys(input.meetingId);
+  if (input.resetTranscript || completedWindowKeys.size === 0) {
+    await resetMeetingTranscript(input.meetingId);
+    completedWindowKeys = new Set();
+  }
   await updateMeeting(input.meetingId, {
     status: chunks.length > 0 ? 'transcribing' : 'recorded',
     segmentCount: chunks.length,
     transcribedSegments: 0,
     transcriptionWindowCount: 0,
-    transcriptionCompletedWindows: 0,
+    transcriptionCompletedWindows: completedWindowKeys.size,
     transcriptionFailedWindows: 0,
   });
   if (chunks.length === 0) {
@@ -126,15 +135,16 @@ async function runLocalAsrPipelineNow(input: LocalAsrPipelineInput): Promise<Loc
   const totalWindows = chunks.reduce((sum, uri) => sum + planAsrWindows(durations[uri] ?? 0).length, 0);
   await updateMeeting(input.meetingId, {
     transcriptionWindowCount: totalWindows,
-    transcriptionCompletedWindows: 0,
+    transcriptionCompletedWindows: completedWindowKeys.size,
     transcriptionFailedWindows: 0,
   });
+  input.onProgress?.(completedWindowKeys.size, totalWindows);
   let chunkCursorAt = input.meetingStartedAt;
   let windowCount = 0;
-  let completedWindows = 0;
+  let completedWindows = completedWindowKeys.size;
   let failedWindows = 0;
   let processedChunks = 0;
-  let previousText = '';
+  let previousText = await getLastFinalTranscriptText(input.meetingId);
   let lastError: string | null = null;
 
   try {
@@ -158,7 +168,9 @@ async function runLocalAsrPipelineNow(input: LocalAsrPipelineInput): Promise<Loc
       windowCount += windows.length;
       for (let windowIndex = 0; windowIndex < windows.length; windowIndex += 1) {
         const window = windows[windowIndex];
-        const ordinal = completedWindows + failedWindows + 1;
+        const windowKey = localAsrWindowKey({ chunkIndex, startMs: window.startMs, endMs: window.endMs });
+        const ordinal = windowCount - windows.length + windowIndex + 1;
+        if (!shouldProcessLocalAsrWindow(completedWindowKeys, windowKey)) continue;
         try {
           const result = await transcribeWithQwen(uri, window.startMs, window.endMs);
           const rawText = result.text.trim();
@@ -174,11 +186,9 @@ async function runLocalAsrPipelineNow(input: LocalAsrPipelineInput): Promise<Loc
             lastError = result.truncationSuspected
               ? `ASR output limit reached in window ${ordinal}`
               : `Local transcription coverage is incomplete in window ${ordinal}`;
-          } else {
-            completedWindows += 1;
           }
 
-          if (text) {
+          if (!suspicious && text) {
             const blocks = await commitTranscriptFinalBlocks({
               meetingId: input.meetingId,
               text,
@@ -186,9 +196,29 @@ async function runLocalAsrPipelineNow(input: LocalAsrPipelineInput): Promise<Loc
               startedAt: chunkCursorAt + window.startMs,
               endedAt: chunkCursorAt + window.endMs,
               language: result.language || 'auto',
+              checkpoint: {
+                windowKey,
+                chunkIndex,
+                windowIndex,
+                startedMs: window.startMs,
+                endedMs: window.endMs,
+              },
             });
             input.onBlocks?.(blocks);
             previousText = rawText;
+          } else if (!suspicious) {
+            await markLocalAsrWindowComplete({
+              meetingId: input.meetingId,
+              windowKey,
+              chunkIndex,
+              windowIndex,
+              startedMs: window.startMs,
+              endedMs: window.endMs,
+            });
+          }
+          if (!suspicious) {
+            completedWindowKeys.add(windowKey);
+            completedWindows = completedWindowKeys.size;
           }
 
           await updateMeeting(input.meetingId, {
@@ -198,6 +228,7 @@ async function runLocalAsrPipelineNow(input: LocalAsrPipelineInput): Promise<Loc
             transcriptionFailedWindows: failedWindows,
             lastError,
           });
+          input.onProgress?.(completedWindows, totalWindows);
           log[suspicious ? 'warn' : 'info']('asr', 'qwen window processed', {
             meetingId: input.meetingId,
             chunkIndex,
@@ -240,6 +271,7 @@ async function runLocalAsrPipelineNow(input: LocalAsrPipelineInput): Promise<Loc
         transcriptionFailedWindows: failedWindows,
         lastError,
       });
+      input.onProgress?.(completedWindows, totalWindows);
       chunkCursorAt += durationMs;
     }
   } finally {
@@ -250,7 +282,9 @@ async function runLocalAsrPipelineNow(input: LocalAsrPipelineInput): Promise<Loc
   const coverageComplete = windowCount > 0 && failedWindows === 0 && completedWindows === windowCount;
   const finalError = coverageComplete ? null : (lastError ?? 'Local transcription coverage is incomplete.');
   await updateMeeting(input.meetingId, {
-    status: summary.hasText ? 'transcribed' : 'recorded',
+    status: coverageComplete && summary.hasText
+      ? 'transcribed'
+      : (summary.hasText ? 'transcript_partial' : 'recorded'),
     language: 'auto',
     transcribedSegments: processedChunks,
     transcriptionWindowCount: totalWindows,

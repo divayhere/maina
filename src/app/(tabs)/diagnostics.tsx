@@ -3,7 +3,7 @@ import Constants from 'expo-constants';
 import * as Device from 'expo-device';
 import * as FileSystem from 'expo-file-system/legacy';
 import { useCallback, useEffect, useState } from 'react';
-import { Alert, Pressable, ScrollView, StyleSheet, View } from 'react-native';
+import { Alert, Platform, Pressable, ScrollView, StyleSheet, View } from 'react-native';
 
 import { getOfflineLocales, supportsOnDevice } from '@/core/transcription/nativeSpeech';
 import { purgeStagingMeetings } from '@/data/meetings';
@@ -12,7 +12,7 @@ import { useMainaLayout } from '@/design/layout';
 import { TopBar } from '@/design/shell';
 import { useAppTheme } from '@/design/theme';
 import { space } from '@/design/tokens';
-import { isRecordingForegroundServiceRunning, listAudioInputs } from '@/hardware/recording/foreground';
+import { getNativeCaptureStatusAsync, getQwenAsrStatus, isRecordingForegroundServiceRunning, listAudioInputs } from '@/hardware/recording/foreground';
 import {
   flushDiagnostics,
   getDiagnosticsStatus,
@@ -21,7 +21,7 @@ import {
 } from '@/services/remoteLog';
 import { isSentryConfigured } from '@/services/sentry';
 import { formatStorageBytes, getStorageSnapshot } from '@/services/storageBudget';
-import type { DiagnosticsStatus } from '../../../modules/maina-recorder/src';
+import type { DiagnosticsStatus, NativeCaptureStatus, QwenAsrStatus } from '../../../modules/maina-recorder/src';
 
 function Row({ label, value, warning = false }: { label: string; value: string; warning?: boolean }) {
   const { theme } = useAppTheme();
@@ -41,18 +41,24 @@ export default function Diagnostics() {
   const [locales, setLocales] = useState<string[]>([]);
   const [syncing, setSyncing] = useState(false);
   const [storage, setStorage] = useState<{ availableBytes: number; totalBytes: number } | null>(null);
+  const [nativeCapture, setNativeCapture] = useState<NativeCaptureStatus | null>(null);
+  const [qwen, setQwen] = useState<QwenAsrStatus | null>(null);
 
   const refresh = useCallback(async () => {
-    const [nextStatus, audioInputs, languageState, storageSnapshot] = await Promise.all([
+    const [nextStatus, audioInputs, languageState, storageSnapshot, captureStatus, qwenStatus] = await Promise.all([
       getDiagnosticsStatus().catch(() => null),
       listAudioInputs().catch(() => []),
       getOfflineLocales().catch(() => ({ installed: [], supported: [] })),
       getStorageSnapshot().catch(() => null),
+      getNativeCaptureStatusAsync().catch(() => null),
+      Platform.OS === 'ios' ? getQwenAsrStatus().catch(() => null) : Promise.resolve(null),
     ]);
     setStatus(nextStatus);
     setInputs(audioInputs.map((input) => `${input.type}: ${input.name}`));
     setLocales(languageState.installed);
     setStorage(storageSnapshot);
+    setNativeCapture(captureStatus);
+    setQwen(qwenStatus);
   }, []);
 
   useEffect(() => { void refresh(); }, [refresh]);
@@ -192,11 +198,17 @@ export default function Diagnostics() {
 
         <Card style={{ gap: space.sm }}>
           <SectionLabel>Capture</SectionLabel>
-          <Row label="Foreground protection" value={isRecordingForegroundServiceRunning() ? 'Running' : 'Idle'} />
+          <Row
+            label="Recording state"
+            value={Platform.OS === 'ios' ? (nativeCapture?.state ?? 'idle') : (isRecordingForegroundServiceRunning() ? 'running' : 'idle')}
+          />
           <Row label="Audio owner" value="Native speech recorder" />
-          <Row label="Endurance guarantee" value="Pending 2-hour device test" warning />
-          <Row label="On-device speech" value={supportsOnDevice() ? 'Available' : 'Unavailable'} warning={!supportsOnDevice()} />
-          <Row label="Offline models" value={locales.length ? locales.join(', ') : 'None reported'} warning={!locales.length} />
+          <Row
+            label="On-device transcription"
+            value={Platform.OS === 'ios' ? (qwen?.ready ? 'Ready' : 'Setup needed') : (supportsOnDevice() ? 'Available' : 'Unavailable')}
+            warning={Platform.OS === 'ios' ? !qwen?.ready : !supportsOnDevice()}
+          />
+          {Platform.OS === 'android' ? <Row label="Offline models" value={locales.length ? locales.join(', ') : 'None reported'} warning={!locales.length} /> : null}
           <Row label="Audio inputs" value={inputs.length ? inputs.join(' · ') : 'None reported'} warning={!inputs.length} />
         </Card>
 
@@ -205,7 +217,7 @@ export default function Diagnostics() {
           <Row label="Version" value={Constants.expoConfig?.version ?? 'unknown'} />
           <Row label="Native build" value={Constants.nativeBuildVersion ?? 'unknown'} />
           <Row label="Device" value={`${Device.manufacturer ?? ''} ${Device.modelName ?? ''}`.trim()} />
-          <Row label="Android" value={Device.osVersion ?? 'unknown'} />
+          <Row label="Operating system" value={`${Device.osName ?? Platform.OS} ${Device.osVersion ?? ''}`.trim()} />
           <Row
             label="Free space"
             value={storage ? formatStorageBytes(storage.availableBytes) : 'Unknown'}

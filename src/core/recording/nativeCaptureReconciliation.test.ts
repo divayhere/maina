@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import {
   canApplyIdleCaptureMetrics,
   hasCompleteNativeTranscript,
+  hasInterruptedNativeAsrCheckpoint,
   terminalNativeMeetingRepair,
 } from './nativeCaptureReconciliation';
 
@@ -57,5 +58,28 @@ describe('native capture terminal reconciliation', () => {
       status: 'transcribing',
       hasTranscriptText: false,
     })).toBeNull();
+  });
+
+  it('resumes only an incomplete recorded checkpoint and not terminal no-speech', () => {
+    expect(hasInterruptedNativeAsrCheckpoint({
+      ...complete,
+      status: 'recorded',
+      audioUri: '/audio',
+      nativePostprocessRunId: null,
+      transcriptionWindowCount: 12,
+      transcriptionCompletedWindows: 4,
+      transcriptionFailedWindows: 0,
+      hasTranscriptText: false,
+    })).toBe(true);
+    expect(hasInterruptedNativeAsrCheckpoint({
+      ...complete,
+      status: 'recorded',
+      audioUri: '/audio',
+      nativePostprocessRunId: null,
+      transcriptionWindowCount: 12,
+      transcriptionCompletedWindows: 12,
+      transcriptionFailedWindows: 0,
+      hasTranscriptText: false,
+    })).toBe(false);
   });
 });

@@ -48,6 +48,14 @@ export function isTerminalNoSpeechMeeting(meeting: Meeting): boolean {
     && coverage.failed === 0;
 }
 
+export function isRecoveryBudgetExhausted(meeting: Meeting): boolean {
+  const coverage = transcriptCoverage(meeting);
+  return meeting.status === 'transcript_partial'
+    && coverage.total > 0
+    && coverage.checked === coverage.total
+    && (meeting.transcriptionRecoveryRounds ?? 0) >= TERMINAL_PARTIAL_RECOVERY_ROUNDS;
+}
+
 export function isTerminalPartialTranscript(meeting: Meeting): boolean {
   const coverage = transcriptCoverage(meeting);
   return isRecoveryBudgetExhausted(meeting)
@@ -55,14 +63,6 @@ export function isTerminalPartialTranscript(meeting: Meeting): boolean {
     && coverage.completed > 0
     && (coverage.ratio ?? 0) >= MIN_USABLE_PARTIAL_COVERAGE
     && coverage.failed * ESTIMATED_WINDOW_MS <= MAX_USABLE_PARTIAL_MISSING_MS;
-}
-
-export function isRecoveryBudgetExhausted(meeting: Meeting): boolean {
-  const coverage = transcriptCoverage(meeting);
-  return meeting.status === 'transcript_partial'
-    && coverage.total > 0
-    && coverage.checked === coverage.total
-    && (meeting.transcriptionRecoveryRounds ?? 0) >= TERMINAL_PARTIAL_RECOVERY_ROUNDS;
 }
 
 export function didTranscriptCoverageImprove(

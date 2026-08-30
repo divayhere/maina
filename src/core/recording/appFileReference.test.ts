@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+
 import {
   isPortableDocumentReference,
   resolveDocumentReference,
@@ -12,19 +13,24 @@ describe('portable app-owned file references', () => {
     expect(toPortableDocumentReference(`${current}rec-meeting-1/`, current))
       .toBe('maina-document:///rec-meeting-1/');
   });
-  it('rebases a stale iOS container URL', () => {
+
+  it('rebases a stale iOS container URL to the current Documents directory', () => {
     const stale = 'file:///var/mobile/Containers/Data/Application/OLD/Documents/rec-meeting-1/capture-00000.wav';
-    expect(resolveDocumentReference(stale, current)).toBe(`${current}rec-meeting-1/capture-00000.wav`);
+    expect(resolveDocumentReference(stale, current))
+      .toBe(`${current}rec-meeting-1/capture-00000.wav`);
   });
-  it('resolves a portable reference idempotently', () => {
+
+  it('resolves a portable directory idempotently', () => {
     const stored = 'maina-document:///rec-meeting-1';
     expect(toPortableDocumentReference(stored, current)).toBe(stored);
     expect(resolveDocumentReference(stored, current)).toBe(`${current}rec-meeting-1`);
     expect(isPortableDocumentReference(stored)).toBe(true);
   });
-  it('rejects path traversal and ignores external files', () => {
+
+  it('does not rewrite external or malformed references', () => {
     expect(toPortableDocumentReference('file:///tmp/external.wav', current)).toBe('file:///tmp/external.wav');
     expect(resolveDocumentReference('maina-document:///../outside.wav', current))
       .toBe('maina-document:///../outside.wav');
+    expect(resolveDocumentReference(null, current)).toBeNull();
   });
 });
