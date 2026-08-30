@@ -20,6 +20,10 @@ export type PipelineRecoveryDependencies = {
   flushDiagnostics(): Promise<unknown>;
 };
 
+/**
+ * The product pipeline order is explicit and testable here: first make local
+ * storage readable, then recover ASR, then notes, then immutable cloud work.
+ */
 export async function executePipelineRecovery(
   dependencies: PipelineRecoveryDependencies,
 ): Promise<PipelineRecoveryResult> {

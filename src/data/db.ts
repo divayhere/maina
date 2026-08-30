@@ -215,9 +215,9 @@ const MIGRATIONS: Migration[] = [
     await addColumnIfMissing(db, 'meetings', 'cloud_notes_retry_count', 'INTEGER NOT NULL DEFAULT 0');
     await addColumnIfMissing(db, 'meetings', 'cloud_notes_last_retry_at', 'INTEGER');
   },
-  // v13 — cross-platform recovery metadata plus durable iOS per-window ASR
-  // checkpoints. A completed empty/speech window is just as important as a
-  // text block: it prevents a process restart from replaying hours of audio.
+  // v13 — bounded native-ASR recovery progress. This counter is copied from
+  // the native outbox so the UI and notes queue can distinguish "retrying"
+  // from a terminal, usable partial transcript after the retry budget ends.
   async (db) => {
     await addColumnIfMissing(db, 'meetings', 'transcription_recovery_rounds', 'INTEGER NOT NULL DEFAULT 0');
     await db.execAsync(`CREATE TABLE IF NOT EXISTS local_asr_windows (
