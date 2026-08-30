@@ -1,4 +1,5 @@
 import { requireOptionalNativeModule } from 'expo';
+import { Platform } from 'react-native';
 
 type NativePipelineWakeModule = {
   addListener?(
@@ -71,7 +72,7 @@ export async function claimPendingNativePipelineWake(): Promise<{
 }
 
 export function subscribeNativePipelineWakeRequests(listener: () => void): () => void {
-  if (!nativeModule?.addListener) return () => {};
+  if (Platform.OS !== 'ios' || !nativeModule?.addListener) return () => {};
   const subscription = nativeModule.addListener('onPipelineWakeRequested', () => listener());
   return () => subscription.remove();
 }
