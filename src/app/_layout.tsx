@@ -70,6 +70,7 @@ import {
 } from '@/hardware/pipelineWake';
 import { runNativePipelineWakeTask } from '@/headless/registerPipelineWake';
 import { persistPipelineConnectivity } from '@/data/pipelineWake';
+import { createPipelineForegroundStarter } from '@/services/pipelineForegroundStart';
 import { createPipelineWakeCoordinator } from '@/services/pipelineWakeCoordinator';
 
 initSentry();
@@ -276,7 +277,6 @@ function RootLayout() {
       repairNativeScheduling: repairDurablePipelineScheduling,
     });
     let nativeClaimInFlight = false;
-    let initialForegroundPersisted = false;
     const claimAndRunNativeWake = async () => {
       if (stopped || nativeClaimInFlight) return;
       nativeClaimInFlight = true;
@@ -296,10 +296,6 @@ function RootLayout() {
       } finally {
         nativeClaimInFlight = false;
       }
-    };
-    const requestNativeClaim = () => {
-      if (!initialForegroundPersisted) return;
-      void claimAndRunNativeWake();
     };
     const schedulePacketPoll = () => {
       if (stopped || packetPollInFlight) return packetPollInFlight;
@@ -328,33 +324,30 @@ function RootLayout() {
       packetPollInFlight = work;
       return work;
     };
-    const runPipelineFromSignal = (
-      reason: 'foreground' | 'native_progress',
-    ) => {
-      void pipelineCoordinator.signal(reason)
+    const runNativeProgressPipeline = () => {
+      void pipelineCoordinator.signal('native_progress')
         .then(() => schedulePacketPoll())
         .catch((cause) => {
           log.warn('meetings', 'pipeline reconciliation failed', { err: String(cause) });
         });
     };
-    void pipelineCoordinator.beginSignal('foreground')
-      .then(({ completion }) => {
-        initialForegroundPersisted = true;
-        void completion
-          .then(() => schedulePacketPoll())
-          .catch((cause) => {
-            log.warn('meetings', 'pipeline reconciliation failed', { err: String(cause) });
-          });
-        requestNativeClaim();
-      })
-      .catch((cause) => {
-        log.warn('meetings', 'initial pipeline signal could not be persisted', {
+    const foregroundStarter = createPipelineForegroundStarter({
+      beginForeground: () => pipelineCoordinator.beginSignal('foreground'),
+      requestNativeClaim: () => { void claimAndRunNativeWake(); },
+      afterCompletion: async () => { await schedulePacketPoll(); },
+      onPersistenceError: (cause) => {
+        log.warn('meetings', 'foreground pipeline signal could not be persisted', {
           causeName: cause instanceof Error ? cause.name : typeof cause,
         });
-      });
+      },
+      onCompletionError: (cause) => {
+        log.warn('meetings', 'pipeline reconciliation failed', { err: String(cause) });
+      },
+    });
+    void foregroundStarter.start();
     const subscription = AppState.addEventListener('change', (state) => {
       if (state !== 'active') return;
-      runPipelineFromSignal('foreground');
+      void foregroundStarter.start();
     });
     const unsubscribeNetwork = NetInfo.addEventListener((state) => {
       const connected = state.isConnected === true && state.isInternetReachable !== false;
@@ -371,10 +364,10 @@ function RootLayout() {
         meetingId: event.meetingId,
         state: event.state,
       });
-      runPipelineFromSignal('native_progress');
+      runNativeProgressPipeline();
     });
     const unsubscribeNativeWake = subscribeNativePipelineWakeRequests(() => {
-      requestNativeClaim();
+      foregroundStarter.requestNativeClaim();
     });
     const unsubscribePipeline = subscribeMeetingPipelineChanges((meetingId) => {
       log.info('summary', 'meeting pipeline state changed; waking poller', { meetingId });
@@ -386,6 +379,7 @@ function RootLayout() {
     });
     return () => {
       stopped = true;
+      foregroundStarter.stop();
       subscription.remove();
       unsubscribeNetwork();
       unsubscribeNative();
