@@ -127,6 +127,10 @@ export interface NativePostProcessingChangedEvent {
   occurredAt: number;
 }
 
+export interface NativePipelineWakeRequestedEvent {
+  generation: number;
+}
+
 export interface QwenAsrStatus {
   ready: boolean;
   root: string;
@@ -253,6 +257,10 @@ interface MainaRecorderNativeModule {
     eventName: 'onNativePostProcessingChanged',
     listener: (event: NativePostProcessingChangedEvent) => void,
   ): NativeEventSubscription;
+  addListener(
+    eventName: 'onPipelineWakeRequested',
+    listener: (event: NativePipelineWakeRequestedEvent) => void,
+  ): NativeEventSubscription;
   startForegroundSession(): Promise<boolean>;
   stopForegroundSession(): Promise<void>;
   armRemoteControl(): Promise<RemoteControlStatus>;
@@ -280,6 +288,11 @@ interface MainaRecorderNativeModule {
   }>;
   completePipelineWake(attemptToken: string, succeeded: boolean): Promise<{ completed: boolean }>;
   isPipelineWakeAttemptActive(attemptToken: string): Promise<{ active: boolean }>;
+  claimPendingPipelineWake?(): Promise<{
+    attemptToken: string;
+    wakeKind: 'shared';
+    generation: number;
+  } | null>;
   getNativeCaptureStatus(): NativeCaptureStatus;
   getNativeCaptureStatusAsync?(): Promise<NativeCaptureStatus>;
   inspectNativeCaptureDirectory(directory: string, recoverPartials: boolean): Promise<NativeCaptureDirectoryInspection>;
@@ -295,6 +308,7 @@ interface MainaRecorderNativeModule {
   };
   updateIOSContinuedProcessing?(completedUnits: number, totalUnits: number, subtitle?: string | null): void;
   finishIOSContinuedProcessing?(success: boolean): void;
+  isIOSContinuedProcessingActive?(meetingId: string): boolean;
   getRemoteControlStatus(): Promise<RemoteControlStatus>;
   openRemoteAccessibilitySettings(): Promise<void>;
   acknowledgeHardwareTrigger(commandId: string, action: string, accepted: boolean): Promise<void>;

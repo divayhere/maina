@@ -185,6 +185,11 @@ export function finishIOSContinuedProcessing(success: boolean): void {
   MainaRecorder.finishIOSContinuedProcessing(success);
 }
 
+export function isIOSContinuedProcessingActive(meetingId: string): boolean {
+  if (Platform.OS !== 'ios') return true;
+  return MainaRecorder?.isIOSContinuedProcessingActive?.(meetingId) ?? false;
+}
+
 export async function getRemoteControlStatus(): Promise<RemoteControlStatus | null> {
   if (Platform.OS !== 'android' || !MainaRecorder) return null;
   return MainaRecorder.getRemoteControlStatus();

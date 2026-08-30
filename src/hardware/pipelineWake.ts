@@ -1,6 +1,10 @@
 import { requireOptionalNativeModule } from 'expo';
 
 type NativePipelineWakeModule = {
+  addListener?(
+    eventName: 'onPipelineWakeRequested',
+    listener: (event: { generation: number }) => void,
+  ): { remove(): void };
   schedulePipelineWake?(generation: number, requiresNetwork: boolean): Promise<{
     scheduled: boolean;
     workId?: string | null;
@@ -8,6 +12,11 @@ type NativePipelineWakeModule = {
   } | boolean>;
   completePipelineWake?(attemptToken: string, succeeded: boolean): Promise<{ completed: boolean } | boolean>;
   isPipelineWakeAttemptActive?(attemptToken: string): Promise<{ active: boolean } | boolean>;
+  claimPendingPipelineWake?(): Promise<{
+    attemptToken: string;
+    wakeKind: 'shared';
+    generation: number;
+  } | null>;
 };
 
 const nativeModule = requireOptionalNativeModule<NativePipelineWakeModule>('MainaRecorder');
@@ -50,4 +59,19 @@ export async function isNativePipelineWakeAttemptActive(attemptToken: string): P
   if (!nativeModule?.isPipelineWakeAttemptActive) return false;
   const result = await nativeModule.isPipelineWakeAttemptActive(attemptToken);
   return typeof result === 'boolean' ? result : result.active;
+}
+
+export async function claimPendingNativePipelineWake(): Promise<{
+  attemptToken: string;
+  wakeKind: 'shared';
+  generation: number;
+} | null> {
+  if (!nativeModule?.claimPendingPipelineWake) return null;
+  return nativeModule.claimPendingPipelineWake();
+}
+
+export function subscribeNativePipelineWakeRequests(listener: () => void): () => void {
+  if (!nativeModule?.addListener) return () => {};
+  const subscription = nativeModule.addListener('onPipelineWakeRequested', () => listener());
+  return () => subscription.remove();
 }
