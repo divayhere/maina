@@ -8,26 +8,180 @@ import {
   updateNativePostProcessingProgress,
   type Meeting,
 } from '@/data/meetings';
+import { Platform } from 'react-native';
 import { completedCaptureDurationRepair } from '@/core/recording/checkpoint';
 import { materialCaptureGapError } from '@/core/recording/captureGap';
+import { createKeyedExecutionOwner } from '@/core/pipeline/keyedExecutionOwner';
 import { hasCompleteNativeTranscript, terminalNativeMeetingRepair } from '@/core/recording/nativeCaptureReconciliation';
 import {
   acknowledgeNativePostProcessingResult,
-  getNativeCaptureStatus,
+  beginIOSContinuedProcessing,
+  finishIOSContinuedProcessing,
+  getNativeCaptureStatusAsync,
   isNativePostProcessingServiceRunning,
   readNativePostProcessingResult,
   startNativePostProcessing,
+  updateIOSContinuedProcessing,
 } from '@/hardware/recording/foreground';
 import { log } from '@/services/logger';
 import { cleanupTerminalMeetingAudio } from '@/services/audioRetention';
 import { notifyMeetingPipelineChanged } from '@/services/meetingPipelineSignals';
 import { getNativeCaptureMetrics } from '@/services/nativeCaptureMetrics';
+import { runLocalAsrPipeline } from '@/services/localAsrPipeline';
+import { drainMeetingPacketUntilSettled, maybeQueueMeetingPacket } from '@/services/meetingPacket';
+import { reconcilePendingMainaKnowledgeCloudSyncs } from '@/services/mainaKnowledgeCloud';
+import {
+  IOS_ASR_MAX_RECOVERY_ROUNDS,
+  iosAsrRetryDelayMs,
+} from '@/services/iosAsrRecoveryPolicy';
+import { isTerminalPartialTranscript } from '@/services/transcriptCoverage';
 import { TERMINAL_PARTIAL_RECOVERY_ROUNDS } from '@/services/transcriptCoverage';
 
 // Multiple foreground triggers (launch, resume, the meeting screen, and the
 // short foreground poll) can arrive together. Serialize them so only one
 // Expo-SQLite import ever observes a completed native outbox run at a time.
 let nativeReconciliationInFlight: Promise<number> | null = null;
+const iosPostProcessingOwner = createKeyedExecutionOwner<string, boolean>();
+const iosPostProcessingRetryTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+function scheduleIOSPostProcessingRetry(meetingId: string, recoveryRounds: number): void {
+  const existing = iosPostProcessingRetryTimers.get(meetingId);
+  if (existing) clearTimeout(existing);
+  const delayMs = iosAsrRetryDelayMs(recoveryRounds);
+  if (delayMs == null || delayMs <= 0) {
+    iosPostProcessingRetryTimers.delete(meetingId);
+    return;
+  }
+  const timer = setTimeout(() => {
+    iosPostProcessingRetryTimers.delete(meetingId);
+    void getMeeting(meetingId).then((current) => {
+      if (!current?.audioUri || current.status !== 'transcript_partial') return;
+      if (current.transcriptionRecoveryRounds !== recoveryRounds) return;
+      void launchIOSPostProcessing(current);
+    }).catch((cause) => {
+      log.warn('recovery', 'iOS delayed transcription retry deferred to durable OS wake', {
+        meetingId,
+        causeName: cause instanceof Error ? cause.name : typeof cause,
+      });
+    });
+  }, delayMs);
+  iosPostProcessingRetryTimers.set(meetingId, timer);
+}
+
+/**
+ * Foreground callers may intentionally ignore this promise; an OS/background
+ * recovery caller awaits the same in-flight promise. That gives one execution
+ * owner without blocking React rendering or reporting Worker success early.
+ */
+async function launchIOSPostProcessing(meeting: Meeting): Promise<boolean> {
+  if (!meeting.audioUri) return false;
+  return iosPostProcessingOwner.run(meeting.id, async () => {
+    await updateMeetingPipelineStage({
+      meetingId: meeting.id,
+      stage: 'asr',
+      state: 'running',
+      error: null,
+    });
+    beginIOSContinuedProcessing(meeting.id, Math.max(1, meeting.transcriptionWindowCount));
+    let terminal = false;
+    try {
+      const runPass = () => runLocalAsrPipeline({
+        meetingId: meeting.id,
+        directory: meeting.audioUri!,
+        meetingStartedAt: meeting.startedAt,
+        recoverPartials: true,
+        resetTranscript: false,
+        onProgress: updateIOSContinuedProcessing,
+      });
+      const firstResult = await runPass();
+      const result = firstResult.coverageComplete ? firstResult : await runPass();
+      const recoveryRounds = result.coverageComplete
+        ? meeting.transcriptionRecoveryRounds
+        : Math.min(IOS_ASR_MAX_RECOVERY_ROUNDS, meeting.transcriptionRecoveryRounds + 1);
+      await updateMeeting(meeting.id, { transcriptionRecoveryRounds: recoveryRounds });
+      if (result.coverageComplete) {
+        const timer = iosPostProcessingRetryTimers.get(meeting.id);
+        if (timer) clearTimeout(timer);
+        iosPostProcessingRetryTimers.delete(meeting.id);
+      } else {
+        scheduleIOSPostProcessingRetry(meeting.id, recoveryRounds);
+      }
+      const refreshedMeeting = await getMeeting(meeting.id);
+      const terminalPartial = Boolean(refreshedMeeting && isTerminalPartialTranscript(refreshedMeeting));
+      terminal = result.coverageComplete || terminalPartial;
+      await updateMeetingPipelineStage({
+        meetingId: meeting.id,
+        stage: 'asr',
+        state: terminal ? 'ready' : 'deferred',
+        completedUnits: result.completedWindows,
+        totalUnits: result.windowCount,
+        error: result.lastError,
+        metadata: {
+          completedWindows: result.completedWindows,
+          failedWindows: result.failedWindows,
+          recoveredChunks: result.recoveredChunks,
+          executionOwner: 'ios-js-resumable',
+          recoveryRounds,
+        },
+      });
+      await updateMeetingPipelineStage({
+        meetingId: meeting.id,
+        stage: 'transcript_durable',
+        state: terminal && result.hasText ? 'ready' : 'deferred',
+        completedUnits: result.completedWindows,
+        totalUnits: result.windowCount,
+        error: result.lastError,
+        metadata: { blocks: result.blockCount, words: result.wordCount },
+      });
+      if (terminal && result.hasText) {
+        await maybeQueueMeetingPacket(meeting.id).catch((cause) => {
+          log.warn('summary', 'iOS packet queue remains durable', {
+            meetingId: meeting.id,
+            causeName: cause instanceof Error ? cause.name : typeof cause,
+          });
+        });
+        await drainMeetingPacketUntilSettled(meeting.id).catch((cause) => {
+          log.warn('summary', 'iOS bounded packet drain deferred', {
+            meetingId: meeting.id,
+            causeName: cause instanceof Error ? cause.name : typeof cause,
+          });
+        });
+        await reconcilePendingMainaKnowledgeCloudSyncs().catch((cause) => {
+          log.warn('maina-cloud', 'iOS bounded source drain deferred', {
+            meetingId: meeting.id,
+            causeName: cause instanceof Error ? cause.name : typeof cause,
+          });
+        });
+        if (result.coverageComplete) await cleanupTerminalMeetingAudio(meeting.id);
+      }
+      notifyMeetingPipelineChanged(meeting.id);
+      log.info('recovery', 'iOS local post-processing reached durable boundary', {
+        meetingId: meeting.id,
+        terminal,
+        coverageComplete: result.coverageComplete,
+        completedWindows: result.completedWindows,
+        failedWindows: result.failedWindows,
+      });
+      return terminal;
+    } catch (cause) {
+      const safeError = 'Local transcription paused safely. Maina will continue automatically.';
+      await updateMeeting(meeting.id, { status: 'transcribing', lastError: safeError });
+      await updateMeetingPipelineStage({
+        meetingId: meeting.id,
+        stage: 'asr',
+        state: 'deferred',
+        error: safeError,
+      });
+      log.error('recovery', 'iOS local post-processing deferred', {
+        meetingId: meeting.id,
+        causeName: cause instanceof Error ? cause.name : typeof cause,
+      });
+      return false;
+    } finally {
+      finishIOSContinuedProcessing(terminal);
+    }
+  });
+}
 
 /**
  * A native-result Worker is only a wake signal. The native outbox remains the
@@ -99,6 +253,13 @@ async function launchNativePostProcessing(
     },
   });
   await updateMeetingPipelineStage({ meetingId: meeting.id, stage: 'asr', state: 'queued', error: null });
+  if (Platform.OS === 'ios') {
+    const completed = await launchIOSPostProcessing(meeting);
+    if (!completed) {
+      log.warn('recovery', 'iOS post-processing remains durably deferred', { meetingId: meeting.id });
+    }
+    return completed;
+  }
   try {
     await startNativePostProcessing({
       meetingId: meeting.id,
@@ -145,7 +306,7 @@ async function launchNativePostProcessing(
 }
 
 async function reconcilePendingNativeMeetingWorkInternal(): Promise<number> {
-  const nativeStatus = getNativeCaptureStatus();
+  const nativeStatus = await getNativeCaptureStatusAsync().catch(() => null);
   // The native outbox heartbeat is durable, so it can still look active for
   // up to two minutes after Android kills the isolated ASR process. Trust that
   // heartbeat only while Maina's own post-processing service actually exists.

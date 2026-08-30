@@ -26,7 +26,8 @@ import { AppText, PrimaryButton } from '@/design/components';
 import { useAppTheme } from '@/design/theme';
 import {
   getPcmWavDurationsMs,
-  getNativeCaptureStatus,
+  getIOSAutomationScenario,
+  getNativeCaptureStatusAsync,
   armRemoteControl,
   inspectNativeCaptureDirectory,
   repairWavFiles,
@@ -45,7 +46,10 @@ import {
   installRemoteLog,
   queueAudioArtifact,
 } from '@/services/remoteLog';
-import { reconcilePendingMeetingPackets } from '@/services/meetingPacket';
+import { queueEligibleMeetingPackets, reconcilePendingMeetingPackets } from '@/services/meetingPacket';
+import { reconcilePendingMainaKnowledgeCloudSyncs } from '@/services/mainaKnowledgeCloud';
+import { reconcilePendingMainaKnowledgeCloudCorrections } from '@/services/mainaKnowledgeCloudCorrections';
+import { exchangeMainaCloudPairing } from '@/services/mainaCloudSession';
 import { subscribeMeetingPipelineChanges } from '@/services/meetingPipelineSignals';
 import { initSentry, Sentry } from '@/services/sentry';
 import { installWatchdog } from '@/services/watchdog';
@@ -121,7 +125,7 @@ function RootLayout() {
         );
         const liveMeetingIds: string[] = [];
         for (const meeting of activeMeetings) {
-          const liveCapture = getNativeCaptureStatus();
+          const liveCapture = await getNativeCaptureStatusAsync().catch(() => null);
           if (liveCapture?.meetingId === meeting.id && liveCapture.state !== 'idle' && liveCapture.state !== 'error') {
             liveMeetingIds.push(meeting.id);
             log.info('recovery', 'active native capture left untouched during UI restart', {
@@ -222,15 +226,22 @@ function RootLayout() {
         if (Platform.OS === 'android' && Platform.Version >= 33) {
           await PermissionsAndroid.request(PermissionsAndroid.PERMISSIONS.POST_NOTIFICATIONS).catch(() => null);
         }
-        const microphoneReady = await requestSpeechPermissions();
-        if (microphoneReady) {
-          const control = await armRemoteControl();
-          log.info('trigger', 'remote control armed', {
-            notificationsEnabled: control.notificationsEnabled,
-            inputDevices: control.inputDevices,
+        if (Platform.OS === 'android') {
+          const microphoneReady = await requestSpeechPermissions();
+          if (microphoneReady) {
+            const control = await armRemoteControl();
+            log.info('trigger', 'remote control armed', {
+              notificationsEnabled: control.notificationsEnabled,
+              inputDevices: control.inputDevices,
+            });
+          } else {
+            log.warn('trigger', 'remote control not armed because microphone permission is missing');
+          }
+          void provisionCoreLanguages().catch((cause) => {
+            log.warn('native-speech', 'background language provisioning failed', {
+              causeName: cause instanceof Error ? cause.name : typeof cause,
+            });
           });
-        } else {
-          log.warn('trigger', 'remote control not armed because microphone permission is missing');
         }
         if (resumedNativeMeetings > 0) {
           log.warn('recovery', 'native post-processing resumed from startup reconciliation', {
@@ -238,9 +249,6 @@ function RootLayout() {
             repaired,
           });
         }
-        void provisionCoreLanguages().catch((cause) => {
-          log.warn('native-speech', 'background language provisioning failed', { err: String(cause) });
-        });
         setReady(true);
       } catch (e) {
         const message = e instanceof Error ? e.message : String(e);
@@ -341,6 +349,37 @@ function RootLayout() {
 
   useEffect(() => {
     if (!ready) return;
+    const scenario = getIOSAutomationScenario();
+    if (scenario === 'record-lifecycle' || scenario === 'record-interrupted' || scenario?.startsWith('record-soak:')) {
+      log.info('ios-qualification', 'launching recording scenario', { scenario });
+      router.push('/record');
+      return;
+    }
+    if (scenario?.startsWith('cloud-exchange|')) {
+      const [, pairingId, verificationCode] = scenario.split('|');
+      void (async () => {
+        if (!pairingId || !verificationCode) throw new Error('Cloud exchange scenario is malformed.');
+        const session = await exchangeMainaCloudPairing({
+          pairingId,
+          verificationCode,
+          expiresAt: new Date(Date.now() + 10 * 60_000).toISOString(),
+        });
+        const [notes, sources, corrections] = await Promise.all([
+          queueEligibleMeetingPackets().catch(() => 0),
+          reconcilePendingMainaKnowledgeCloudSyncs().then(() => 0).catch(() => 0),
+          reconcilePendingMainaKnowledgeCloudCorrections().then(() => 0).catch(() => 0),
+        ]);
+        log.info('ios-qualification', 'cloud pairing exchange completed', {
+          userId: session.user.userId,
+          queuedWork: notes + sources + corrections,
+        });
+      })().catch((cause) => {
+        log.error('ios-qualification', 'cloud pairing exchange failed', {
+          causeName: cause instanceof Error ? cause.name : typeof cause,
+        });
+      });
+      return;
+    }
     return installHardwareTriggerListener((event) => {
       const action = resolveRemoteAction('idle', event.command);
       log.info('trigger', 'idle remote action resolved', { command: event.command, action });

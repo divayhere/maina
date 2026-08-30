@@ -104,6 +104,19 @@ function apiMessage(body: unknown, fallback: string) {
   };
 }
 
+function safeTransportError(cause: unknown): MainaCloudApiError {
+  if (cause instanceof MainaCloudApiError) return cause;
+  const failureClass: CloudFailureClass = cause instanceof Error && cause.name === 'AbortError'
+    ? 'timeout'
+    : classifyTransportCause(cause);
+  return new MainaCloudApiError(
+    safeCloudFailureMessage(failureClass),
+    0,
+    failureClass === 'timeout' ? 'network_timeout' : 'network_error',
+    failureClass,
+  );
+}
+
 export async function getMainaCloudSession(): Promise<MainaCloudSession | null> {
   const session = parseStoredSession(await SecureStore.getItemAsync(SESSION_KEY));
   if (!session) return null;
@@ -212,7 +225,7 @@ export async function createMainaCloudPairing(deviceLabel: string): Promise<Main
       method: 'POST',
       signal: controller.signal,
       headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
-      body: JSON.stringify({ device_label: deviceLabel.trim() || 'Maina Android' }),
+      body: JSON.stringify({ device_label: deviceLabel.trim() || 'Maina mobile' }),
     });
     const body = await readJson(response) as {
       pairing_id?: unknown;
@@ -225,45 +238,56 @@ export async function createMainaCloudPairing(deviceLabel: string): Promise<Main
       throw new MainaCloudApiError(safeCloudFailureMessage(failureClass), response.status, failure.code, failureClass);
     }
     return { pairingId: body.pairing_id, verificationCode: body.verification_code, expiresAt: body.expires_at };
+  } catch (cause) {
+    throw safeTransportError(cause);
   } finally {
     clearTimeout(timeout);
   }
 }
 
 export async function exchangeMainaCloudPairing(input: MainaCloudPairingRequest): Promise<MainaCloudSession> {
-  const response = await fetch(`${apiBaseUrl()}/v1/mobile/pairings/${encodeURIComponent(input.pairingId)}/exchange`, {
-    method: 'POST',
-    headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
-    body: JSON.stringify({ verification_code: input.verificationCode }),
-  });
-  const body = await readJson(response) as {
-    access_token?: unknown;
-    expires_at?: unknown;
-    user?: { id?: unknown; user_id?: unknown; email?: unknown; display_name?: unknown; role?: unknown };
-  };
-  const userId = typeof body.user?.id === 'string'
-    ? body.user.id
-    : typeof body.user?.user_id === 'string'
-      ? body.user.user_id
-      : null;
-  if (!response.ok || typeof body.access_token !== 'string' || !userId || typeof body.user?.email !== 'string') {
-    const failure = apiMessage(body, 'Maina Cloud pairing was not approved yet.');
-    const failureClass = classifyHttpFailure(response.status, failure.code);
-    throw new MainaCloudApiError(safeCloudFailureMessage(failureClass), response.status, failure.code, failureClass);
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+  try {
+    const response = await fetch(`${apiBaseUrl()}/v1/mobile/pairings/${encodeURIComponent(input.pairingId)}/exchange`, {
+      method: 'POST',
+      signal: controller.signal,
+      headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
+      body: JSON.stringify({ verification_code: input.verificationCode }),
+    });
+    const body = await readJson(response) as {
+      access_token?: unknown;
+      expires_at?: unknown;
+      user?: { id?: unknown; user_id?: unknown; email?: unknown; display_name?: unknown; role?: unknown };
+    };
+    const userId = typeof body.user?.id === 'string'
+      ? body.user.id
+      : typeof body.user?.user_id === 'string'
+        ? body.user.user_id
+        : null;
+    if (!response.ok || typeof body.access_token !== 'string' || !userId || typeof body.user?.email !== 'string') {
+      const failure = apiMessage(body, 'Maina Cloud pairing was not approved yet.');
+      const failureClass = classifyHttpFailure(response.status, failure.code);
+      throw new MainaCloudApiError(safeCloudFailureMessage(failureClass), response.status, failure.code, failureClass);
+    }
+    const session: MainaCloudSession = {
+      accessToken: body.access_token,
+      expiresAt: typeof body.expires_at === 'string' ? body.expires_at : null,
+      user: {
+        userId,
+        email: body.user.email,
+        displayName: typeof body.user.display_name === 'string' ? body.user.display_name : null,
+        role: typeof body.user.role === 'string' ? body.user.role : null,
+      },
+    };
+    await saveMainaCloudSession(session);
+    log.info('maina-cloud-session', 'mobile cloud pairing established', { userId: session.user.userId });
+    return session;
+  } catch (cause) {
+    throw safeTransportError(cause);
+  } finally {
+    clearTimeout(timeout);
   }
-  const session: MainaCloudSession = {
-    accessToken: body.access_token,
-    expiresAt: typeof body.expires_at === 'string' ? body.expires_at : null,
-    user: {
-      userId,
-      email: body.user.email,
-      displayName: typeof body.user.display_name === 'string' ? body.user.display_name : null,
-      role: typeof body.user.role === 'string' ? body.user.role : null,
-    },
-  };
-  await saveMainaCloudSession(session);
-  log.info('maina-cloud-session', 'mobile cloud pairing established', { userId: session.user.userId });
-  return session;
 }
 
 export async function signOutMainaCloud(): Promise<void> {

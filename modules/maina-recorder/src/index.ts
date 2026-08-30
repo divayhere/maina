@@ -74,6 +74,8 @@ export interface NativeCaptureStatus {
   pauseReason?: 'manual' | 'communication' | string | null;
   rmsDbfs?: number;
   peakDbfs?: number;
+  freeStorageBytes?: number;
+  storageReserveBytes?: number;
 }
 
 export interface NativeCaptureDirectoryInspection {

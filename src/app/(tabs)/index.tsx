@@ -14,6 +14,7 @@ import { describeMeetingPresentation } from '@/services/meetingPresentation';
 import { useMeetings } from '@/state/meetingsStore';
 import { subscribeMeetingPipelineChanges } from '@/services/meetingPipelineSignals';
 import { formatDate, formatDuration, formatTime } from '@/utils/format';
+import { markdownToReadableText } from '@/utils/plainText';
 
 function MeetingRow({ item }: { item: Meeting }) {
   const { theme } = useAppTheme();
@@ -44,7 +45,7 @@ function MeetingRow({ item }: { item: Meeting }) {
 
           {item.summaryStatus === 'ready' && item.summary?.trim() ? (
             <AppText variant="body" muted numberOfLines={2}>
-              {item.summary.trim()}
+              {markdownToReadableText(item.summary)}
             </AppText>
           ) : (
             <AppText variant="body" muted numberOfLines={2}>
