@@ -14,7 +14,7 @@ import { completedCaptureDurationRepair } from '@/core/recording/checkpoint';
 import { materialCaptureGapError } from '@/core/recording/captureGap';
 import { createKeyedExecutionOwner } from '@/core/pipeline/keyedExecutionOwner';
 import {
-  acceptIOSContinuedProcessingDeferral,
+  createIOSContinuedProcessingDeferralHandler,
   type IOSContinuedProcessingHandleState,
 } from '@/core/transcription/asr/iosContinuedProcessingPolicy';
 import { hasCompleteNativeTranscript, terminalNativeMeetingRepair } from '@/core/recording/nativeCaptureReconciliation';
@@ -57,33 +57,40 @@ const iosPostProcessingRetryTimers = new Map<string, ReturnType<typeof setTimeou
 type IOSPostProcessingHandle = IOSContinuedProcessingHandleState;
 const iosPostProcessingHandles = new Map<string, IOSPostProcessingHandle>();
 
+const handleIOSPostProcessingDeferral = createIOSContinuedProcessingDeferralHandler({
+  fenceGeneration: (event) => deferLocalAsrRunGeneration(event.meetingId, event.asrGeneration),
+  markStageDeferred: (event) => updateMeetingPipelineStage({
+    meetingId: event.meetingId,
+    stage: 'asr',
+    state: 'deferred',
+    error: 'Local transcription paused safely. Maina will continue automatically.',
+    metadata: {
+      executionOwner: 'ios-js-resumable',
+      asrGeneration: event.asrGeneration,
+      deferredBy: 'ios-continued-processing-expiration',
+    },
+  }).then(() => undefined),
+  acknowledge: (event) => {
+    acknowledgeIOSContinuedProcessingDeferral(event.requestId, event.meetingId, event.asrGeneration);
+  },
+  onFenceError: (cause) => {
+    log.warn('recovery', 'iOS ASR expiration fence was not persisted', {
+      causeName: cause instanceof Error ? cause.name : typeof cause,
+    });
+  },
+  onStageError: (cause) => {
+    log.warn('recovery', 'iOS ASR deferred stage awaits reconciliation', {
+      causeName: cause instanceof Error ? cause.name : typeof cause,
+    });
+  },
+});
+
 // Native expiration is a request to stop owning new work, not permission to
 // discard an in-flight decoder callback. Fence the exact SQLite generation;
 // localAsrPipeline rechecks ownership after decode and before every commit.
 subscribeIOSPostProcessingDeferralRequests((event) => {
   const handle = iosPostProcessingHandles.get(event.requestId);
-  const disposition = acceptIOSContinuedProcessingDeferral(handle, event);
-  if (disposition === 'identity_mismatch') return;
-  if (disposition === 'duplicate') {
-    acknowledgeIOSContinuedProcessingDeferral(event.requestId, event.meetingId, event.asrGeneration);
-    return;
-  }
-  void deferLocalAsrRunGeneration(event.meetingId, event.asrGeneration)
-    .catch(() => false)
-    .then(async () => {
-      await updateMeetingPipelineStage({
-        meetingId: event.meetingId,
-        stage: 'asr',
-        state: 'deferred',
-        error: 'Local transcription paused safely. Maina will continue automatically.',
-        metadata: {
-          executionOwner: 'ios-js-resumable',
-          asrGeneration: event.asrGeneration,
-          deferredBy: 'ios-continued-processing-expiration',
-        },
-      }).catch(() => {});
-      acknowledgeIOSContinuedProcessingDeferral(event.requestId, event.meetingId, event.asrGeneration);
-    });
+  void handleIOSPostProcessingDeferral(handle, event);
 });
 
 function scheduleIOSPostProcessingRetry(meetingId: string, recoveryRounds: number): void {
