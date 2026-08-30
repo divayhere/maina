@@ -131,6 +131,21 @@ export interface NativePipelineWakeRequestedEvent {
   generation: number;
 }
 
+export type SchedulePipelineWake = (
+  generation: number,
+  requiresNetwork: boolean,
+  notBeforeAt: number,
+  scheduleRevision: number,
+  previousWorkId: string | null,
+  previousNotBeforeAt: number | null,
+  previousScheduleRevision: number | null,
+  schedulerProtocolVersion: number,
+) => Promise<{
+  scheduled: boolean;
+  workId?: string | null;
+  errorCode?: string | null;
+}>;
+
 export interface IOSPostProcessingDeferralEvent {
   requestId: string;
   meetingId: string;
@@ -292,11 +307,7 @@ interface MainaRecorderNativeModule {
   isNativePostProcessingServiceRunning?(): boolean;
   readNativePostProcessingResult(meetingId: string): Promise<NativePostProcessingResult | null>;
   acknowledgeNativePostProcessingResult(meetingId: string, runId: string): Promise<{ acknowledged: boolean }>;
-  schedulePipelineWake(generation: number, requiresNetwork: boolean): Promise<{
-    scheduled: boolean;
-    workId?: string | null;
-    errorCode?: string | null;
-  }>;
+  schedulePipelineWake: SchedulePipelineWake;
   completePipelineWake(attemptToken: string, succeeded: boolean): Promise<{ completed: boolean }>;
   isPipelineWakeAttemptActive(attemptToken: string): Promise<{ active: boolean }>;
   claimPendingPipelineWake?(): Promise<{

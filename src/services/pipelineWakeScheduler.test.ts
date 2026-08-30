@@ -37,8 +37,12 @@ describe('durable native scheduling boundary', () => {
       order.push('sqlite');
       return { requestedGeneration: 4 };
     });
-    mocks.generationAwaiting.mockResolvedValue(4);
-    mocks.getState.mockResolvedValue({ requiresNetwork: true });
+    mocks.generationAwaiting.mockResolvedValue({ generation: 4, notBeforeAt: 100, scheduleRevision: 2 });
+    mocks.getState.mockResolvedValue({
+      requiresNetwork: true,
+      lastEnqueuedWorkId: null,
+      lastEnqueuedNotBeforeAt: null,
+    });
     mocks.recordOutcome.mockResolvedValue({});
     unregister = registerNativePipelineWakeScheduler(async () => {
       order.push('native');
@@ -52,8 +56,12 @@ describe('durable native scheduling boundary', () => {
   });
 
   it('retains enqueue-required truth when the scheduler is unavailable', async () => {
-    mocks.generationAwaiting.mockResolvedValue(7);
-    mocks.getState.mockResolvedValue({ requiresNetwork: true });
+    mocks.generationAwaiting.mockResolvedValue({ generation: 7, notBeforeAt: 200, scheduleRevision: 3 });
+    mocks.getState.mockResolvedValue({
+      requiresNetwork: true,
+      lastEnqueuedWorkId: null,
+      lastEnqueuedNotBeforeAt: null,
+    });
     mocks.recordOutcome.mockResolvedValue({});
     await expect(repairDurablePipelineScheduling()).resolves.toEqual({ generation: 7, scheduled: false });
     expect(mocks.recordOutcome).toHaveBeenCalledWith(expect.objectContaining({
@@ -69,11 +77,13 @@ describe('durable native scheduling boundary', () => {
   });
 
   it('stops native enqueue repair after the bounded attempt budget', async () => {
-    mocks.generationAwaiting.mockResolvedValue(9);
+    mocks.generationAwaiting.mockResolvedValue({ generation: 9, notBeforeAt: 300, scheduleRevision: 4 });
     mocks.getState.mockResolvedValue({
       requiresNetwork: true,
       nativeScheduleState: 'pending',
       nativeScheduleAttempts: 5,
+      lastEnqueuedWorkId: null,
+      lastEnqueuedNotBeforeAt: null,
     });
     mocks.recordOutcome.mockResolvedValue({});
     unregister = registerNativePipelineWakeScheduler(async () => ({ outcome: 'enqueued' }));

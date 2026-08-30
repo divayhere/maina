@@ -4,6 +4,7 @@ import {
   listMeetingTodos,
   listMeetingsEligibleForKnowledgeCloudQueueWithOptions,
   listMeetingsNeedingKnowledgeCloudSync,
+  persistKnowledgeCloudSourceRetry,
   updateMeeting,
   updateMeetingPipelineStage,
   type Meeting,
@@ -13,13 +14,12 @@ import {
   getMainaKnowledgeCloudSettings,
 } from '@/services/config';
 import { log } from '@/services/logger';
-import { clearMainaCloudSession } from '@/services/mainaCloudSession';
+import { clearMainaCloudSession, mainaCloudRequestJson } from '@/services/mainaCloudSession';
 import { notifyMeetingPipelineChanged } from '@/services/meetingPipelineSignals';
 import {
   buildMainaKnowledgeCloudSourcePackage,
   classifyMainaKnowledgeCloudResponse,
   isMeetingEligibleForMainaKnowledgeCloudSync,
-  normalizeMainaKnowledgeCloudBaseUrl,
   type MainaKnowledgeCloudSourcePackage,
 } from '@/services/mainaKnowledgeCloudCore';
 import { reconcileMainaKnowledgeCloudCorrectionsForMeeting } from '@/services/mainaKnowledgeCloudCorrections';
@@ -60,6 +60,31 @@ async function setCloudSyncState(
     error: patch.knowledgeCloudError,
   });
   notifyMeetingPipelineChanged(meetingId);
+}
+
+async function setCloudSyncRetryState(input: {
+  meetingId: string;
+  syncStatus: 'sync_failed_retryable' | 'sync_blocked_budget';
+  retryCount: number;
+  lastRetryAt: number;
+  nextRetryAt: number;
+  failureClass: Parameters<typeof persistKnowledgeCloudSourceRetry>[0]['failureClass'];
+  visibleError: string;
+}): Promise<void> {
+  await persistKnowledgeCloudSourceRetry(input);
+  await updateMeetingPipelineStage({
+    meetingId: input.meetingId,
+    stage: 'mkc',
+    state: 'deferred',
+    completedUnits: 0,
+    totalUnits: 1,
+    error: input.visibleError,
+    metadata: {
+      retryAt: input.nextRetryAt,
+      failureClass: input.failureClass,
+    },
+  });
+  notifyMeetingPipelineChanged(input.meetingId);
 }
 
 function parseStoredPayload(payloadJson: string): MainaKnowledgeCloudSourcePackage | null {
@@ -129,20 +154,6 @@ async function freezePayloadSnapshot(meeting: Meeting) {
   return { payload, payloadJson };
 }
 
-async function decodeResponseBody(response: Response) {
-  const text = await response.text();
-  if (!text.trim()) return null;
-  try {
-    return JSON.parse(text) as unknown;
-  } catch {
-    return {
-      error: {
-        message: text,
-      },
-    };
-  }
-}
-
 async function syncMeetingToMainaKnowledgeCloud(meetingId: string): Promise<void> {
   const settings = await getMainaKnowledgeCloudSettings();
   if (!settings.enabled) return;
@@ -150,11 +161,14 @@ async function syncMeetingToMainaKnowledgeCloud(meetingId: string): Promise<void
 
   const meeting = await getMeeting(meetingId);
   if (!meeting || !isMeetingEligibleForMainaKnowledgeCloudSync(meeting)) return;
+  if ((meeting.knowledgeCloudSyncStatus === 'sync_failed_retryable'
+      || meeting.knowledgeCloudSyncStatus === 'sync_blocked_budget')
+    && meeting.knowledgeCloudNextRetryAt != null
+    && meeting.knowledgeCloudNextRetryAt > Date.now()) return;
 
   const frozen = await freezePayloadSnapshot(meeting);
   if (!frozen) return;
 
-  const baseUrl = normalizeMainaKnowledgeCloudBaseUrl(settings.baseUrl);
   await armPipelineNetworkRecovery();
   await setCloudSyncState(meetingId, {
     knowledgeCloudSyncStatus: 'syncing',
@@ -165,18 +179,16 @@ async function syncMeetingToMainaKnowledgeCloud(meetingId: string): Promise<void
   });
 
   try {
-    const response = await fetch(`${baseUrl}/v1/sources`, {
+    const response = await mainaCloudRequestJson('/v1/sources', {
       method: 'POST',
       headers: {
-        Authorization: `Bearer ${settings.token}`,
         'Content-Type': 'application/json',
       },
       body: frozen.payloadJson,
-    });
-    const body = await decodeResponseBody(response);
+    }, { acceptHttpErrors: true });
     const result = classifyMainaKnowledgeCloudResponse({
       status: response.status,
-      body,
+      body: response.data,
     });
 
     if (result.outcome === 'success') {
@@ -236,33 +248,39 @@ async function syncMeetingToMainaKnowledgeCloud(meetingId: string): Promise<void
 
     if (result.outcome === 'blocked_budget') {
       const retry = nextCloudRetry({ attemptCount: meeting.knowledgeCloudRetryCount ?? 0 });
-      await setCloudSyncState(meetingId, {
-        knowledgeCloudSyncStatus: 'sync_blocked_budget',
-        knowledgeCloudError: safeCloudFailureMessage('backend_retryable'),
-        knowledgeCloudFailureClass: 'backend_retryable',
-        knowledgeCloudRetryCount: retry.attemptCount,
-        knowledgeCloudNextRetryAt: retry.nextRetryAt,
+      await setCloudSyncRetryState({
+        meetingId,
+        syncStatus: 'sync_blocked_budget',
+        visibleError: safeCloudFailureMessage('backend_retryable'),
+        failureClass: 'backend_retryable',
+        retryCount: retry.attemptCount,
+        lastRetryAt: retry.lastRetryAt,
+        nextRetryAt: retry.nextRetryAt,
       });
       return;
     }
 
     const retry = nextCloudRetry({ attemptCount: meeting.knowledgeCloudRetryCount ?? 0 });
-    await setCloudSyncState(meetingId, {
-      knowledgeCloudSyncStatus: 'sync_failed_retryable',
-      knowledgeCloudError: safeCloudFailureMessage('http_retryable'),
-      knowledgeCloudFailureClass: 'http_retryable',
-      knowledgeCloudRetryCount: retry.attemptCount,
-      knowledgeCloudNextRetryAt: retry.nextRetryAt,
+    await setCloudSyncRetryState({
+      meetingId,
+      syncStatus: 'sync_failed_retryable',
+      visibleError: safeCloudFailureMessage('http_retryable'),
+      failureClass: 'http_retryable',
+      retryCount: retry.attemptCount,
+      lastRetryAt: retry.lastRetryAt,
+      nextRetryAt: retry.nextRetryAt,
     });
   } catch (cause) {
     const failureClass = classifyTransportCause(cause);
     const retry = nextCloudRetry({ attemptCount: meeting.knowledgeCloudRetryCount ?? 0 });
-    await setCloudSyncState(meetingId, {
-      knowledgeCloudSyncStatus: 'sync_failed_retryable',
-      knowledgeCloudError: safeCloudFailureMessage(failureClass),
-      knowledgeCloudFailureClass: failureClass,
-      knowledgeCloudRetryCount: retry.attemptCount,
-      knowledgeCloudNextRetryAt: retry.nextRetryAt,
+    await setCloudSyncRetryState({
+      meetingId,
+      syncStatus: 'sync_failed_retryable',
+      visibleError: safeCloudFailureMessage(failureClass),
+      failureClass,
+      retryCount: retry.attemptCount,
+      lastRetryAt: retry.lastRetryAt,
+      nextRetryAt: retry.nextRetryAt,
     });
     log.warn('maina-cloud', 'meeting sync failed', {
       meetingId,
@@ -285,13 +303,18 @@ export function runMainaKnowledgeCloudSync(meetingId: string): Promise<void> {
 
 export async function maybeQueueMainaKnowledgeCloudSync(
   meetingId: string,
-  options?: { includeAuthFailures?: boolean },
+  options?: { includeAuthFailures?: boolean; forceRetry?: boolean },
 ): Promise<boolean> {
   const settings = await getMainaKnowledgeCloudSettings();
   if (!settings.enabled || !settings.baseUrl.trim() || !settings.token.trim()) return false;
 
   const meeting = await getMeeting(meetingId);
   if (!meeting || !isMeetingEligibleForMainaKnowledgeCloudSync(meeting, options)) return false;
+  if (options?.forceRetry !== true
+    && (meeting.knowledgeCloudSyncStatus === 'sync_failed_retryable'
+      || meeting.knowledgeCloudSyncStatus === 'sync_blocked_budget')
+    && meeting.knowledgeCloudNextRetryAt != null
+    && meeting.knowledgeCloudNextRetryAt > Date.now()) return false;
 
   const frozen = await freezePayloadSnapshot(meeting);
   if (!frozen) return false;
@@ -307,6 +330,7 @@ export async function maybeQueueMainaKnowledgeCloudSync(
 
 export async function queueEligibleMainaKnowledgeCloudSyncs(options?: {
   includeAuthFailures?: boolean;
+  forceRetry?: boolean;
 }): Promise<number> {
   const settings = await getMainaKnowledgeCloudSettings();
   if (!settings.enabled || !settings.baseUrl.trim() || !settings.token.trim()) return 0;

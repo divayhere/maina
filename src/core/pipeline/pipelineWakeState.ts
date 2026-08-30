@@ -4,6 +4,10 @@ export type PipelineWakeSnapshot = {
   signalSequence: number;
   requestedGeneration: number;
   completedGeneration: number;
+  currentGeneration: number | null;
+  currentRetryNotBeforeAt: number | null;
+  pendingGeneration: number | null;
+  pendingNotBeforeAt: number | null;
   enqueueRequired: boolean;
   connectivityEpoch: number;
   lastConnected: boolean | null;
@@ -13,6 +17,7 @@ export type PipelineWakeSnapshot = {
   activeAttemptLeaseUntil: number | null;
   nativeScheduleState: NativeScheduleState;
   nativeScheduleAttempts: number;
+  nativeScheduleRevision: number;
 };
 
 export type PipelineWakeSignalDecision = PipelineWakeSnapshot & {
@@ -20,122 +25,209 @@ export type PipelineWakeSignalDecision = PipelineWakeSnapshot & {
   openedGeneration: boolean;
 };
 
+const minDue = (left: number | null, right: number) => left == null ? right : Math.min(left, right);
+
 /**
- * Persist a genuine lifecycle/transport signal before any process-local drain
- * coalescing. Pending signals share one generation; a signal arriving while N
- * owns the drain opens exactly one N+1 generation.
+ * Persist one signal without overwriting current generation N with successor
+ * N+1. Expiration makes N reclaimable while retaining the exact N+1 due tuple.
  */
-export function persistWakeSignal(
+export function persistDeferredWakeSignal(
   state: PipelineWakeSnapshot,
-  input: { connected?: boolean; requiresNetwork: boolean },
+  input: { connected?: boolean; requiresNetwork: boolean; notBeforeAt: number },
+  now: number,
 ): PipelineWakeSignalDecision {
   const connectivityRestored = input.connected === true && state.lastConnected === false;
-  const nextGeneration = state.activeAttemptGeneration != null
-    ? Math.max(state.requestedGeneration, state.activeAttemptGeneration + 1)
-    : state.requestedGeneration > state.completedGeneration
-      ? state.requestedGeneration
-      : state.completedGeneration + 1;
-  const openedGeneration = nextGeneration !== state.requestedGeneration;
+  const previousHighest = Math.max(
+    state.requestedGeneration,
+    state.currentGeneration ?? 0,
+    state.pendingGeneration ?? 0,
+  );
+  let currentGeneration = state.currentGeneration;
+  let currentRetryNotBeforeAt = state.currentRetryNotBeforeAt;
+  let pendingGeneration = state.pendingGeneration;
+  let pendingNotBeforeAt = state.pendingNotBeforeAt;
+  let nativeScheduleRevision = state.nativeScheduleRevision;
+  let nativeScheduleState = state.nativeScheduleState;
+  let nativeScheduleAttempts = state.nativeScheduleAttempts;
+
+  const liveCurrentOwner = state.activeAttemptToken != null
+    && state.activeAttemptGeneration === currentGeneration
+    && (state.activeAttemptLeaseUntil ?? 0) > now;
+  let currentScheduleChanged = false;
+
+  if (currentGeneration == null) {
+    currentGeneration = state.completedGeneration + 1;
+    currentRetryNotBeforeAt = input.notBeforeAt;
+    currentScheduleChanged = true;
+  } else if (liveCurrentOwner) {
+    const successor = currentGeneration + 1;
+    if (pendingGeneration == null) {
+      pendingGeneration = successor;
+      pendingNotBeforeAt = input.notBeforeAt;
+    } else if (pendingGeneration === successor) {
+      pendingNotBeforeAt = minDue(pendingNotBeforeAt, input.notBeforeAt);
+    }
+  } else {
+    const nextDue = minDue(currentRetryNotBeforeAt, input.notBeforeAt);
+    currentScheduleChanged = nextDue !== currentRetryNotBeforeAt;
+    currentRetryNotBeforeAt = nextDue;
+  }
+
+  if (currentScheduleChanged || state.nativeScheduleState === 'max_attempts') {
+    nativeScheduleRevision += 1;
+    nativeScheduleState = 'pending';
+    nativeScheduleAttempts = 0;
+  }
+
+  const requestedGeneration = Math.max(
+    state.completedGeneration,
+    currentGeneration ?? 0,
+    pendingGeneration ?? 0,
+  );
   return {
     ...state,
     signalSequence: state.signalSequence + 1,
-    requestedGeneration: nextGeneration,
-    enqueueRequired: true,
+    requestedGeneration,
+    currentGeneration,
+    currentRetryNotBeforeAt,
+    pendingGeneration,
+    pendingNotBeforeAt,
+    enqueueRequired: currentGeneration != null,
     connectivityEpoch: state.connectivityEpoch + (connectivityRestored ? 1 : 0),
     lastConnected: input.connected ?? state.lastConnected,
     requiresNetwork: state.requiresNetwork || input.requiresNetwork,
-    nativeScheduleState: openedGeneration || state.nativeScheduleState === 'max_attempts'
-      ? 'pending'
-      : state.nativeScheduleState,
-    nativeScheduleAttempts: openedGeneration || state.nativeScheduleState === 'max_attempts'
-      ? 0
-      : state.nativeScheduleAttempts,
+    nativeScheduleState,
+    nativeScheduleAttempts,
+    nativeScheduleRevision,
     signalPersisted: true,
-    openedGeneration,
+    openedGeneration: requestedGeneration > previousHighest,
   };
+}
+
+export function persistWakeSignal(
+  state: PipelineWakeSnapshot,
+  input: { connected?: boolean; requiresNetwork: boolean },
+  now = Date.now(),
+): PipelineWakeSignalDecision {
+  return persistDeferredWakeSignal(state, { ...input, notBeforeAt: now }, now);
 }
 
 export type PipelineWakeClaimDecision =
   | { status: 'claimed' | 'reclaimed'; generation: number }
-  | { status: 'busy' | 'obsolete' | 'no_work'; generation: number };
+  | { status: 'busy' | 'obsolete' | 'no_work' | 'not_due'; generation: number; notBeforeAt?: number };
 
-/** A dead process loses its lease; only its exact generation can be reclaimed. */
+/** A dead process loses only N's lease; its successor remains untouched. */
 export function decidePipelineWakeClaim(
   state: PipelineWakeSnapshot,
   expectedGeneration: number,
   now: number,
 ): PipelineWakeClaimDecision {
-  if (expectedGeneration <= state.completedGeneration || expectedGeneration > state.requestedGeneration) {
-    return { status: 'obsolete', generation: state.requestedGeneration };
+  const current = state.currentGeneration;
+  if (current == null) return { status: 'no_work', generation: state.completedGeneration };
+  if (expectedGeneration < current || expectedGeneration <= state.completedGeneration) {
+    return { status: 'obsolete', generation: current };
   }
+  if (expectedGeneration > current) return { status: 'busy', generation: current };
   if (state.activeAttemptToken) {
     const leaseAlive = (state.activeAttemptLeaseUntil ?? 0) > now;
-    if (leaseAlive || state.activeAttemptGeneration !== expectedGeneration) {
-      return { status: 'busy', generation: state.activeAttemptGeneration ?? state.requestedGeneration };
+    if (leaseAlive || state.activeAttemptGeneration !== current) {
+      return { status: 'busy', generation: state.activeAttemptGeneration ?? current };
     }
-    return { status: 'reclaimed', generation: expectedGeneration };
+    return { status: 'reclaimed', generation: current };
   }
-  const nextGeneration = state.completedGeneration + 1;
-  if (expectedGeneration !== nextGeneration) {
-    return expectedGeneration < nextGeneration
-      ? { status: 'obsolete', generation: state.requestedGeneration }
-      : { status: 'busy', generation: nextGeneration };
-  }
-  if (state.requestedGeneration < nextGeneration) {
-    return { status: 'no_work', generation: state.requestedGeneration };
-  }
-  return { status: 'claimed', generation: expectedGeneration };
+  const dueAt = state.currentRetryNotBeforeAt ?? now;
+  if (dueAt > now) return { status: 'not_due', generation: current, notBeforeAt: dueAt };
+  return { status: 'claimed', generation: current };
 }
 
 export function completeWakeClaim(
   state: PipelineWakeSnapshot,
-  input: { tokenMatches: boolean; succeeded: boolean },
+  input: {
+    tokenMatches: boolean;
+    succeeded: boolean;
+    now: number;
+    failureRetryAt?: number;
+    canonicalNextDueAt?: number | null;
+  },
 ): PipelineWakeSnapshot {
-  if (!input.tokenMatches || state.activeAttemptGeneration == null) return state;
-  const completedGeneration = input.succeeded
-    ? Math.max(state.completedGeneration, state.activeAttemptGeneration)
-    : state.completedGeneration;
-  const enqueueRequired = input.succeeded
-    ? state.requestedGeneration > completedGeneration
-    : true;
+  const active = state.activeAttemptGeneration;
+  if (!input.tokenMatches || active == null || active !== state.currentGeneration) return state;
+
+  if (!input.succeeded) {
+    return {
+      ...state,
+      currentRetryNotBeforeAt: input.failureRetryAt ?? input.now,
+      enqueueRequired: true,
+      activeAttemptToken: null,
+      activeAttemptGeneration: null,
+      activeAttemptLeaseUntil: null,
+      nativeScheduleState: 'pending',
+      nativeScheduleAttempts: 0,
+      nativeScheduleRevision: state.nativeScheduleRevision + 1,
+    };
+  }
+
+  const completedGeneration = Math.max(state.completedGeneration, active);
+  let currentGeneration = state.pendingGeneration;
+  let currentRetryNotBeforeAt = state.pendingNotBeforeAt;
+  if (input.canonicalNextDueAt != null) {
+    if (currentGeneration == null) {
+      currentGeneration = completedGeneration + 1;
+      currentRetryNotBeforeAt = input.canonicalNextDueAt;
+    } else {
+      currentRetryNotBeforeAt = minDue(currentRetryNotBeforeAt, input.canonicalNextDueAt);
+    }
+  }
+  const hasNext = currentGeneration != null;
   return {
     ...state,
+    requestedGeneration: hasNext ? currentGeneration! : completedGeneration,
     completedGeneration,
-    enqueueRequired,
-    requiresNetwork: enqueueRequired ? state.requiresNetwork : false,
+    currentGeneration,
+    currentRetryNotBeforeAt,
+    pendingGeneration: null,
+    pendingNotBeforeAt: null,
+    enqueueRequired: hasNext,
+    requiresNetwork: hasNext ? state.requiresNetwork : false,
     activeAttemptToken: null,
     activeAttemptGeneration: null,
     activeAttemptLeaseUntil: null,
-    nativeScheduleState: enqueueRequired ? 'pending' : 'idle',
-    nativeScheduleAttempts: enqueueRequired ? 0 : state.nativeScheduleAttempts,
+    nativeScheduleState: hasNext ? 'pending' : 'idle',
+    nativeScheduleAttempts: 0,
+    nativeScheduleRevision: state.nativeScheduleRevision + (hasNext ? 1 : 0),
   };
 }
 
-/**
- * Pick the only generation that may be enqueued now. A live owner keeps N+1
- * durable but unscheduled; N completion hands it off without parallel drains.
- */
+export type PipelineWakeNativeTarget = {
+  generation: number;
+  notBeforeAt: number;
+  scheduleRevision: number;
+};
+
+/** Native scheduling always prioritizes current N; N+1 is hidden until promotion. */
 export function generationNeedingNativeSchedule(
   state: PipelineWakeSnapshot,
   now: number,
-): number | null {
-  if (!state.enqueueRequired) return null;
-  if (state.activeAttemptToken) {
-    if ((state.activeAttemptLeaseUntil ?? 0) > now) return null;
-    return state.activeAttemptGeneration;
-  }
-  const next = state.completedGeneration + 1;
-  return next <= state.requestedGeneration ? next : null;
+): PipelineWakeNativeTarget | null {
+  const current = state.currentGeneration;
+  if (!state.enqueueRequired || current == null) return null;
+  if (state.activeAttemptToken && (state.activeAttemptLeaseUntil ?? 0) > now) return null;
+  return {
+    generation: current,
+    notBeforeAt: state.currentRetryNotBeforeAt ?? now,
+    scheduleRevision: state.nativeScheduleRevision,
+  };
 }
 
 export function markNativeScheduleOutcome(
   state: PipelineWakeSnapshot,
   input: {
     generation: number;
+    scheduleRevision: number;
     outcome: 'enqueued' | 'unavailable' | 'failed' | 'max_attempts';
   },
 ): PipelineWakeSnapshot {
-  if (input.generation < state.completedGeneration + 1 || input.generation > state.requestedGeneration) {
+  if (input.generation !== state.currentGeneration || input.scheduleRevision !== state.nativeScheduleRevision) {
     return state;
   }
   return {

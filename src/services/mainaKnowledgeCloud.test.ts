@@ -7,9 +7,11 @@ const {
   mockListMeetingsEligibleForKnowledgeCloudQueueWithOptions,
   mockListMeetingsNeedingKnowledgeCloudSync,
   mockUpdateMeeting,
+  mockPersistKnowledgeCloudSourceRetry,
   mockUpdateMeetingPipelineStage,
   mockGetMainaKnowledgeCloudSettings,
   mockClearMainaCloudSession,
+  mockCloudRequest,
 } = vi.hoisted(() => ({
   mockGetMeeting: vi.fn(),
   mockGetTranscriptPage: vi.fn(),
@@ -17,9 +19,11 @@ const {
   mockListMeetingsEligibleForKnowledgeCloudQueueWithOptions: vi.fn(),
   mockListMeetingsNeedingKnowledgeCloudSync: vi.fn(),
   mockUpdateMeeting: vi.fn(),
+  mockPersistKnowledgeCloudSourceRetry: vi.fn(),
   mockUpdateMeetingPipelineStage: vi.fn(),
   mockGetMainaKnowledgeCloudSettings: vi.fn(),
   mockClearMainaCloudSession: vi.fn(),
+  mockCloudRequest: vi.fn(),
 }));
 
 vi.mock('@/data/meetings', () => ({
@@ -29,6 +33,7 @@ vi.mock('@/data/meetings', () => ({
   listMeetingsEligibleForKnowledgeCloudQueueWithOptions: mockListMeetingsEligibleForKnowledgeCloudQueueWithOptions,
   listMeetingsNeedingKnowledgeCloudSync: mockListMeetingsNeedingKnowledgeCloudSync,
   updateMeeting: mockUpdateMeeting,
+  persistKnowledgeCloudSourceRetry: mockPersistKnowledgeCloudSourceRetry,
   updateMeetingPipelineStage: mockUpdateMeetingPipelineStage,
 }));
 
@@ -46,6 +51,7 @@ vi.mock('@/services/logger', () => ({
 
 vi.mock('@/services/mainaCloudSession', () => ({
   clearMainaCloudSession: mockClearMainaCloudSession,
+  mainaCloudRequestJson: mockCloudRequest,
 }));
 vi.mock('@/services/pipelineWakeScheduler', () => ({
   armPipelineNetworkRecovery: vi.fn().mockResolvedValue({ armed: true, generation: 1 }),
@@ -116,21 +122,25 @@ describe('mainaKnowledgeCloud service', () => {
         ...patch,
       };
     });
+    mockPersistKnowledgeCloudSourceRetry.mockImplementation(async (input: Record<string, unknown>) => {
+      meeting = {
+        ...meeting,
+        knowledgeCloudSyncStatus: input.syncStatus,
+        knowledgeCloudError: input.visibleError,
+        knowledgeCloudFailureClass: input.failureClass,
+        knowledgeCloudRetryCount: input.retryCount,
+        knowledgeCloudNextRetryAt: input.nextRetryAt,
+      };
+    });
     mockUpdateMeetingPipelineStage.mockResolvedValue(undefined);
   });
 
   it('marks auth failures separately so settings can recover them deliberately', async () => {
-    vi.stubGlobal(
-      'fetch',
-      vi.fn().mockResolvedValue(
-        new Response(JSON.stringify({ error: { message: 'Invalid bearer token' } }), {
-          status: 401,
-          headers: {
-            'Content-Type': 'application/json',
-          },
-        }),
-      ),
-    );
+    mockCloudRequest.mockResolvedValue({
+      status: 401,
+      ok: false,
+      data: { error: { message: 'Invalid bearer token' } },
+    });
 
     await runMainaKnowledgeCloudSync('meeting-1');
 
@@ -145,10 +155,7 @@ describe('mainaKnowledgeCloud service', () => {
   });
 
   it('keeps network failures retryable while preserving the frozen payload snapshot', async () => {
-    vi.stubGlobal(
-      'fetch',
-      vi.fn().mockRejectedValue(new TypeError('Network request failed')),
-    );
+    mockCloudRequest.mockRejectedValue(new TypeError('Network request failed'));
 
     await runMainaKnowledgeCloudSync('meeting-1');
 
@@ -157,6 +164,21 @@ describe('mainaKnowledgeCloud service', () => {
     expect(mockUpdateMeetingPipelineStage).toHaveBeenLastCalledWith(expect.objectContaining({
       stage: 'mkc', state: 'deferred',
     }));
+  });
+
+  it('does not bypass source retry due time during an automatic recovery cycle', async () => {
+    meeting = {
+      ...meeting,
+      knowledgeCloudSyncStatus: 'sync_failed_retryable',
+      knowledgeCloudNextRetryAt: Date.now() + 60_000,
+      knowledgeCloudSourceKey: 'meeting:maina:meeting-1',
+      knowledgeCloudPayloadJson: JSON.stringify({ source_key: 'meeting:maina:meeting-1' }),
+    };
+
+    await runMainaKnowledgeCloudSync('meeting-1');
+
+    expect(mockCloudRequest).not.toHaveBeenCalled();
+    expect(meeting.knowledgeCloudSyncStatus).toBe('sync_failed_retryable');
   });
 
   it('reuses a stored frozen payload on retry instead of rebuilding from newer local state', async () => {
@@ -191,25 +213,20 @@ describe('mainaKnowledgeCloud service', () => {
       knowledgeCloudPayloadJson: frozenPayloadJson,
     };
 
-    const fetchMock = vi.fn().mockResolvedValue(
-      new Response(JSON.stringify({ canonical_sha256: 'abc123' }), {
-        status: 201,
-        headers: {
-          'Content-Type': 'application/json',
-        },
-      }),
-    );
-    vi.stubGlobal('fetch', fetchMock);
+    mockCloudRequest.mockResolvedValue({
+      status: 201,
+      ok: true,
+      data: { canonical_sha256: 'abc123' },
+    });
 
     await runMainaKnowledgeCloudSync('meeting-1');
 
     expect(mockGetTranscriptPage).not.toHaveBeenCalled();
     expect(mockListMeetingTodos).not.toHaveBeenCalled();
-    expect(fetchMock).toHaveBeenCalledWith(
-      'https://mkc-backend.maina-knowledge-cloud.workers.dev/v1/sources',
-      expect.objectContaining({
-        body: frozenPayloadJson,
-      }),
+    expect(mockCloudRequest).toHaveBeenCalledWith(
+      '/v1/sources',
+      expect.objectContaining({ body: frozenPayloadJson }),
+      { acceptHttpErrors: true },
     );
     expect(meeting.knowledgeCloudSyncStatus).toBe('sync_succeeded');
     expect(mockUpdateMeetingPipelineStage).toHaveBeenLastCalledWith(expect.objectContaining({
@@ -243,17 +260,11 @@ describe('mainaKnowledgeCloud service', () => {
       }),
     };
     mockListMeetingsEligibleForKnowledgeCloudQueueWithOptions.mockResolvedValue([meeting]);
-    vi.stubGlobal(
-      'fetch',
-      vi.fn().mockResolvedValue(
-        new Response(JSON.stringify({ canonical_sha256: 'abc123' }), {
-          status: 201,
-          headers: {
-            'Content-Type': 'application/json',
-          },
-        }),
-      ),
-    );
+    mockCloudRequest.mockResolvedValue({
+      status: 201,
+      ok: true,
+      data: { canonical_sha256: 'abc123' },
+    });
 
     const queued = await queueEligibleMainaKnowledgeCloudSyncs({ includeAuthFailures: true });
     await Promise.resolve();
@@ -271,9 +282,11 @@ describe('mainaKnowledgeCloud service', () => {
     mockListMeetingsNeedingKnowledgeCloudSync
       .mockResolvedValueOnce([meeting])
       .mockResolvedValueOnce([]);
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(
-      new Response(JSON.stringify({ canonical_sha256: 'abc123' }), { status: 201 }),
-    ));
+    mockCloudRequest.mockResolvedValue({
+      status: 201,
+      ok: true,
+      data: { canonical_sha256: 'abc123' },
+    });
 
     await reconcilePendingMainaKnowledgeCloudSyncs();
     unsubscribe();

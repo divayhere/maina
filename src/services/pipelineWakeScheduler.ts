@@ -15,8 +15,15 @@ export type NativeWakeScheduleResult = {
 export const MAX_NATIVE_SCHEDULE_ATTEMPTS = 5;
 
 type NativeWakeScheduler = (
-  generation: number,
-  requiresNetwork: boolean,
+  input: {
+    generation: number;
+    requiresNetwork: boolean;
+    notBeforeAt: number;
+    scheduleRevision: number;
+    previousWorkId: string | null;
+    previousNotBeforeAt: number | null;
+    previousScheduleRevision: number | null;
+  },
 ) => Promise<NativeWakeScheduleResult>;
 
 let nativeWakeScheduler: NativeWakeScheduler | null = null;
@@ -32,27 +39,41 @@ export async function repairDurablePipelineScheduling(): Promise<{
   generation: number | null;
   scheduled: boolean;
 }> {
-  const generation = await generationAwaitingNativeSchedule();
-  if (generation == null) return { generation: null, scheduled: false };
+  const target = await generationAwaitingNativeSchedule();
+  if (target == null) return { generation: null, scheduled: false };
   const state = await getPipelineWakeState();
-  if (state.nativeScheduleState === 'max_attempts') {
-    return { generation, scheduled: false };
-  }
   if (state.nativeScheduleAttempts >= MAX_NATIVE_SCHEDULE_ATTEMPTS) {
     await recordNativeScheduleOutcome({
-      generation,
+      generation: target.generation,
+      scheduleRevision: target.scheduleRevision,
+      notBeforeAt: target.notBeforeAt,
       outcome: 'max_attempts',
       errorCode: 'native_schedule_attempts_exhausted',
     });
-    return { generation, scheduled: false };
+    return { generation: target.generation, scheduled: false };
   }
   if (!nativeWakeScheduler) {
-    await recordNativeScheduleOutcome({ generation, outcome: 'unavailable', errorCode: 'scheduler_unavailable' });
-    return { generation, scheduled: false };
+    await recordNativeScheduleOutcome({
+      generation: target.generation,
+      scheduleRevision: target.scheduleRevision,
+      notBeforeAt: target.notBeforeAt,
+      outcome: 'unavailable',
+      errorCode: 'scheduler_unavailable',
+    });
+    return { generation: target.generation, scheduled: false };
   }
   let outcome: NativeWakeScheduleResult;
   try {
-    outcome = await nativeWakeScheduler(generation, state.requiresNetwork);
+    const previousMatchesCurrent = state.lastEnqueuedGeneration === target.generation;
+    outcome = await nativeWakeScheduler({
+      generation: target.generation,
+      requiresNetwork: state.requiresNetwork,
+      notBeforeAt: target.notBeforeAt,
+      scheduleRevision: target.scheduleRevision,
+      previousWorkId: previousMatchesCurrent ? state.lastEnqueuedWorkId : null,
+      previousNotBeforeAt: previousMatchesCurrent ? state.lastEnqueuedNotBeforeAt : null,
+      previousScheduleRevision: previousMatchesCurrent ? state.lastEnqueuedScheduleRevision : null,
+    });
   } catch (cause) {
     outcome = {
       outcome: 'failed',
@@ -60,12 +81,14 @@ export async function repairDurablePipelineScheduling(): Promise<{
     };
   }
   await recordNativeScheduleOutcome({
-    generation,
+    generation: target.generation,
+    scheduleRevision: target.scheduleRevision,
+    notBeforeAt: target.notBeforeAt,
     outcome: outcome.outcome,
     workId: outcome.workId,
     errorCode: outcome.errorCode,
   });
-  return { generation, scheduled: outcome.outcome === 'enqueued' };
+  return { generation: target.generation, scheduled: outcome.outcome === 'enqueued' };
 }
 
 /** Persist first, then optionally observe the native enqueue outcome. */

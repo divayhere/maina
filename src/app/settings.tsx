@@ -86,9 +86,15 @@ export default function SettingsScreen() {
       const session = await exchangeMainaCloudPairing(pairing);
       setCloudSession(session); setPairing(null);
       const [notes, sources, corrections] = await Promise.all([
-        queueEligibleMeetingPackets().catch(() => 0),
-        queueEligibleMainaKnowledgeCloudSyncs({ includeAuthFailures: true }).catch(() => 0),
-        queueEligibleMainaKnowledgeCloudCorrections({ includeAuthFailures: true }).catch(() => 0),
+        queueEligibleMeetingPackets({ forceRetry: true }).catch(() => 0),
+        queueEligibleMainaKnowledgeCloudSyncs({
+          includeAuthFailures: true,
+          forceRetry: true,
+        }).catch(() => 0),
+        queueEligibleMainaKnowledgeCloudCorrections({
+          includeAuthFailures: true,
+          forceRetry: true,
+        }).catch(() => 0),
       ]);
       setCloudMessage(notes + sources + corrections > 0 ? 'Connected. Earlier meetings are now catching up.' : 'Connected. New meetings will finish their notes and sync automatically.');
     } catch (cause) {

@@ -13,8 +13,18 @@ const codeOf = (cause: unknown): string => {
   return String(typeof direct === 'string' ? direct : typeof nested === 'string' ? nested : '').toUpperCase();
 };
 
+const typedFailureClassOf = (cause: unknown): CloudFailureClass | null => {
+  if (!cause || typeof cause !== 'object') return null;
+  const value = (cause as { failureClass?: unknown }).failureClass;
+  return typeof value === 'string' && value in SAFE_COPY
+    ? value as CloudFailureClass
+    : null;
+};
+
 /** Classify only typed fields. Human-readable messages are never parsed. */
 export function classifyTransportCause(cause: unknown): CloudFailureClass {
+  const typed = typedFailureClassOf(cause);
+  if (typed) return typed;
   const name = cause instanceof Error ? cause.name.toUpperCase() : '';
   const code = codeOf(cause);
   if (name === 'ABORTERROR' || ['ABORT_ERR', 'ETIMEDOUT', 'TIMEOUT'].includes(code)) return 'timeout';

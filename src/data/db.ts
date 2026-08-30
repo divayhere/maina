@@ -5,6 +5,7 @@
  */
 import * as SQLite from 'expo-sqlite';
 import { log } from '../services/logger';
+import { migratePipelineWakeV17 } from '../core/pipeline/pipelineWakeMigration';
 
 let dbPromise: Promise<SQLite.SQLiteDatabase> | null = null;
 
@@ -396,6 +397,17 @@ const MIGRATIONS: Migration[] = [
     UPDATE meetings
       SET last_error = 'Waiting for internet. Maina will continue automatically.'
       WHERE summary_status = 'retryable';`);
+  },
+  // v17 — due-aware durable recovery. Current N and successor N+1 keep
+  // independent due times so reclaiming an expired N never erases a real
+  // foreground/connectivity/deferred signal already persisted for N+1.
+  async (db) => {
+    await migratePipelineWakeV17({
+      execAsync: (source) => db.execAsync(source),
+      getAllAsync: (source, params = []) => db.getAllAsync(source, params),
+      getFirstAsync: (source, params = []) => db.getFirstAsync(source, params),
+      runAsync: (source, params = []) => db.runAsync(source, params),
+    });
   },
 ];
 

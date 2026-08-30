@@ -19,7 +19,7 @@ import {
 import {
   beginPipelineWakeAttempt,
   completePipelineWakeAttempt,
-  generationAwaitingNativeSchedule,
+  generationDueForPeriodicDrain,
   prepareTransportRetriesForConnectivityEpoch,
   renewPipelineWakeAttempt,
 } from '@/data/pipelineWake';
@@ -54,7 +54,7 @@ export const runPipelineRecoveryCycle = createCoalescedPipelineRunner(performPip
  * connectivity/AppState signals can produce only one effective drain.
  */
 export type DurablePipelineWakeResult = {
-  disposition: 'completed' | 'busy' | 'obsolete' | 'no_work';
+  disposition: 'completed' | 'busy' | 'obsolete' | 'no_work' | 'not_due';
   recovery: PipelineRecoveryResult | null;
 };
 
@@ -121,7 +121,7 @@ if (!TaskManager.isTaskDefined(MAINA_BACKGROUND_PIPELINE_TASK)) {
       // The periodic task repairs or services existing SQLite work only. It
       // must never manufacture a generation merely because the OS delivered
       // a stale periodic callback.
-      const generation = await generationAwaitingNativeSchedule();
+      const generation = await generationDueForPeriodicDrain();
       if (generation == null) return BackgroundTask.BackgroundTaskResult.Success;
       const result = await runDurablePipelineWake({ expectedGeneration: generation });
       log.info('background-pipeline', 'OS background pipeline drain completed', {

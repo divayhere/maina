@@ -29,7 +29,7 @@ import {
   MkcReleaseAContractError,
   type MeetingLibraryQuery,
 } from './mkc-memory-release-a-core';
-import { getMainaCloudSession, MainaCloudApiError, mainaCloudFetch } from './mainaCloudSession';
+import { getMainaCloudSession, MainaCloudApiError, mainaCloudRequestJson } from './mainaCloudSession';
 
 export type MkcMemoryReadResult<T> = {
   data: T;
@@ -79,8 +79,8 @@ async function readReleaseAResource<T>(input: ReadInput<T>): Promise<MkcMemoryRe
     scope: input.scope,
   });
   try {
-    const response = await mainaCloudFetch(input.path, { method: 'GET', signal: input.signal });
-    const data = input.decode(await response.json());
+    const response = await mainaCloudRequestJson(input.path, { method: 'GET', signal: input.signal });
+    const data = input.decode(response.data);
     const fetchedAt = Date.now();
     try {
       await putMkcMemoryCacheEntry({

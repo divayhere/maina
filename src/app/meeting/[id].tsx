@@ -23,7 +23,6 @@ import {
   listKnowledgeCloudCorrections,
   listRecordingSegments,
   resetMeetingTranscript,
-  setMeetingSummaryState,
   type Meeting,
   type KnowledgeCloudCorrection,
   type RecordingSegment,
@@ -711,8 +710,10 @@ export default function MeetingDetail() {
     if (!meeting || !id) return;
     setPacketBusy(true);
     try {
-      await setMeetingSummaryState(id, 'queued');
-      await runMeetingPacketGeneration(id, { regenerate: meeting.summaryStatus === 'ready' });
+      await runMeetingPacketGeneration(id, {
+        regenerate: meeting.summaryStatus === 'ready',
+        forceRetry: meeting.summaryStatus === 'retryable' || meeting.summaryStatus === 'failed',
+      });
       await refresh();
       load();
     } finally {

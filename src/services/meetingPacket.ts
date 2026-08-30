@@ -5,6 +5,7 @@ import {
   listMeetingTodos,
   listMeetingsEligibleForSummaryQueue,
   listMeetingsNeedingSummary,
+  persistMeetingPacketRetry,
   replaceMeetingTodos,
   saveMeetingPacket,
   setMeetingSummaryState,
@@ -19,7 +20,7 @@ import { log } from '@/services/logger';
 import { maybeQueueMainaKnowledgeCloudSync } from '@/services/mainaKnowledgeCloud';
 import { maybeQueueMainaKnowledgeCloudPacketCorrections } from '@/services/mainaKnowledgeCloudCorrections';
 import { mainaKnowledgeCloudSourceKey } from '@/services/mainaKnowledgeCloudCore';
-import { MainaCloudApiError, getMainaCloudSession, mainaCloudFetch } from '@/services/mainaCloudSession';
+import { MainaCloudApiError, getMainaCloudSession, mainaCloudRequestJson } from '@/services/mainaCloudSession';
 import { notifyMeetingPipelineChanged } from '@/services/meetingPipelineSignals';
 import { isTerminalPartialTranscript } from '@/services/transcriptCoverage';
 import {
@@ -33,7 +34,14 @@ import {
 } from '@/core/pipeline/cloudFailure';
 import { armPipelineNetworkRecovery } from '@/services/pipelineWakeScheduler';
 
-const inflight = new Map<string, Promise<void>>();
+type PacketRunIntent = { regenerate: boolean; forceRetry: boolean };
+type PacketRunOwner = {
+  currentIntent: PacketRunIntent;
+  pendingRegenerate: boolean;
+  promise: Promise<void>;
+};
+
+const inflight = new Map<string, PacketRunOwner>();
 let executionTail: Promise<void> = Promise.resolve();
 const TRANSCRIPT_PAGE_SIZE = 100;
 
@@ -92,12 +100,6 @@ function parseJob(value: unknown): CloudPacketJob | null {
     error: job.error && typeof job.error === 'object' ? job.error : null,
     packet: safePacket(job.packet),
   };
-}
-
-async function responseJson(response: Response) {
-  const text = await response.text();
-  if (!text.trim()) return null;
-  try { return JSON.parse(text) as unknown; } catch { return null; }
 }
 
 async function loadTranscriptBlocks(meetingId: string): Promise<TranscriptBlock[]> {
@@ -194,29 +196,27 @@ async function setRetryableState(
   cause: unknown,
   operation: CloudNotesFailureOperation,
   job?: CloudPacketJob,
+  forceRetry = false,
 ) {
   const existingDueAt = meeting.cloudNotesNextRetryAt ?? null;
-  if (meeting.summaryStatus === 'retryable' && !cloudRetryDue(existingDueAt)) return;
+  if (!forceRetry && meeting.summaryStatus === 'retryable' && !cloudRetryDue(existingDueAt)) return;
   const retry = nextCloudRetry({ attemptCount: meeting.cloudNotesRetryCount ?? 0 });
   const failureClass = job?.status === 'failed_retryable'
     ? 'backend_retryable'
     : cloudFailureClass(cause);
   const visibleMessage = safeCloudFailureMessage(failureClass);
-  await updateMeeting(meeting.id, {
-    cloudNotesJobId: job?.job_id ?? meeting.cloudNotesJobId ?? null,
-    cloudNotesLastPolledAt: Date.now(),
-    cloudNotesRetryCount: retry.attemptCount,
-    cloudNotesLastRetryAt: retry.lastRetryAt,
-    cloudNotesNextRetryAt: retry.nextRetryAt,
-    summaryProviderId: job?.provider ?? meeting.summaryProviderId ?? null,
-    summaryModel: job?.model ?? meeting.summaryModel ?? null,
-    cloudNotesFailureClass: failureClass,
-    cloudNotesFailureOperation: operation,
-  });
-  await setMeetingSummaryState(meeting.id, 'retryable', {
+  await persistMeetingPacketRetry({
+    meetingId: meeting.id,
+    meetingStatus: meeting.status === 'transcript_partial' ? 'transcript_partial' : 'summarizing',
+    jobId: job?.job_id ?? meeting.cloudNotesJobId ?? null,
     providerId: job?.provider ?? meeting.summaryProviderId ?? null,
     model: job?.model ?? meeting.summaryModel ?? null,
-    error: visibleMessage,
+    retryCount: retry.attemptCount,
+    lastRetryAt: retry.lastRetryAt,
+    nextRetryAt: retry.nextRetryAt,
+    failureClass,
+    failureOperation: operation,
+    visibleError: visibleMessage,
   });
   const completedSections = Math.max(0, Number(job?.progress?.completed_sections ?? 0));
   const totalSections = Math.max(1, Number(job?.progress?.total_sections ?? 1));
@@ -299,7 +299,7 @@ async function createCloudJob(meeting: Meeting, regenerate: boolean): Promise<Cl
     loadTranscriptBlocks(meeting.id),
   ]);
   if (!transcript.text.trim()) throw new Error('No durable transcript text is available yet. Maina will keep processing audio first.');
-  const response = await mainaCloudFetch('/v1/meeting-packets', {
+  const response = await mainaCloudRequestJson('/v1/meeting-packets', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
@@ -319,29 +319,35 @@ async function createCloudJob(meeting: Meeting, regenerate: boolean): Promise<Cl
       },
     }),
   });
-  const job = parseJob(await responseJson(response));
+  const job = parseJob(response.data);
   if (!job) throw new Error('Maina Cloud returned an invalid notes-job response. Maina will retry safely.');
   return job;
 }
 
 async function getCloudJob(jobId: string): Promise<CloudPacketJob> {
-  const response = await mainaCloudFetch(`/v1/meeting-packets/${encodeURIComponent(jobId)}`);
-  const job = parseJob(await responseJson(response));
+  const response = await mainaCloudRequestJson(`/v1/meeting-packets/${encodeURIComponent(jobId)}`);
+  const job = parseJob(response.data);
   if (!job) throw new Error('Maina Cloud returned an invalid notes status. Maina will retry safely.');
   return job;
 }
 
 async function retryCloudJob(jobId: string): Promise<CloudPacketJob> {
-  const response = await mainaCloudFetch(`/v1/meeting-packets/${encodeURIComponent(jobId)}/retry`, { method: 'POST' });
-  const job = parseJob(await responseJson(response));
+  const response = await mainaCloudRequestJson(`/v1/meeting-packets/${encodeURIComponent(jobId)}/retry`, { method: 'POST' });
+  const job = parseJob(response.data);
   if (!job) throw new Error('Maina Cloud could not requeue the notes job. Maina will retry safely.');
   return job;
 }
 
-async function reconcileMeetingPacket(meetingId: string, options?: { regenerate?: boolean }): Promise<void> {
+async function reconcileMeetingPacket(
+  meetingId: string,
+  options?: { regenerate?: boolean; forceRetry?: boolean },
+): Promise<void> {
   const meeting = await getMeeting(meetingId);
   if (!meeting) return;
   if (!isMeetingPacketEligible(meeting)) return;
+  if (meeting.summaryStatus === 'retryable'
+    && options?.forceRetry !== true
+    && !cloudRetryDue(meeting.cloudNotesNextRetryAt)) return;
   if (!await getMainaCloudSession()) {
     await setMeetingSummaryState(meetingId, 'failed', { error: 'Connect Maina Cloud once to create notes automatically.' });
     return;
@@ -360,7 +366,8 @@ async function reconcileMeetingPacket(meetingId: string, options?: { regenerate?
       return;
     }
     if (job.status === 'failed_retryable') {
-      if (meeting.summaryStatus === 'retryable' && cloudRetryDue(meeting.cloudNotesNextRetryAt)) {
+      if (meeting.summaryStatus === 'retryable'
+        && (options?.forceRetry === true || cloudRetryDue(meeting.cloudNotesNextRetryAt))) {
         operation = 'retry_provider';
         job = await retryCloudJob(job.job_id);
         if (job.status !== 'failed_retryable') {
@@ -368,7 +375,13 @@ async function reconcileMeetingPacket(meetingId: string, options?: { regenerate?
         }
       }
       if (job.status === 'failed_retryable') {
-        await setRetryableState(meeting, job.error?.message ?? 'server_retryable', operation, job);
+        await setRetryableState(
+          meeting,
+          job.error?.message ?? 'server_retryable',
+          operation,
+          job,
+          options?.forceRetry === true,
+        );
         return;
       }
     }
@@ -377,7 +390,7 @@ async function reconcileMeetingPacket(meetingId: string, options?: { regenerate?
     const error = formatCloudError(cause);
     const authFailure = cause instanceof MainaCloudApiError && (cause.status === 401 || cause.status === 403);
     if (!authFailure && isRetryableCloudFailure(cause)) {
-      await setRetryableState(meeting, cause, operation);
+      await setRetryableState(meeting, cause, operation, undefined, options?.forceRetry === true);
       return;
     }
     await setMeetingSummaryState(meetingId, 'failed', {
@@ -390,30 +403,76 @@ async function reconcileMeetingPacket(meetingId: string, options?: { regenerate?
   }
 }
 
-export function runMeetingPacketGeneration(meetingId: string, options?: { regenerate?: boolean }): Promise<void> {
-  const key = `${meetingId}:${options?.regenerate ? 'regenerate' : 'normal'}`;
-  const existing = inflight.get(key);
-  if (existing) return existing;
+export function runMeetingPacketGeneration(
+  meetingId: string,
+  options?: { regenerate?: boolean; forceRetry?: boolean },
+): Promise<void> {
+  const existing = inflight.get(meetingId);
+  if (existing) {
+    if (options?.regenerate === true && !existing.currentIntent.regenerate) {
+      existing.pendingRegenerate = true;
+    } else if (options?.forceRetry === true) {
+      // A force tap while this meeting already owns transport upgrades the
+      // queued/current intent; it never opens a second poll/retry chain.
+      existing.currentIntent.forceRetry = true;
+    }
+    return existing.promise;
+  }
   // Expo SQLite exposes one shared native connection. Applying multiple ready
   // packets concurrently can overlap todo replacement transactions. Keep
   // network/status/application work ordered; meetings still queue instantly.
-  const task = executionTail
-    .catch(() => {})
-    .then(() => reconcileMeetingPacket(meetingId, options))
+  const owner: PacketRunOwner = {
+    currentIntent: {
+      regenerate: options?.regenerate === true,
+      forceRetry: options?.forceRetry === true,
+    },
+    pendingRegenerate: false,
+    promise: Promise.resolve(),
+  };
+  const task = (async () => {
+    while (true) {
+      const intent = owner.currentIntent;
+      const serialized = executionTail
+        .catch(() => {})
+        .then(() => reconcileMeetingPacket(meetingId, intent));
+      executionTail = serialized.then(() => {}, () => {});
+      await serialized;
+      if (!owner.pendingRegenerate) return;
+      owner.pendingRegenerate = false;
+      owner.currentIntent = { regenerate: true, forceRetry: false };
+    }
+  })()
     .finally(() => {
-      inflight.delete(key);
+      if (inflight.get(meetingId) === owner) inflight.delete(meetingId);
       notifyMeetingPipelineChanged(meetingId);
     });
-  executionTail = task.then(() => {}, () => {});
-  inflight.set(key, task);
+  owner.promise = task;
+  inflight.set(meetingId, owner);
   return task;
 }
 
-export async function maybeQueueMeetingPacket(meetingId: string): Promise<void> {
+export async function maybeQueueMeetingPacket(
+  meetingId: string,
+  options?: { forceRetry?: boolean },
+): Promise<void> {
   const config = await getAppConfig();
   if (!config.autoSummarize || !await getMainaCloudSession()) return;
   const meeting = await getMeeting(meetingId);
   if (!meeting || !isMeetingPacketEligible(meeting)) return;
+  if (meeting.summaryStatus === 'retryable') {
+    if (options?.forceRetry !== true && !cloudRetryDue(meeting.cloudNotesNextRetryAt)) return;
+    // Preserve retryable + its due time until reconcileMeetingPacket decides
+    // whether to poll/retry the existing server job. Re-labelling it queued
+    // here would erase the durable retry owner and could create a replacement.
+    void runMeetingPacketGeneration(meetingId, { forceRetry: options?.forceRetry === true });
+    return;
+  }
+  if (options?.forceRetry === true) {
+    // Settings reconnect and explicit owner Retry may bypass the due time, but
+    // reconcile still reuses cloudNotesJobId and never creates a replacement.
+    void runMeetingPacketGeneration(meetingId, { forceRetry: true });
+    return;
+  }
   await setMeetingSummaryState(meetingId, 'queued').catch(() => {});
   void runMeetingPacketGeneration(meetingId);
 }
@@ -454,10 +513,14 @@ export async function reconcileAutoSummaryEligibility(): Promise<number> {
   return meetings.length;
 }
 
-export async function queueEligibleMeetingPackets(): Promise<number> {
+export async function queueEligibleMeetingPackets(options?: { forceRetry?: boolean }): Promise<number> {
   const config = await getAppConfig();
   if (!config.autoSummarize || !await getMainaCloudSession()) return 0;
-  const meetings = (await listMeetingsEligibleForSummaryQueue()).filter(isMeetingPacketEligible);
-  for (const meeting of meetings) await maybeQueueMeetingPacket(meeting.id);
+  const meetings = (await listMeetingsEligibleForSummaryQueue({
+    forceRetry: options?.forceRetry === true,
+  })).filter(isMeetingPacketEligible);
+  for (const meeting of meetings) {
+    await maybeQueueMeetingPacket(meeting.id, { forceRetry: options?.forceRetry === true });
+  }
   return meetings.length;
 }
