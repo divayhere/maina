@@ -4,6 +4,12 @@ Date: 2026-08-30
 Status: research recommendation complete; **no corrective build started**  
 Scope: Maina Android `0.10.34 (60)` and iOS `0.10.34 (16)`
 
+> Build-decision note: this first research pass is superseded by
+> `TEST3_TEST5_NAVIGATION_PREBUILD_REVIEW_ROUND1_2026-08-30.md`. In particular,
+> the Android locked-state retry fields were not captured, the current Xcode
+> toolchain cannot call the iOS 27 asynchronous submission API, and confidence
+> estimates below are not release evidence.
+
 ## Executive conclusion
 
 The architecture should not be rewritten. Durable audio, per-window Qwen
@@ -311,4 +317,3 @@ best-effort auto-resume, and a truthful lock-screen one-tap fallback.
 - Android: [Managing unique work](https://developer.android.com/develop/background-work/background-tasks/persistent/how-to/manage-work)
 - Android: [Offline-first data layer](https://developer.android.com/topic/architecture/data-layer/offline-first)
 - Expo: [BackgroundTask](https://docs.expo.dev/versions/latest/sdk/background-task/)
-

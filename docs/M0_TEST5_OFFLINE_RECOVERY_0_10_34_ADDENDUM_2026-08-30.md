@@ -42,9 +42,16 @@ the two candidates must not be combined.
 
 - Local Qwen transcription completed `14/14` windows with zero failures while
   locked.
-- The reconnect callback and periodic background worker ran, but neither found
-  a packet eligible under the persisted future retry timestamp.
-- The meeting did not finish notes/sync while the app remained locked.
+- The meeting did not finish notes/sync while the app remained locked. The
+  retained Android evidence does **not** contain a locked-state SQLite snapshot
+  for this meeting and does not prove that the React Native reconnect callback
+  or Expo periodic worker executed before foregrounding.
+- The first complete React Native evidence begins when Maina was foregrounded
+  at approximately 09:36:22 IST. Therefore the locked values of
+  `cloud_notes_job_id`, `summary_status`, retry count, `next_retry_at`, backend
+  job status, and the exact first foreground operation (create, poll, provider
+  retry, or source ingest) are unknown for this run. They must be captured in
+  the replay rather than inferred from the final state.
 - After foregrounding, the existing durable work converged without a manual
   Retry tap. The final Home and detail screens showed `Notes ready` and
   `Synced to cloud`.
@@ -114,4 +121,3 @@ source sync HTTP `201` at 09:38:07.
 Do not promote either candidate on this run. Apply the bounded correction in
 `TEST3_TEST5_RELIABILITY_RESEARCH_2026-08-30.md`, run focused tests, make one
 data-preserving build/install per platform, and replay physical Tests 3 and 5.
-
