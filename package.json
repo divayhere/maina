@@ -65,6 +65,7 @@
     "verify:mkc-release-a": "node scripts/import-mkc-release-a-contracts.mjs --check",
     "verify:native-recorder": "node scripts/verify-native-recorder.mjs",
     "verify:ios-native": "node scripts/verify-ios-native-recorder.mjs",
+    "verify:m0-harness": "node scripts/verify-m0-harness-safety.mjs",
     "ios:runtime": "bash scripts/prepare-ios-sherpa-runtime.sh",
     "ios:model:stage": "bash scripts/stage-ios-qwen-model.sh",
     "ios:ui-tests:configure": "ruby scripts/configure-ios-ui-tests.rb",

@@ -16,6 +16,33 @@ CURRENT_FILE="$ROOT/current"
 
 android() { adb -s "$ANDROID_SERIAL" "$@"; }
 
+monitor_healthy() {
+  local pid_file="$1" log_file="$2" label="$3"
+  test -s "$pid_file" || { echo "$label PID file is missing" >&2; return 1; }
+  local pid
+  pid="$(cat "$pid_file")"
+  kill -0 "$pid" 2>/dev/null || { echo "$label monitor is not alive (PID $pid)" >&2; return 1; }
+  test -s "$log_file" || { echo "$label log has not grown" >&2; return 1; }
+}
+
+verify_monitors() {
+  local output_dir="$1"
+  monitor_healthy "$output_dir/android-logcat.pid" "$output_dir/android-logcat.txt" "Android logcat"
+  monitor_healthy "$output_dir/ios-syslog.pid" "$output_dir/ios-syslog.ndjson" "iOS syslog"
+  printf '%s monitors_healthy\n' "$(date -Iseconds)" >> "$output_dir/monitor-supervisor.log"
+}
+
+stop_monitors() {
+  local output_dir="$1"
+  for pid_file in "$output_dir"/*.pid; do
+    test -f "$pid_file" || continue
+    local pid
+    pid="$(cat "$pid_file")"
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+  done
+}
+
 preflight() {
   command -v adb >/dev/null
   test -x "$PMD"
@@ -80,13 +107,28 @@ case "$MODE" in
     printf 'test=%s\nstarted_at=%s\nandroid_serial=%s\nios_coredevice_id=%s\nios_udid=%s\n' \
       "$TEST_NAME" "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$ANDROID_SERIAL" "$IOS_COREDEVICE_ID" "$IOS_UDID" \
       > "$output_dir/metadata.txt"
-    android logcat -v threadtime -T 1 > "$output_dir/android-logcat.txt" 2>&1 &
+    {
+      printf '%s android_logcat_monitor_started\n' "$(date -Iseconds)"
+      exec adb -s "$ANDROID_SERIAL" logcat -v threadtime -T 1
+    } > "$output_dir/android-logcat.txt" 2>&1 &
     echo $! > "$output_dir/android-logcat.pid"
-    "$PMD" syslog live --native --udid "$IOS_UDID" --process-name Maina --format json \
-      --out "$output_dir/ios-syslog.ndjson" >/dev/null 2>&1 &
+    {
+      printf '%s ios_syslog_monitor_started\n' "$(date -Iseconds)"
+      exec "$PMD" syslog live --native --udid "$IOS_UDID" --process-name Maina --format json
+    } > "$output_dir/ios-syslog.ndjson" 2>&1 &
     echo $! > "$output_dir/ios-syslog.pid"
+    trap 'stop_monitors "$output_dir"' ERR INT TERM
+    sleep 2
+    verify_monitors "$output_dir"
     snapshot "$output_dir" "armed"
+    trap - ERR INT TERM
     printf 'Replay armed: %s\nEvidence: %s\n' "$TEST_NAME" "$output_dir"
+    ;;
+  health)
+    test -f "$CURRENT_FILE"
+    output_dir="$(cat "$CURRENT_FILE")"
+    verify_monitors "$output_dir"
+    printf 'Replay monitors healthy: %s\n' "$output_dir"
     ;;
   snapshot)
     test -f "$CURRENT_FILE"
@@ -97,18 +139,14 @@ case "$MODE" in
   stop)
     test -f "$CURRENT_FILE"
     output_dir="$(cat "$CURRENT_FILE")"
+    verify_monitors "$output_dir"
     snapshot "$output_dir" "final"
-    for pid_file in "$output_dir"/*.pid; do
-      test -f "$pid_file" || continue
-      pid="$(cat "$pid_file")"
-      kill "$pid" 2>/dev/null || true
-      wait "$pid" 2>/dev/null || true
-    done
+    stop_monitors "$output_dir"
     printf 'stopped_at=%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" >> "$output_dir/metadata.txt"
     printf 'Replay evidence closed: %s\n' "$output_dir"
     ;;
   *)
-    echo "Usage: $0 preflight | arm <test3-call-interruption|test5-offline-recovery> | snapshot <label> | stop" >&2
+    echo "Usage: $0 preflight | arm <test3-call-interruption|test5-offline-recovery> | health | snapshot <label> | stop" >&2
     exit 2
     ;;
 esac

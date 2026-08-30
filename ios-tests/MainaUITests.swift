@@ -3,11 +3,58 @@ import XCTest
 final class MainaUITests: XCTestCase {
   private let app = XCUIApplication(bundleIdentifier: "com.divay.maina.staging")
 
+  private var attachesToRunningApp: Bool {
+    ProcessInfo.processInfo.environment["MAINA_UI_ATTACH_RUNNING"] == "1"
+  }
+
   override func setUpWithError() throws {
     continueAfterFailure = false
+    if attachesToRunningApp {
+      app.activate()
+      XCTAssertTrue(app.wait(for: .runningForeground, timeout: 15))
+      return
+    }
     app.launch()
     XCTAssertTrue(app.wait(for: .runningForeground, timeout: 15))
     XCTAssertTrue(app.buttons["Record a meeting"].waitForExistence(timeout: 15))
+  }
+
+  /// Qualification-only control used by the USB soak harness. It deliberately
+  /// attaches to an already-running recording instead of calling `launch()`,
+  /// which would terminate the process and turn a graceful-stop test into an
+  /// interruption-recovery test.
+  func testStopExistingRecording() throws {
+    XCTAssertTrue(attachesToRunningApp, "Set MAINA_UI_ATTACH_RUNNING=1 for this test.")
+    let stop = app.buttons["Stop and save"]
+    XCTAssertTrue(stop.waitForExistence(timeout: 15), "Maina is not showing an active recording.")
+    attach("existing-recording-before-stop")
+    stop.tap()
+    XCTAssertTrue(
+      app.staticTexts.matching(NSPredicate(
+        format: "label CONTAINS[c] 'transcrib' OR label CONTAINS[c] 'queued' OR label CONTAINS[c] 'saved'"
+      )).firstMatch.waitForExistence(timeout: 30),
+      "Maina did not acknowledge the recording stop."
+    )
+    attach("existing-recording-after-stop")
+  }
+
+  /// Qualification-only recovery control. This attaches to the exact running
+  /// staging app and resolves a previously persisted interruption without
+  /// launching a new recording or clearing application data.
+  func testKeepInterruptedRecording() throws {
+    XCTAssertTrue(attachesToRunningApp, "Set MAINA_UI_ATTACH_RUNNING=1 for this test.")
+    let keep = app.buttons["Keep this recording"]
+    XCTAssertTrue(keep.waitForExistence(timeout: 15), "Maina is not showing the interrupted-recording recovery choice.")
+    attach("interrupted-recording-before-keep")
+    keep.tap()
+    XCTAssertFalse(keep.waitForExistence(timeout: 10), "The recovery choice did not close after keeping the recording.")
+    XCTAssertTrue(
+      app.staticTexts.matching(NSPredicate(
+        format: "label CONTAINS[c] 'Notes' OR label CONTAINS[c] 'Transcript' OR label CONTAINS[c] 'Recent'"
+      )).firstMatch.waitForExistence(timeout: 20),
+      "Maina did not return to a durable meeting or home state."
+    )
+    attach("interrupted-recording-after-keep")
   }
 
   func testNavigationAudit() throws {
