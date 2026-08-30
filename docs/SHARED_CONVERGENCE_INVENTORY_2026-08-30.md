@@ -135,3 +135,39 @@ manifest. Any mismatch not covered by the allowlist fails the pre-artifact
 gate. Native platform files are reviewed separately and are never used as a
 reason to duplicate the cloud packet, retry outbox, source contract, or local
 database.
+
+## Final pre-transfer inventory
+
+This second inventory was run after the canonical shared implementation was
+split into `811d9e2` and the iOS-preservation correction `0368677`, but before
+either commit was applied to the iOS worktree. It compares every canonical
+shared path against both the common ancestor and iOS `8c08fcc`.
+
+Twenty-nine canonical paths had no iOS delta from the common ancestor. They
+are new recovery, navigation, typed-failure, claim-fence, cleanup, and test
+files and can be transferred mechanically.
+
+The following 14 paths had independent iOS history and were reviewed
+individually before transfer:
+
+| Shared path | iOS behavior identified | Canonical disposition |
+| --- | --- | --- |
+| `modules/maina-recorder/src/index.ts` | Async status, iOS automation, continued processing, storage diagnostics. | Preserved; Android wake methods added without removing iOS fields. |
+| `package.json` | iOS runtime/model/UI-test/renewal verification scripts. | Preserved; shared Headless entry added and all iOS scripts retained. |
+| `src/app/(tabs)/index.tsx` | Markdown-to-readable summary preview. | Preserved together with event-driven pipeline refresh. |
+| `src/app/_layout.tsx` | Async iOS capture reads and qualification launch scenarios. | Preserved; Android-only remote/language setup remains platform-gated. |
+| `src/app/record.tsx` | Native iOS microphone permission, async capture reads, qualification scenarios, and foreground ASR launch. | Preserved; truthful pause/timer/navigation behavior layered on top. |
+| `src/data/db.ts` | Existing v13 iOS per-window checkpoint schema. | Preserved; consolidated unshipped v16 is additive and no v17 remains. |
+| `src/data/meetings.ts` | Portable iOS audio references and per-window checkpoints. | Preserved; generation fencing added. Explicit re-transcription clears only derived ASR claims/windows, never audio. |
+| `src/services/backgroundPipelineCore.ts` | Ordered cross-platform recovery stages. | Preserved; ownership checkpoints and signal coalescing added. |
+| `src/services/backgroundPipelineCore.test.ts` | Recovery-order and failure tests. | Preserved and expanded. |
+| `src/services/mainaCloudSession.ts` | Platform-neutral pairing and deployed `user.id` exchange shape. | Preserved; pairing transport errors are typed and hostname-safe. |
+| `src/services/mainaCloudSession.test.ts` | Pairing exchange compatibility. | Preserved and expanded with neutral-label and privacy tests. |
+| `src/services/mainaKnowledgeCloud.test.ts` | Awaited source drain and terminal signal proof. | Preserved; typed retry arming remains additive. |
+| `src/services/meetingCaptureLifecycle.ts` | iOS local-Qwen owner, continued processing, retries, and cloud handoff. | Preserved; foreground and OS callers now share one awaitable keyed completion. |
+| `src/services/notifications.ts` | Existing notification projection. | Temporary transport failures now use safe self-healing copy; partial transcript remains visible on the meeting instead of creating a redundant alert. |
+
+Transfer rule: apply the two shared commits once to iOS, resolve no file by
+copying from memory, and compare final tracked blob hashes. Any post-transfer
+shared mismatch not covered by the explicit native/harness allowlist is a hard
+failure.
