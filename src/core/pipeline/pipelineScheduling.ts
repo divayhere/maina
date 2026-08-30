@@ -19,3 +19,11 @@ export function nextPacketPollDelay(input: {
   if (input.nextRetryAt == null) return null;
   return Math.max(MINIMUM_PACKET_RETRY_WAKE_MS, input.nextRetryAt - (input.now ?? Date.now()));
 }
+
+export function packetPollSignalDelay(input: {
+  pollInFlight: boolean;
+  appActive: boolean;
+}): number | null {
+  if (input.pollInFlight) return null;
+  return input.appActive ? ACTIVE_PACKET_POLL_MS : BACKGROUND_PACKET_POLL_MS;
+}
