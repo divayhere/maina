@@ -7,7 +7,8 @@ import { SafeAreaProvider } from 'react-native-safe-area-context';
 import NetInfo from '@react-native-community/netinfo';
 
 import { provisionCoreLanguages, requestSpeechPermissions } from '@/core/transcription/nativeSpeech';
-import { nextPacketPollDelay } from '@/core/pipeline/pipelineScheduling';
+import { createEarlierDeadlineTimer } from '@/core/pipeline/earlierDeadlineTimer';
+import { nextPacketPollDelay, packetPollSignalDelay } from '@/core/pipeline/pipelineScheduling';
 import { initDb } from '@/data/db';
 import {
   getMeeting,
@@ -268,8 +269,10 @@ function RootLayout() {
     if (!ready) return;
     const unregisterNativeScheduler = registerNativePipelineWakeScheduler(scheduleNativePipelineWake);
     let packetPollInFlight: Promise<void> | null = null;
-    let packetPollTimer: ReturnType<typeof setTimeout> | null = null;
     let stopped = false;
+    const packetPollTimer = createEarlierDeadlineTimer({
+      onDue: () => { void schedulePacketPoll(); },
+    });
     const pipelineCoordinator = createPipelineWakeCoordinator({
       requestSignal: requestDurablePipelineWake,
       persistConnectivity: persistPipelineConnectivity,
@@ -299,7 +302,7 @@ function RootLayout() {
     };
     const schedulePacketPoll = () => {
       if (stopped || packetPollInFlight) return packetPollInFlight;
-      if (packetPollTimer) return Promise.resolve();
+      if (packetPollTimer.hasPending()) return Promise.resolve();
       let work: Promise<void>;
       work = reconcilePendingMeetingPackets()
         .then(async (pendingCount) => {
@@ -310,10 +313,7 @@ function RootLayout() {
             nextRetryAt,
           });
           if (stopped || delayMs == null) return;
-          packetPollTimer = setTimeout(() => {
-            packetPollTimer = null;
-            void schedulePacketPoll();
-          }, delayMs);
+          packetPollTimer.arm(delayMs);
         })
         .catch((cause) => {
           log.warn('summary', 'pending packet reconciliation failed', { err: String(cause) });
@@ -370,12 +370,16 @@ function RootLayout() {
       foregroundStarter.requestNativeClaim();
     });
     const unsubscribePipeline = subscribeMeetingPipelineChanges((meetingId) => {
-      log.info('summary', 'meeting pipeline state changed; waking poller', { meetingId });
-      if (packetPollTimer) clearTimeout(packetPollTimer);
-      packetPollTimer = setTimeout(() => {
-        packetPollTimer = null;
-        void schedulePacketPoll();
-      }, 1_000);
+      const delayMs = packetPollSignalDelay({
+        pollInFlight: packetPollInFlight !== null,
+        appActive: AppState.currentState === 'active',
+      });
+      log.info('summary', 'meeting pipeline state changed; bounded poll evaluated', {
+        meetingId,
+        pollInFlight: packetPollInFlight !== null,
+        scheduled: delayMs != null,
+      });
+      if (delayMs != null) packetPollTimer.arm(delayMs);
     });
     return () => {
       stopped = true;
@@ -386,7 +390,7 @@ function RootLayout() {
       unsubscribeNativeWake();
       unsubscribePipeline();
       unregisterNativeScheduler();
-      if (packetPollTimer) clearTimeout(packetPollTimer);
+      packetPollTimer.cancel();
     };
   }, [ready]);
 
