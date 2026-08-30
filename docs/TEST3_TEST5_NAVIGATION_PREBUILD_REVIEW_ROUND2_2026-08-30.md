@@ -1,5 +1,10 @@
 # Test 3, Test 5, navigation and refresh — pre-build review round 2
 
+> Superseded by
+> `docs/TEST3_TEST5_NAVIGATION_PREBUILD_REVIEW_ROUND3_2026-08-30.md`, which
+> reconciles the complete canonical F-001 through F-014 physical ledger. This
+> file is retained as historical review evidence.
+
 Date: 2026-08-30
 
 Decision: **NO-GO for product code, build, install, or owner approval**
