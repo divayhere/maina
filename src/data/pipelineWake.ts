@@ -7,7 +7,7 @@ import {
   type NativeScheduleState,
   type PipelineWakeSnapshot,
 } from '@/core/pipeline/pipelineWakeState';
-import { getDb } from '@/data/db';
+import { getDb, withDurableWakeTransaction } from '@/data/db';
 import type { CloudFailureClass } from '@/data/meetings';
 
 export type PipelineWakeReason =
@@ -87,10 +87,9 @@ export async function persistPipelineWakeSignal(input: {
   connected?: boolean;
   requiresNetwork?: boolean;
 }): Promise<PipelineWakeState & { openedGeneration: boolean }> {
-  const db = await getDb();
   const now = Date.now();
   let openedGeneration = false;
-  await db.withExclusiveTransactionAsync(async (transaction) => {
+  await withDurableWakeTransaction(async (transaction) => {
     const row = await transaction.getFirstAsync<PipelineWakeRow>(SELECT_WAKE);
     if (!row) throw new Error('Pipeline wake state is unavailable.');
     const decision = persistWakeSignal(toState(row), {
@@ -130,13 +129,12 @@ export async function persistPipelineConnectivity(connected: boolean): Promise<{
   state: PipelineWakeState;
   reconnectGeneration: number | null;
 }> {
-  const db = await getDb();
   const now = Date.now();
   let result: { state: PipelineWakeState; reconnectGeneration: number | null } | null = null;
-  // Observation and mutation must share one exclusive transaction. Two
+  // Observation and mutation must share one BEGIN IMMEDIATE transaction. Two
   // concurrent `true` callbacks may both have been dispatched from NetInfo,
   // but only the first transaction may observe the durable false->true edge.
-  await db.withExclusiveTransactionAsync(async (transaction) => {
+  await withDurableWakeTransaction(async (transaction) => {
     const row = await transaction.getFirstAsync<PipelineWakeRow>(SELECT_WAKE);
     if (!row) throw new Error('Pipeline wake state is unavailable.');
     const current = toState(row);
@@ -192,11 +190,10 @@ export type PipelineWakeAttempt =
 export const PIPELINE_WAKE_LEASE_MS = 60_000;
 
 export async function beginPipelineWakeAttempt(expectedGeneration: number): Promise<PipelineWakeAttempt> {
-  const db = await getDb();
   const now = Date.now();
   const token = `${now.toString(36)}-${Math.random().toString(36).slice(2, 14)}`;
   let result: PipelineWakeAttempt = { status: 'no_work', generation: expectedGeneration };
-  await db.withExclusiveTransactionAsync(async (transaction) => {
+  await withDurableWakeTransaction(async (transaction) => {
     const row = await transaction.getFirstAsync<PipelineWakeRow>(SELECT_WAKE);
     if (!row) return;
     const current = toState(row);
@@ -239,10 +236,9 @@ export async function completePipelineWakeAttempt(input: {
   succeeded: boolean;
   errorCode?: string | null;
 }): Promise<boolean> {
-  const db = await getDb();
   const now = Date.now();
   let completed = false;
-  await db.withExclusiveTransactionAsync(async (transaction) => {
+  await withDurableWakeTransaction(async (transaction) => {
     const row = await transaction.getFirstAsync<PipelineWakeRow>(SELECT_WAKE);
     if (!row || row.active_attempt_token !== input.token) return;
     const decision = completeWakeClaim(toState(row), { tokenMatches: true, succeeded: input.succeeded });
@@ -289,9 +285,8 @@ export async function recordNativeScheduleOutcome(input: {
   workId?: string | null;
   errorCode?: string | null;
 }): Promise<PipelineWakeState> {
-  const db = await getDb();
   const now = Date.now();
-  await db.withExclusiveTransactionAsync(async (transaction) => {
+  await withDurableWakeTransaction(async (transaction) => {
     const row = await transaction.getFirstAsync<PipelineWakeRow>(SELECT_WAKE);
     if (!row) return;
     const decision = markNativeScheduleOutcome(toState(row), input);
@@ -324,10 +319,9 @@ const TRANSPORT_FAILURE_CLASSES: CloudFailureClass[] = [
 
 export async function prepareTransportRetriesForConnectivityEpoch(epoch: number): Promise<void> {
   if (epoch <= 0) return;
-  const db = await getDb();
   const placeholders = TRANSPORT_FAILURE_CLASSES.map(() => '?').join(', ');
   const now = Date.now();
-  await db.withExclusiveTransactionAsync(async (transaction) => {
+  await withDurableWakeTransaction(async (transaction) => {
     await transaction.runAsync(
       `UPDATE meetings SET cloud_notes_next_retry_at = NULL,
          cloud_notes_last_wake_epoch = ?, updated_at = ?

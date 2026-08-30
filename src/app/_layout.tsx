@@ -276,6 +276,7 @@ function RootLayout() {
       repairNativeScheduling: repairDurablePipelineScheduling,
     });
     let nativeClaimInFlight = false;
+    let initialForegroundPersisted = false;
     const claimAndRunNativeWake = async () => {
       if (stopped || nativeClaimInFlight) return;
       nativeClaimInFlight = true;
@@ -295,6 +296,10 @@ function RootLayout() {
       } finally {
         nativeClaimInFlight = false;
       }
+    };
+    const requestNativeClaim = () => {
+      if (!initialForegroundPersisted) return;
+      void claimAndRunNativeWake();
     };
     const schedulePacketPoll = () => {
       if (stopped || packetPollInFlight) return packetPollInFlight;
@@ -332,8 +337,21 @@ function RootLayout() {
           log.warn('meetings', 'pipeline reconciliation failed', { err: String(cause) });
         });
     };
-    runPipelineFromSignal('foreground');
-    void claimAndRunNativeWake();
+    void pipelineCoordinator.beginSignal('foreground')
+      .then(({ completion }) => {
+        initialForegroundPersisted = true;
+        void completion
+          .then(() => schedulePacketPoll())
+          .catch((cause) => {
+            log.warn('meetings', 'pipeline reconciliation failed', { err: String(cause) });
+          });
+        requestNativeClaim();
+      })
+      .catch((cause) => {
+        log.warn('meetings', 'initial pipeline signal could not be persisted', {
+          causeName: cause instanceof Error ? cause.name : typeof cause,
+        });
+      });
     const subscription = AppState.addEventListener('change', (state) => {
       if (state !== 'active') return;
       runPipelineFromSignal('foreground');
@@ -356,7 +374,7 @@ function RootLayout() {
       runPipelineFromSignal('native_progress');
     });
     const unsubscribeNativeWake = subscribeNativePipelineWakeRequests(() => {
-      void claimAndRunNativeWake();
+      requestNativeClaim();
     });
     const unsubscribePipeline = subscribeMeetingPipelineChanges((meetingId) => {
       log.info('summary', 'meeting pipeline state changed; waking poller', { meetingId });
