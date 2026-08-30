@@ -16,6 +16,10 @@ android {
 
 dependencies {
   implementation 'androidx.work:work-runtime-ktx:2.10.5'
+  // Public React Native APIs used by the WorkManager -> Headless JS bridge.
+  // The host app supplies the same resolved runtime; this does not add a
+  // second JavaScript engine or depend on Expo's private worker classes.
+  implementation 'com.facebook.react:react-android'
   // Official sherpa-onnx Android runtime. Qwen model data is intentionally
   // delivered as a separately verified local model pack, never baked into APK.
   // This must be an `implementation` dependency. `compileOnly` makes Kotlin

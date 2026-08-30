@@ -369,6 +369,14 @@ internal class MainaPostProcessingOutbox(context: Context) :
         )
     }
 
+    /** Small identity-only read for WorkManager wake scheduling. */
+    fun readWakeIdentity(meetingId: String): Pair<String, String>? = readableDatabase.rawQuery(
+        "SELECT run_id, state FROM runs WHERE meeting_id = ?",
+        arrayOf(meetingId),
+    ).use { cursor ->
+        if (!cursor.moveToFirst()) null else cursor.getString(0) to cursor.getString(1)
+    }
+
     /**
      * The Expo runtime calls this only after its own SQLite transaction has
      * committed the immutable result. Keeping the native row until then makes

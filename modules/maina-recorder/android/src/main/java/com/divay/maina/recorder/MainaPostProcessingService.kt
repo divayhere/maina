@@ -139,6 +139,7 @@ internal class MainaPostProcessingService : Service() {
                         meetingId, "Local transcription paused safely: $message",
                     )
                     MainaPostProcessingRecoveryScheduler.enqueue(applicationContext, meetingId)
+                    enqueueNativeResultWake(meetingId)
                 }
             } finally {
                 queuedMeetingIds.remove(meetingId)
@@ -590,6 +591,21 @@ internal class MainaPostProcessingService : Service() {
                 .putExtra(EXTRA_MEETING_ID, meetingId)
                 .putExtra("state", state),
         )
+        if (state != MainaPostProcessingOutbox.STATE_RUNNING) {
+            enqueueNativeResultWake(meetingId)
+        }
+    }
+
+    private fun enqueueNativeResultWake(meetingId: String) {
+        val identity = MainaPostProcessingOutbox.shared(applicationContext).readWakeIdentity(meetingId)
+            ?: return
+        if (identity.second !in setOf(
+                MainaPostProcessingOutbox.STATE_COMPLETE,
+                MainaPostProcessingOutbox.STATE_PARTIAL,
+                MainaPostProcessingOutbox.STATE_DEFERRED,
+            )
+        ) return
+        MainaPipelineWakeScheduler.enqueueNativeResult(applicationContext, meetingId, identity.first)
     }
 
     private fun waitForFinalizedChunks(directory: String): MainaNativeAudioCapture.DirectoryInspection {

@@ -17,6 +17,8 @@ import java.net.URI
 import java.nio.file.Files
 import java.nio.file.StandardCopyOption
 import java.util.UUID
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.concurrent.thread
 import kotlin.math.abs
@@ -103,10 +105,12 @@ internal class MainaNativeAudioCapture(
 
     private val running = AtomicBoolean(false)
     private val paused = AtomicBoolean(false)
+    private val readEnabled = AtomicBoolean(false)
     private val routeRefreshRequested = AtomicBoolean(false)
     private val lock = Any()
     private val recorderLock = Any()
     private val journalLock = Any()
+    private val chunkTransferLock = Any()
     private val audioManager = context.getSystemService(AudioManager::class.java)
     @Volatile private var recorder: AudioRecord? = null
     @Volatile private var worker: Thread? = null
@@ -129,6 +133,10 @@ internal class MainaNativeAudioCapture(
     @Volatile private var rmsDbfs = -90.0
     @Volatile private var peakDbfs = -90.0
     @Volatile private var lastStatusPublishElapsedMs = 0L
+    @Volatile private var pauseCheckpointLatch: CountDownLatch? = null
+    @Volatile private var pauseStartedElapsedMs: Long? = null
+    @Volatile private var ownershipPublicationPending: MainaAudioOwnershipPhase? = null
+    private var preparedChunk: ActiveChunk? = null
 
     private val routingListener = AudioRouting.OnRoutingChangedListener { routing ->
         val activeRecorder = routing as? AudioRecord ?: return@OnRoutingChangedListener
@@ -138,6 +146,7 @@ internal class MainaNativeAudioCapture(
     fun snapshot(): Snapshot = Snapshot(
         state = when {
             running.get() && paused.get() -> "paused"
+            running.get() && !readEnabled.get() -> "ownership_pending"
             running.get() -> "recording"
             else -> "idle"
         },
@@ -189,19 +198,74 @@ internal class MainaNativeAudioCapture(
         val minBuffer = AudioRecord.getMinBufferSize(SAMPLE_RATE_HZ, CHANNEL_CONFIG, AUDIO_FORMAT)
         check(minBuffer > 0) { "AudioRecord does not support Maina's PCM format" }
         bufferBytes = max(minBuffer * 4, SAMPLE_RATE_HZ / 2 * BYTES_PER_FRAME)
-        val created = createAndStartRecorder()
+        var ownershipPhase = MainaAudioOwnershipPolicy.afterIntent(MainaAudioOwnershipPhase.PAUSED)
+        appendJournal(directory, "capture-start-intent", mapOf(
+            "meetingId" to options.meetingId,
+            "chunkIndex" to currentChunkIndex,
+        ))
+        val firstChunk = openChunk(directory)
+        ownershipPhase = MainaAudioOwnershipPolicy.afterChunkPrepared(ownershipPhase)
+        val created = runCatching { createAndStartRecorder() }
+            .onFailure {
+                closeChunk(firstChunk, directory, "start-failed")
+                ownershipPhase = MainaAudioOwnershipPolicy.afterStartFailure(ownershipPhase)
+                appendJournal(directory, "capture-start-failed", mapOf("chunkIndex" to firstChunk.index))
+            }
+            .getOrThrow()
+        ownershipPhase = MainaAudioOwnershipPolicy.afterAudioOwned(ownershipPhase)
+        ownershipPublicationPending = ownershipPhase
+        synchronized(chunkTransferLock) { preparedChunk = firstChunk }
         running.set(true)
         paused.set(false)
+        readEnabled.set(false)
+        pauseCheckpointLatch = null
+        pauseStartedElapsedMs = null
         updateRoutedDevice(created)
-        appendJournal(directory, "started", mapOf(
+        appendJournal(directory, "capture-audio-owned", mapOf(
             "meetingId" to options.meetingId,
             "sourceMode" to options.sourceMode,
             "resolvedAudioSource" to currentSource,
             "chunkDurationMs" to options.chunkDurationMs,
+            "chunkIndex" to firstChunk.index,
+            "audioOwnershipVerified" to true,
         ))
-        onEvent("info", "native-capture-started", snapshot().asMap())
-        publishStatus()
         worker = thread(name = "MainaNativeCapture", isDaemon = true) { recordLoop(directory, bufferBytes) }
+        snapshot()
+    }
+
+    /**
+     * Recreates only the native session shell after service-process death. It
+     * repairs the last partial WAV but does not touch AudioRecord until the
+     * serialized control reducer proves communication ownership is available.
+     */
+    fun restorePausedSession(options: Options, priorCaptureGapMs: Long): Snapshot = synchronized(lock) {
+        check(!running.get()) { "Native capture is already active" }
+        val directory = directoryFrom(options.directory)
+        check(directory.exists() || directory.mkdirs()) { "Could not restore capture directory" }
+        inspectDirectory(options.directory, recoverPartials = true)
+        currentOptions = options
+        currentSource = resolveAudioSource(options.sourceMode)
+        currentChunkIndex = nextChunkIndex(directory)
+        currentBytesWritten = 0L
+        val minBuffer = AudioRecord.getMinBufferSize(SAMPLE_RATE_HZ, CHANNEL_CONFIG, AUDIO_FORMAT)
+        check(minBuffer > 0) { "AudioRecord does not support Maina's PCM format" }
+        bufferBytes = max(minBuffer * 4, SAMPLE_RATE_HZ / 2 * BYTES_PER_FRAME)
+        startedElapsedMs = null
+        lastProgressAtMs = System.currentTimeMillis()
+        lastError = null
+        captureGapMs = priorCaptureGapMs.coerceAtLeast(0L)
+        routeRefreshRequested.set(false)
+        routeRecoveryActive = false
+        pauseStartedElapsedMs = SystemClock.elapsedRealtime()
+        pauseCheckpointLatch = null
+        running.set(true)
+        paused.set(true)
+        readEnabled.set(false)
+        appendJournal(directory, "capture-session-restored-paused", mapOf(
+            "meetingId" to options.meetingId,
+            "chunkIndex" to currentChunkIndex,
+        ))
+        publishStatus()
         snapshot()
     }
 
@@ -223,29 +287,90 @@ internal class MainaNativeAudioCapture(
 
     fun pause(): Snapshot {
         if (!running.get()) return snapshot()
+        if (paused.get()) return snapshot()
+        val checkpoint = CountDownLatch(1)
+        pauseCheckpointLatch = checkpoint
+        pauseStartedElapsedMs = SystemClock.elapsedRealtime()
         paused.set(true)
+        readEnabled.set(false)
         runCatching { recorder?.stop() }
+        check(checkpoint.await(PAUSE_CHECKPOINT_TIMEOUT_MS, TimeUnit.MILLISECONDS)) {
+            "Native capture did not finalize its active chunk before pause"
+        }
+        releaseRecorder()
         currentOptions?.let { appendJournal(directoryFrom(it.directory), "paused", emptyMap()) }
         onEvent("info", "native-capture-paused", snapshot().asMap())
         publishStatus()
         return snapshot()
     }
 
-    fun resume(): Snapshot {
+    fun resume(): Snapshot = synchronized(lock) {
         if (!running.get() || !paused.get()) return snapshot()
+        val options = currentOptions ?: return snapshot()
+        val directory = directoryFrom(options.directory)
+        var ownershipPhase = MainaAudioOwnershipPolicy.afterIntent(MainaAudioOwnershipPhase.PAUSED)
+        appendJournal(directory, "resume-intent", mapOf("chunkIndex" to currentChunkIndex))
+        val nextChunk = openChunk(directory)
+        ownershipPhase = MainaAudioOwnershipPolicy.afterChunkPrepared(ownershipPhase)
+        val created = runCatching { createAndStartRecorder() }
+            .onFailure {
+                closeChunk(nextChunk, directory, "resume-start-failed")
+                ownershipPhase = MainaAudioOwnershipPolicy.afterStartFailure(ownershipPhase)
+                appendJournal(directory, "resume-start-failed", mapOf("chunkIndex" to nextChunk.index))
+            }
+            .getOrThrow()
+        ownershipPhase = MainaAudioOwnershipPolicy.afterAudioOwned(ownershipPhase)
+        ownershipPublicationPending = ownershipPhase
+        synchronized(chunkTransferLock) { preparedChunk = nextChunk }
+        pauseStartedElapsedMs?.let { started ->
+            captureGapMs += max(0L, SystemClock.elapsedRealtime() - started)
+        }
+        pauseStartedElapsedMs = null
+        pauseCheckpointLatch = null
         paused.set(false)
-        routeRefreshReason = "resume"
-        routeRefreshRequested.set(true)
-        currentOptions?.let { appendJournal(directoryFrom(it.directory), "resumed", emptyMap()) }
-        onEvent("info", "native-capture-resumed", snapshot().asMap())
-        publishStatus()
+        readEnabled.set(false)
+        updateRoutedDevice(created)
+        appendJournal(directory, "resume-audio-owned", mapOf(
+            "chunkIndex" to nextChunk.index,
+            "audioOwnershipVerified" to true,
+        ))
+        if (worker == null) {
+            worker = thread(name = "MainaNativeCapture", isDaemon = true) {
+                recordLoop(directory, bufferBytes)
+            }
+        }
         return snapshot()
+    }
+
+    /** The service calls this only after its durable reducer publishes Recording. */
+    fun publishRecordingOwnership(event: String): Snapshot = synchronized(lock) {
+        check(running.get() && !paused.get()) { "Capture ownership is not ready to publish" }
+        check(recorder?.recordingState == AudioRecord.RECORDSTATE_RECORDING) {
+            "AudioRecord ownership was lost before publication"
+        }
+        val ownership = ownershipPublicationPending
+            ?: error("No capture ownership is pending publication")
+        MainaAudioOwnershipPolicy.afterPublished(ownership)
+        ownershipPublicationPending = null
+        readEnabled.set(true)
+        val options = currentOptions ?: error("Capture options are unavailable")
+        val directory = directoryFrom(options.directory)
+        appendJournal(directory, event, mapOf(
+            "meetingId" to options.meetingId,
+            "chunkIndex" to currentChunkIndex,
+            "audioOwnershipVerified" to true,
+        ))
+        onEvent("info", event, snapshot().asMap())
+        publishStatus()
+        snapshot()
     }
 
     fun stop(): Snapshot = synchronized(lock) {
         val wasRunning = running.getAndSet(false)
         if (!wasRunning && worker == null) return snapshot()
         paused.set(false)
+        readEnabled.set(false)
+        ownershipPublicationPending = null
         runCatching { recorder?.stop() }
         val activeWorker = worker
         activeWorker?.join(STOP_JOIN_TIMEOUT_MS)
@@ -262,19 +387,26 @@ internal class MainaNativeAudioCapture(
 
     private fun recordLoop(directory: File, bufferBytes: Int) {
         val buffer = ByteArray(bufferBytes)
-        var activeChunk: ActiveChunk? = null
+        var activeChunk: ActiveChunk? = takePreparedChunk()
         var lastStorageCheckElapsedMs = 0L
         try {
             while (running.get()) {
+                if (!paused.get() && !readEnabled.get()) {
+                    Thread.sleep(10)
+                    continue
+                }
                 if (paused.get()) {
-                    currentChunkIndex = MainaChunkBoundaryPolicy.nextChunkIndex(
-                        currentChunkIndex,
-                        hadActiveChunk = activeChunk != null,
-                        reason = MainaChunkBoundaryPolicy.BoundaryReason.PAUSE,
-                    )
-                    closeChunk(activeChunk, directory, "pause")
-                    activeChunk = null
-                    currentBytesWritten = 0L
+                    if (activeChunk != null) {
+                        currentChunkIndex = MainaChunkBoundaryPolicy.nextChunkIndex(
+                            currentChunkIndex,
+                            hadActiveChunk = true,
+                            reason = MainaChunkBoundaryPolicy.BoundaryReason.PAUSE,
+                        )
+                        closeChunk(activeChunk, directory, "pause")
+                        activeChunk = null
+                        currentBytesWritten = 0L
+                    }
+                    pauseCheckpointLatch?.countDown()
                     Thread.sleep(50)
                     continue
                 }
@@ -288,10 +420,12 @@ internal class MainaNativeAudioCapture(
                         MainaChunkBoundaryPolicy.BoundaryReason.ROUTE_CHANGE,
                     )
                     currentBytesWritten = 0L
-                    recoverRecorder(directory, routeRefreshReason)
+                    activeChunk = recoverRecorder(directory, routeRefreshReason)
                     continue
                 }
-                if (activeChunk == null) activeChunk = openChunk(directory)
+                if (activeChunk == null) {
+                    activeChunk = takePreparedChunk() ?: openChunk(directory)
+                }
                 val storageCheckNow = SystemClock.elapsedRealtime()
                 if (storageCheckNow - lastStorageCheckElapsedMs >= STORAGE_CHECK_INTERVAL_MS) {
                     lastStorageCheckElapsedMs = storageCheckNow
@@ -346,7 +480,7 @@ internal class MainaNativeAudioCapture(
                         )
                         currentBytesWritten = 0L
                         routeRefreshRequested.set(false)
-                        recoverRecorder(directory, "read-error:$read")
+                        activeChunk = recoverRecorder(directory, "read-error:$read")
                     }
                     else -> throw IllegalStateException("AudioRecord read failed: $read")
                 }
@@ -355,6 +489,8 @@ internal class MainaNativeAudioCapture(
             fail("capture-loop-failed", cause)
         } finally {
             closeChunk(activeChunk, directory, "stop")
+            closeChunk(takePreparedChunk(), directory, "stop-before-read")
+            pauseCheckpointLatch?.countDown()
         }
     }
 
@@ -378,7 +514,7 @@ internal class MainaNativeAudioCapture(
         peakDbfs = 20.0 * log10(peak.coerceAtLeast(1e-9))
     }
 
-    private fun recoverRecorder(directory: File, reason: String) {
+    private fun recoverRecorder(directory: File, reason: String): ActiveChunk? {
         val recoveryStarted = SystemClock.elapsedRealtime()
         routeRecoveryActive = true
         releaseRecorder()
@@ -389,6 +525,7 @@ internal class MainaNativeAudioCapture(
             val elapsed = SystemClock.elapsedRealtime() - recoveryStarted
             if (!MainaAudioCaptureRecoveryPolicy.isWithinRecoveryBudget(elapsed)) break
             if (attempt > 0) Thread.sleep(MainaAudioCaptureRecoveryPolicy.delayMs(attempt - 1))
+            val candidate = openChunk(directory)
             val recovered = runCatching {
                 createAndStartRecorder(
                     preferExternalInput = MainaAudioCaptureRecoveryPolicy.shouldPreferExternalInput(attempt),
@@ -417,8 +554,9 @@ internal class MainaNativeAudioCapture(
                     "gapMs" to gap,
                 ))
                 publishStatus()
-                return
+                return candidate
             }
+            closeChunk(candidate, directory, "route-start-failed")
             val cause = recovered.exceptionOrNull()
             lastError = cause?.message ?: cause?.javaClass?.simpleName ?: "Audio route recovery failed"
             attempt += 1
@@ -451,6 +589,7 @@ internal class MainaNativeAudioCapture(
             running.set(false)
             publishStatus()
         }
+        return null
     }
 
     private fun publishStatusIfDue(now: Long) {
@@ -548,6 +687,15 @@ internal class MainaNativeAudioCapture(
         return chunk
     }
 
+    private fun takePreparedChunk(): ActiveChunk? = synchronized(chunkTransferLock) {
+        preparedChunk.also { preparedChunk = null }
+    }
+
+    fun persistControlTransition(event: String, fields: Map<String, Any?>) {
+        val options = currentOptions ?: return
+        appendJournal(directoryFrom(options.directory), event, fields)
+    }
+
     private fun closeChunk(chunk: ActiveChunk?, directory: File, reason: String) {
         if (chunk == null) return
         runCatching {
@@ -637,6 +785,7 @@ internal class MainaNativeAudioCapture(
         const val SYNC_INTERVAL_MS = 2_000L
         const val STATUS_PUBLISH_INTERVAL_MS = 250L
         const val STOP_JOIN_TIMEOUT_MS = 15_000L
+        const val PAUSE_CHECKPOINT_TIMEOUT_MS = 3_000L
         const val JOURNAL_NAME = "capture-journal.jsonl"
         private const val STORAGE_CHECK_INTERVAL_MS = 5_000L
         private const val MIN_CAPTURE_FREE_BYTES = 256L * 1024L * 1024L
