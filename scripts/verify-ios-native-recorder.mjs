@@ -10,13 +10,14 @@ const capture = path.join(moduleRoot, 'ios', 'MainaIOSNativeAudioCapture.swift')
 const module = path.join(moduleRoot, 'ios', 'MainaRecorderModule.swift');
 const qwen = path.join(moduleRoot, 'ios', 'MainaQwenAsr.swift');
 const continuedProcessing = path.join(moduleRoot, 'ios', 'MainaIOSContinuedProcessing.swift');
+const pipelineWake = path.join(moduleRoot, 'ios', 'MainaIOSPipelineWake.swift');
 const continuedProcessingPlugin = path.join(project, 'plugins', 'withMainaIOSContinuedProcessing.js');
 const sherpaHeaders = path.join(moduleRoot, 'ios', 'vendor', 'sherpa-onnx.xcframework', 'ios-arm64', 'Headers');
 const config = JSON.parse(readFileSync(path.join(moduleRoot, 'expo-module.config.json'), 'utf8'));
 const appConfig = JSON.parse(readFileSync(path.join(project, 'app.json'), 'utf8'));
 const captureSource = readFileSync(capture, 'utf8');
 
-for (const file of [capture, module, qwen, continuedProcessing, continuedProcessingPlugin]) {
+for (const file of [capture, module, qwen, continuedProcessing, pipelineWake, continuedProcessingPlugin]) {
   if (!existsSync(file) || readFileSync(file, 'utf8').trim().length === 0) {
     throw new Error(`Required iOS recorder source is missing: ${file}`);
   }
@@ -32,6 +33,9 @@ if (!appConfig.expo.ios?.infoPlist?.UIBackgroundModes?.includes('processing')) {
 }
 if (!appConfig.expo.ios?.infoPlist?.BGTaskSchedulerPermittedIdentifiers?.includes('com.divay.maina.staging.continued-processing.*')) {
   throw new Error('Maina iOS continued-processing task identifier is not permitted.');
+}
+if (!appConfig.expo.ios?.infoPlist?.BGTaskSchedulerPermittedIdentifiers?.includes('com.divay.maina.staging.pipeline-network')) {
+  throw new Error('Maina iOS network recovery task identifier is not permitted.');
 }
 if (!appConfig.expo.plugins?.includes('./plugins/withMainaIOSContinuedProcessing')) {
   throw new Error('Maina iOS must install its continued-processing AppDelegate registration plugin.');
@@ -50,6 +54,8 @@ for (const token of [
   'capture-recovery-deferred',
   'beginBackgroundTask(withName: "Maina microphone recovery")',
   'capture-recovery-background-time-expired',
+  'capture-recovery-signal-coalesced',
+  'backgroundTimeRemaining > 4',
   'expireRecoveryBackgroundTaskSynchronously',
   'route-change-observed',
   'recorder?.isRecording != true',
@@ -59,11 +65,31 @@ for (const token of [
   }
 }
 for (const token of [
+  'com.divay.maina.staging.pipeline-network',
+  'BGProcessingTaskRequest',
+  'requiresNetworkConnectivity',
+  'getPendingTaskRequests',
+  'maxNativeScheduleAttempts = 5',
+  'claimPending()',
+  'hasActiveExecution()',
+  'CompletionGate',
+  '.now() + .seconds(10)',
+  'setTaskCompleted(success:',
+]) {
+  if (!readFileSync(pipelineWake, 'utf8').includes(token)) {
+    throw new Error(`iOS pipeline-wake invariant missing: ${token}`);
+  }
+}
+for (const token of [
   'requestIdentifierPrefix',
   'jobId: String',
-  'cancel(taskRequestWithIdentifier:',
-  'attach(_ task: BGTask)',
-  'beginFallbackTask()',
+  'makeUniqueIdentifier(meetingId:',
+  'registerExactIdentifierIfNeeded',
+  'request.strategy = .fail',
+  'UIApplication.shared.applicationState == .active',
+  'continued-processing-requires-foreground',
+  'attach(_ task: BGTask, identifier:',
+  'beginFallbackTask(meetingId:',
   'expireFallbackTaskSynchronously',
   'UIApplication.shared.endBackgroundTask(identifier)',
 ]) {
@@ -80,14 +106,17 @@ if (!recoveryDelays?.length || recoveryDelays.some((value) => !Number.isFinite(v
   throw new Error('iOS microphone recovery delays are missing or malformed.');
 }
 const recoveryWindowMs = recoveryDelays.reduce((sum, value) => sum + value, 0);
-if (recoveryDelays[0] !== 0 || recoveryWindowMs < 20_000 || recoveryWindowMs > 45_000) {
-  throw new Error(`iOS microphone recovery must retry immediately within one bounded background window; found ${recoveryWindowMs} ms.`);
+if (recoveryDelays[0] !== 0 || Math.max(...recoveryDelays) > 3_000 || recoveryWindowMs > 10_000) {
+  throw new Error(`iOS microphone recovery must retry immediately at a capped cadence; found ${recoveryWindowMs} ms initial sequence.`);
 }
 for (const token of [
   'startNativeCapture',
   'requestIOSMicrophonePermission',
   'getQwenAsrStatus',
   'beginIOSContinuedProcessing',
+  'schedulePipelineWake',
+  'claimPendingPipelineWake',
+  'pipelineWake.hasActiveExecution()',
 ]) {
   if (!readFileSync(module, 'utf8').includes(token)) {
     throw new Error(`iOS module API missing: ${token}`);
@@ -100,6 +129,8 @@ for (const token of [
   'setTaskCompleted',
   'public static func registerLaunchHandler()',
   'continued-processing-handler-unregistered',
+  'claimedIdentifiers',
+  'CompletionGate',
 ]) {
   if (!readFileSync(continuedProcessing, 'utf8').includes(token)) {
     throw new Error(`iOS continued-processing invariant missing: ${token}`);
@@ -109,6 +140,7 @@ for (const token of [
   'withAppDelegate',
   'internal import MainaRecorder',
   'MainaIOSContinuedProcessing.registerLaunchHandler()',
+  'MainaIOSPipelineWake.registerLaunchHandler()',
 ]) {
   if (!readFileSync(continuedProcessingPlugin, 'utf8').includes(token)) {
     throw new Error(`iOS AppDelegate registration invariant missing: ${token}`);
@@ -125,6 +157,10 @@ if (process.platform === 'darwin') {
   execFileSync('xcrun', [
     'swiftc', '-target', 'arm64-apple-ios16.4', '-sdk', sdk,
     '-typecheck', continuedProcessing,
+  ], { stdio: 'inherit' });
+  execFileSync('xcrun', [
+    'swiftc', '-target', 'arm64-apple-ios16.4', '-sdk', sdk,
+    '-typecheck', pipelineWake,
   ], { stdio: 'inherit' });
   if (!existsSync(sherpaHeaders)) {
     throw new Error('Verified Sherpa iOS runtime is missing; run npm run ios:runtime first.');

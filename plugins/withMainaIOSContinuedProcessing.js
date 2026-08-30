@@ -22,8 +22,11 @@ module.exports = function withMainaIOSContinuedProcessing(config) {
       source = source.replace(anchor, `${anchor}${importLine}\n`);
     }
 
-    const registration = '    MainaIOSContinuedProcessing.registerLaunchHandler()\n';
-    if (!source.includes(registration.trim())) {
+    const registrations = [
+      '    MainaIOSContinuedProcessing.registerLaunchHandler()\n',
+      '    MainaIOSPipelineWake.registerLaunchHandler()\n',
+    ];
+    if (registrations.some((registration) => !source.includes(registration.trim()))) {
       const launchMarker = 'didFinishLaunchingWithOptions';
       const launchIndex = source.indexOf(launchMarker);
       const bodyMarker = '  ) -> Bool {\n';
@@ -32,7 +35,8 @@ module.exports = function withMainaIOSContinuedProcessing(config) {
         throw new Error('Could not locate AppDelegate didFinishLaunchingWithOptions body');
       }
       const insertion = bodyIndex + bodyMarker.length;
-      source = `${source.slice(0, insertion)}${registration}${source.slice(insertion)}`;
+      const missing = registrations.filter((registration) => !source.includes(registration.trim())).join('');
+      source = `${source.slice(0, insertion)}${missing}${source.slice(insertion)}`;
     }
 
     mod.modResults.contents = source;

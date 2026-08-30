@@ -57,7 +57,7 @@ final class MainaIOSNativeAudioCapture: NSObject, AVAudioRecorderDelegate {
   // A call can release microphone priority several seconds after its UI ends.
   // Keep the first retry immediate, then stay within one bounded UIKit
   // background-time assertion instead of requiring the owner to reopen Maina.
-  private static let recoveryDelaysMs = [0, 250, 500, 1_000, 2_000, 3_000, 5_000, 8_000, 10_000]
+  private static let recoveryDelaysMs = [0, 250, 500, 1_000, 2_000, 3_000]
 
   private override init() {
     super.init()
@@ -138,6 +138,9 @@ final class MainaIOSNativeAudioCapture: NSObject, AVAudioRecorderDelegate {
   func resume() throws -> [String: Any] {
     try queue.sync {
       guard state == .paused else { throw CaptureError.invalidState("Maina is not paused.") }
+      guard !interrupted else {
+        throw CaptureError.invalidState("The microphone is still owned by a call or system interruption.")
+      }
       state = .resuming
       deliberatelyPaused = false
       try configureAudioSession()
@@ -194,6 +197,17 @@ final class MainaIOSNativeAudioCapture: NSObject, AVAudioRecorderDelegate {
         "storageReserveBytes": Self.storageReserveBytes,
       ]
       if let meetingId { result["meetingId"] = meetingId }
+      if state == .paused {
+        if deliberatelyPaused {
+          result["pauseReason"] = "manual"
+        } else if interrupted {
+          result["pauseReason"] = "communication"
+        } else {
+          result["pauseReason"] = NSNull()
+        }
+      } else {
+        result["pauseReason"] = NSNull()
+      }
       if let startedUptime { result["startedElapsedMs"] = startedUptime * 1_000 }
       let route = audioSession.currentRoute.inputs.first
       result["routedDeviceId"] = route?.uid.hashValue ?? 0
@@ -552,6 +566,10 @@ final class MainaIOSNativeAudioCapture: NSObject, AVAudioRecorderDelegate {
       state = .paused
       recoveryGeneration += 1
       appendJournal("interruption-began", fields: [:])
+      // Start the bounded watcher while iOS still grants execution time. The
+      // call interval remains excluded because every attempt must first regain
+      // AVAudioSession ownership before a new monotonic WAV chunk can open.
+      scheduleRecovery(reason: "interruption-began-recovery")
     case .ended:
       let optionsValue = notification.userInfo?[AVAudioSessionInterruptionOptionKey] as? UInt ?? 0
       let options = AVAudioSession.InterruptionOptions(rawValue: optionsValue)
@@ -596,6 +614,10 @@ final class MainaIOSNativeAudioCapture: NSObject, AVAudioRecorderDelegate {
   private func scheduleRecovery(reason: String, attempt: Int = 0) {
     guard state == .paused, interrupted, !deliberatelyPaused else { return }
     if attempt == 0 {
+      if routeRecoveryActive {
+        appendJournal("capture-recovery-signal-coalesced", fields: ["reason": reason])
+        return
+      }
       recoveryGeneration += 1
       beginRecoveryBackgroundTaskIfNeeded(reason: reason)
     }
@@ -639,8 +661,15 @@ final class MainaIOSNativeAudioCapture: NSObject, AVAudioRecorderDelegate {
           "errorDomain": nsError.domain,
           "errorCode": nsError.code,
         ])
-        if attempt + 1 < Self.recoveryDelaysMs.count {
-          self.scheduleRecovery(reason: reason, attempt: attempt + 1)
+        let nextAttempt = attempt + 1
+        if self.canContinueRecoveryWatcher() {
+          // After the initial fast sequence, retry at a capped three-second
+          // cadence until UIKit's actual background-time assertion approaches
+          // expiration. Signals coalesce into this one generation/loop.
+          self.scheduleRecovery(
+            reason: reason,
+            attempt: min(nextAttempt, Self.recoveryDelaysMs.count - 1)
+          )
         } else {
           self.routeRecoveryActive = false
           self.lastError = "Microphone recovery is paused safely. Reopen Maina to continue this recording."
@@ -649,6 +678,12 @@ final class MainaIOSNativeAudioCapture: NSObject, AVAudioRecorderDelegate {
         }
       }
     }
+  }
+
+  private func canContinueRecoveryWatcher() -> Bool {
+    if UIApplication.shared.applicationState == .active { return true }
+    guard recoveryBackgroundTask != .invalid else { return false }
+    return UIApplication.shared.backgroundTimeRemaining > 4
   }
 
   private func beginRecoveryBackgroundTaskIfNeeded(reason: String) {

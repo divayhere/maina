@@ -15,15 +15,19 @@ public final class MainaRecorderModule: Module {
   private let capture = MainaIOSNativeAudioCapture.shared
   private let qwen = MainaQwenAsr.shared
   private let continuedProcessing = MainaIOSContinuedProcessing.shared
+  private let pipelineWake = MainaIOSPipelineWake.shared
 
   public func definition() -> ModuleDefinition {
     Name("MainaRecorder")
 
-    Events("onAudioRouteChanged", "onNativePostProcessingChanged")
+    Events("onAudioRouteChanged", "onNativePostProcessingChanged", "onPipelineWakeRequested")
 
     OnCreate {
       self.capture.configure { [weak self] event in
         self?.sendEvent("onAudioRouteChanged", event)
+      }
+      self.pipelineWake.configure { [weak self] event in
+        self?.sendEvent("onPipelineWakeRequested", event)
       }
     }
 
@@ -99,6 +103,24 @@ public final class MainaRecorderModule: Module {
     }
     Function("finishIOSContinuedProcessing") { (success: Bool) in
       self.continuedProcessing.finish(success: success)
+    }
+    Function("isIOSContinuedProcessingActive") { (meetingId: String) in
+      self.continuedProcessing.isActive(meetingId: meetingId)
+        || self.pipelineWake.hasActiveExecution()
+    }
+    AsyncFunction("schedulePipelineWake") { (generation: Int, requiresNetwork: Bool, promise: Promise) in
+      self.pipelineWake.schedule(generation: generation, requiresNetwork: requiresNetwork) { result in
+        promise.resolve(result)
+      }
+    }
+    AsyncFunction("claimPendingPipelineWake") {
+      self.pipelineWake.claimPending()
+    }
+    AsyncFunction("completePipelineWake") { (attemptToken: String, succeeded: Bool) in
+      ["completed": self.pipelineWake.complete(attemptToken: attemptToken, succeeded: succeeded)]
+    }
+    AsyncFunction("isPipelineWakeAttemptActive") { (attemptToken: String) in
+      ["active": self.pipelineWake.isActive(attemptToken: attemptToken)]
     }
     Function("startNativePostProcessing") { (_: [String: Any]) in
       throw NSError(domain: "MainaRecorder", code: 1002, userInfo: [NSLocalizedDescriptionKey: "The iOS local ASR runtime has not been installed yet."])

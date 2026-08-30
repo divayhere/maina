@@ -19,7 +19,8 @@
           "processing"
         ],
         "BGTaskSchedulerPermittedIdentifiers": [
-          "com.divay.maina.staging.continued-processing.*"
+          "com.divay.maina.staging.continued-processing.*",
+          "com.divay.maina.staging.pipeline-network"
         ]
       }
     },
