@@ -1,120 +1,287 @@
-# Android durable pipeline wake — implementation amendment
+# Android durable pipeline wake — revised implementation amendment
 
 Date: 2026-08-30  
-Status: review required; product implementation paused  
+Status: implementation and focused tests complete; artifact build/install not authorized
 Scope: Android Test 5 process-death wake only
 
-## Why the accepted premise needs amendment
+## Decision
 
-The frozen Round 3 plan selected an app-owned WorkManager `CoroutineWorker`
-that starts a `HeadlessJsTaskService`. Source implementation and compilation
-research found two problems that must not be hidden behind a successful build:
+The first `APPEND_OR_REPLACE` design is rejected. It could retain a dead
+SQLite claim, retry forever, and let every stale Worker manufacture another
+generation. The revised design has one durable truth and bounded ownership:
 
-1. Android target SDK 36 does not permit an ordinary background `Service` to
-   be started from a background Worker after process death. React Native's
-   current Headless JS guide now demonstrates `startForegroundService`, while
-   Android requires a foreground service to promote itself and restricts
-   background foreground-service starts. Adding that service/notification/
-   permission expansion is explicitly excluded by the approved plan.
-2. The approved phase order requires a physical Worker -> React Native ->
-   shared TypeScript -> Worker completion proof before artifact creation, but
-   also forbids installing any implementation before the artifacts are built
-   and reviewed. A new native/JS bridge cannot be exercised on the existing
-   installed binary. Compilation or a mocked JVM test is not truthful runtime
-   proof.
+1. Expo SQLite `pipeline_wake_state` owns whether work exists.
+2. WorkManager owns only a bounded OS execution window.
+3. A renewable SQLite lease owns one shared TypeScript drain.
+4. A native completion token owns one WorkManager attempt.
+5. Packet/source/auth logic remains exclusively in the shared TypeScript
+   pipeline and existing idempotent backend contract.
 
-Primary platform references:
+No foreground service, Expo-private Worker, exact alarm, second outbox,
+second JS engine, new permission, backend contract, or Web change is added.
 
-- React Native Headless JS Android:
-  https://reactnative.dev/docs/headless-js-android
-- Android background service limits:
-  https://developer.android.com/reference/android/content/Context.html#startService(android.content.Intent)
-- Android WorkManager:
+Frozen external inputs remain:
+
+- Backend source: `6b2bcf43c2e8c4fb7c40a6cb6fb49e643099f93b`
+- Web source: `5b11bb026ff5fff36c7b393add9c0c64986a1335`
+
+## 1. Durable claim death-lock
+
+### Source rule
+
+Each SQLite claim stores:
+
+- `active_attempt_token`
+- `active_attempt_generation`
+- `active_attempt_lease_until`
+
+The lease is 60 seconds and a live task renews it every 15 seconds and before
+each recovery stage. Claim and reclaim decisions run inside one exclusive
+SQLite transaction.
+
+- A matching generation with a live lease returns `busy`.
+- A matching generation with an expired lease atomically replaces the old
+  token and returns `reclaimed`.
+- The old process cannot renew or complete after replacement because both
+  operations use `WHERE active_attempt_token = ?`.
+- A failed/expired owner leaves `enqueue_required = 1`; no work row is
+  deleted.
+
+The v17 migration adds the lease/generation columns with
+`addColumnIfMissing`. This is required because a staging device may already
+have opened v16. It preserves every meeting, audio, transcript, packet, source,
+and retry row.
+
+### Death-boundary behavior
+
+| Boundary | Durable state | Recovery |
+| --- | --- | --- |
+| Before claim | Pending generation, no token | Same generation is claimed |
+| After claim | Token plus renewable lease | Busy until expiry, then one reclaim |
+| During any stage | Same token; stage checkpoints fence ownership | Resume/replay after lease expiry |
+| After durable success, before native completion | No pending work, no token | Retry Worker returns `no_work` |
+| Old callback after reclaim | Token mismatch | Cannot commit/complete newer ownership |
+
+## 2. Bounded WorkManager retries
+
+Work is no longer appended to a chain. Every shared generation uses a unique
+name:
+
+`maina-durable-pipeline-wake-v2-shared-g<generation>`
+
+Every native result uses a SHA-256-derived run fingerprint. WorkManager uses
+`ExistingWorkPolicy.KEEP`, so duplicate scheduling of an unfinished exact
+generation/run is a no-op; different generations are independent and SQLite
+still permits only one effective drain.
+
+The Worker has five total execution attempts. Launch failure, JS failure,
+busy lease, or the 100-second native completion timeout returns `retry` only
+while `runAttemptCount + 1 < 5`; the fifth execution returns terminal failure.
+Requested exponential delays are 15/30/60/120 seconds. Android can delay work
+further, so this is an execution bound, not a wall-clock completion promise.
+Maximum app-owned execution is five attempts, each bounded by a 30-second
+React start plus a 100-second completion wait.
+
+Terminal Worker failure does not delete or terminalize the SQLite/outbox work.
+A later genuine foreground, connectivity, Expo periodic, or exact native-run
+signal may enqueue the same generation again. `KEEP` only suppresses a new
+request while same-name work is unfinished; it does not create an unbounded
+chain.
+
+## 3. Generation contract and true no-op Workers
+
+A shared WorkManager invocation receives an already committed generation and
+calls `beginPipelineWakeAttempt(expectedGeneration)` directly. It never calls
+`requestPipelineWake`.
+
+- Older generation: `obsolete`, native success, no drain.
+- Completed generation: `no_work`, native success, no drain.
+- Live owner: `busy`, bounded native retry.
+- Pending/expired owner: claim/reclaim and one shared drain.
+
+The only native Worker allowed to request a generation is a terminal native
+ASR-result wake. Before doing so, JS reads the existing native post-processing
+outbox and verifies the exact meeting ID, run ID, and terminal/deferred state.
+A stale run is a successful no-op. The durable native outbox—not a timestamp
+or Worker—is the request source.
+
+Concurrent foreground, connectivity, and native signals coalesce into one
+pending generation. A signal arriving during an active drain creates one
+follow-up generation even when it repeats the same durable run key; later
+signals coalesce into it. This avoids `KEEP` suppressing follow-up work against
+the still-running earlier generation.
+
+## 4. React Native 0.86.3 lifecycle
+
+`currentReactContext != null` is not treated as readiness.
+
+The Worker thread:
+
+1. Registers a unique native completion token.
+2. Calls public `ReactHost.start()` unconditionally and waits at most 30
+   seconds off the UI thread.
+3. Rejects cancelled/faulted initialization.
+4. Reads the initialized context and checks `hasActiveReactInstance()`.
+5. Switches to the UI thread, re-reads `ReactHost.currentReactContext`, requires
+   object identity with the initialized context, checks active state again,
+   starts `HeadlessJsTaskContext`, and immediately rechecks active state.
+6. Rejects launch if the token was cancelled during this handoff.
+
+Local React Native 0.86.3 source documents that `ReactHost.start()` completes
+when the React instance is initialized and that waiting on UI can deadlock.
+`HeadlessJsTaskContext.startTask()` itself only logs a soft exception when the
+instance is inactive, which is why the identity/active checks are explicit.
+
+This direct bridge uses public APIs but is not claimed as a framework-level
+supported WorkManager integration. Physical Worker -> ReactHost -> Headless JS
+-> shared TypeScript -> Worker completion after separately approved in-place
+installation remains an unconditional gate. A failure is NO-GO; there is no
+fallback to private Expo/RN APIs or a foreground service.
+
+Primary references:
+
+- React Native 0.86 Headless JS:
+  https://reactnative.dev/docs/0.86/headless-js-android
+- ReactHost source/API:
+  https://github.com/facebook/react-native/blob/v0.86.3/packages/react-native/ReactAndroid/src/main/java/com/facebook/react/ReactHost.kt
+- Headless task context source/API:
+  https://github.com/facebook/react-native/blob/v0.86.3/packages/react-native/ReactAndroid/src/main/java/com/facebook/react/jstasks/HeadlessJsTaskContext.kt
+- Android unique work and cancellation:
+  https://developer.android.com/develop/background-work/background-tasks/persistent/how-to/manage-work
+- WorkManager API:
   https://developer.android.com/reference/androidx/work/WorkManager.html
 
-## Narrow supported correction
+## 5. Exactly-one completion ownership
 
-Keep the app-owned network-constrained `CoroutineWorker`, but do not start a
-second Android service. The Worker already owns the OS execution window and
-uses only public React Native 0.86.3 APIs:
+The native token registry uses `putIfAbsent` and atomic `remove`.
+`complete(token, result)` or `abandon(token)` can win once; every later call is
+a no-op.
 
-1. Read the durable SQLite wake generation passed to the Worker.
-2. Start/reuse the application's public `ReactHost`.
-3. Invoke the registered `MainaPipelineWake` task through public
-   `HeadlessJsTaskContext` on the UI thread.
-4. Await the existing native completion token in the Worker for at most 120
-   seconds.
-5. The JS task claims the sole `pipeline_wake_state` row, runs the existing
-   shared TypeScript recovery cycle, and completes the native token exactly
-   once.
-6. A timeout/failure returns `Result.retry()`; no packet/source/auth logic is
-   copied into native code.
+The JS task owns one `completeNativePipelineWake(...)` attempt in `finally`,
+including malformed data and exceptions before a SQLite claim.
 
-This adds no restricted permission, exact alarm, second outbox, second JS
-engine, Expo-private class, foreground service, backend contract, or new data
-store.
+| Outcome | Native token | SQLite lease | Worker result |
+| --- | --- | --- | --- |
+| Success/no-work/obsolete | Complete true once | Cleared or unchanged no-work | Success |
+| Live competing owner | Complete false once | Other owner retained | Bounded retry |
+| JS rejection | Complete false once | Failure requeued | Bounded retry |
+| Headless/native timeout | Worker abandons once | JS loses active-token check; lease is requeued or expires | Bounded retry |
+| Worker cancellation | Coroutine `finally` abandons once | JS is fenced; process death leaves expiring lease | WorkManager-owned reschedule semantics |
+| Process death | In-memory token disappears | Lease remains durable, then reclaimable | Later execution/reconciliation |
+| Native-token loss | `isActive` fails at next stage boundary | Current attempt requeued or lease expires | Bounded retry |
 
-## Unique-work policy correction
+No cancellation path deletes durable work. If inference/network code cannot be
+interrupted inside one awaited operation, that operation may finish, but it
+cannot advance the next stage or complete the lease after native-token/lease
+loss. Existing packet/source idempotency contains a duplicate response at that
+boundary.
 
-`KEEP` can lose the immediate follow-up wake when a new connectivity epoch is
-committed while the existing unique Worker is still running: WorkManager
-rejects the new enqueue and the running Worker may already have completed its
-SQLite claim. The durable row remains safe, but only startup/periodic repair
-would recover it later.
+## 6. Commit/enqueue crash window
 
-Use public `APPEND_OR_REPLACE` for the versioned unique chain. Extra native
-signals may append a Worker, but the SQLite claim permits one effective drain;
-the appended Worker becomes a no-op when nothing is pending. Failed/cancelled
-chains are replaced. This keeps scheduling responsive without bypassing cloud
-backoff or creating duplicate packet/source operations.
+Expo SQLite and WorkManager cannot share an atomic transaction. The safe order
+is therefore:
 
-## Evidence already obtained
+1. Commit `enqueue_required = 1` and its generation in SQLite.
+2. Enqueue same-generation unique WorkManager work.
+3. Record `last_enqueued_generation` only as diagnostics.
 
-- React Native version resolved: 0.86.3.
-- Android module compilation passes with the direct public API bridge.
-- Focused native call-policy and pipeline-wake policy tests pass.
-- TypeScript typecheck passes.
-- 53 focused shared tests pass.
-- Exact authorized Wi-Fi Pixel target resolves to hardware serial
-  `47011FDAP000VE`, Pixel 9 Pro; no USB dependency remains in the active
-  toolchain checks.
-- No APK was built or installed and no device/app data was changed.
+If enqueue throws or the process dies between steps 1 and 2, SQLite remains
+pending. Foreground/startup reconciliation or the already registered Expo
+periodic task services that exact generation; it does not create a second
+outbox. If WorkManager accepted the request but step 3 did not run, the Worker
+still services the same SQLite generation and the diagnostic marker is merely
+stale.
 
-Compilation is not claimed as the required runtime proof.
+This is intentional at-least-once scheduling with idempotent shared work, not
+an assertion of cross-database atomicity.
 
-## Required phase-order decision
+## Changed files in this amendment
 
-Approve both of the following before implementation resumes:
+Shared TypeScript:
 
-1. Replace the service-start design and `KEEP` policy with the direct public
-   ReactHost/HeadlessJsTaskContext bridge plus `APPEND_OR_REPLACE` and the sole
-   SQLite claim described above.
-2. Build and review the unsigned/signed artifacts after all static/focused
-   gates, then perform the mandatory Worker -> Headless JS -> shared TS ->
-   Worker completion proof immediately after the separately approved
-   data-preserving in-place install. Artifact creation is not promotion; a
-   failed physical bridge proof remains an unconditional NO-GO and rollback.
+- `src/core/pipeline/pipelineWakeState.ts`
+- `src/core/pipeline/pipelineWakeState.test.ts`
+- `src/data/db.ts`
+- `src/data/pipelineWake.ts`
+- `src/services/backgroundPipelineCore.ts`
+- `src/services/backgroundPipelineCore.test.ts`
+- `src/services/backgroundPipeline.ts`
+- `src/services/pipelineWakeScheduler.ts`
+- `src/services/pipelineWakeScheduler.test.ts`
+- `src/services/meetingCaptureLifecycle.ts`
+- `src/headless/pipelineWakeTask.ts`
+- `src/headless/pipelineWakeTask.test.ts`
+- `src/headless/registerPipelineWake.ts`
+- `src/hardware/pipelineWake.ts`
+- `src/app/_layout.tsx`
 
-Alternative: explicitly authorize installation of an isolated disposable test
-package before release artifacts. Without one of these two proof-order changes,
-the pre-artifact runtime gate is mechanically impossible.
+Android native/module boundary:
 
-## Rollback and preserved boundaries
+- `modules/maina-recorder/android/src/main/java/com/divay/maina/recorder/MainaPipelineWakeWorker.kt`
+- `modules/maina-recorder/android/src/main/java/com/divay/maina/recorder/MainaPostProcessingOutbox.kt`
+- `modules/maina-recorder/android/src/main/java/com/divay/maina/recorder/MainaPostProcessingService.kt`
+- `modules/maina-recorder/android/src/main/java/com/divay/maina/recorder/MainaRecorderModule.kt`
+- `modules/maina-recorder/android/src/test/java/com/divay/maina/recorder/MainaPipelineWakePolicyTest.kt`
+- `modules/maina-recorder/src/index.ts`
+- `scripts/verify-native-recorder.mjs`
 
-- Remove the app-owned Worker/native bridge and retain the existing Expo
-  periodic/foreground safety paths.
-- The additive SQLite wake row and retry fields can remain ignored by older
-  code; no meeting/audio/transcript/source row is deleted.
-- No device install, uninstall, data clear, recording deletion, backend/web
-  change, or external-HDD write is part of this amendment.
+## Focused acceptance tests
 
-## Go / no-go
+Implemented automated cases:
 
-- **Current:** NO-GO for further product implementation and artifact build
-  pending approval of this amendment.
-- **After approval:** continue focused implementation/static gates, produce
-  held artifacts, then run the physical bridge proof only after explicit
-  install approval.
-- **Hard failure:** if the direct public bridge does not start JS and return
-  completion after process death on the exact Pixel, stop promotion and remove
-  it; do not fall back to Expo internals or a new foreground service.
+1. Concurrent signals coalesce into one pending generation.
+2. A signal during an active attempt creates one follow-up generation.
+3. Death before/after claim and during a stage becomes claimable after lease
+   expiry without parallel ownership.
+4. Durable success before native completion makes a retry Worker `no_work`.
+5. Obsolete Worker creates no generation.
+6. Exact native run creates one generation; stale native run is a no-op.
+7. Native completion succeeds once; duplicate complete/abandon fails.
+8. Retry attempts are terminal on attempt five.
+9. Same generation/run has one unique work name; different generations/runs
+   do not chain.
+10. Malformed data and JS exceptions complete native false exactly once.
+11. Stage ownership is checked between local repair, ASR, retention, notes,
+    source sync, corrections, and diagnostics.
+12. Concurrent callers execute one effective shared outbox drain.
+13. Native enqueue failure leaves SQLite pending and later reconciles the
+    existing generation without creating another durable row.
+
+Current evidence:
+
+- TypeScript typecheck: pass.
+- Expo lint: pass.
+- Native recorder source/runtime invariant verifier: pass.
+- Focused shared tests: 35/35 pass across seven files.
+- Full shared suite: 220/220 pass across 50 files.
+- Android native module compile: pass.
+- Android native behavioral suite: 48/48 pass, including 6/6 wake-policy cases.
+
+These are static/focused gates, not physical process-death evidence. No APK,
+app archive, install, uninstall, data clear, recording deletion, or device
+mutation occurred.
+
+## Rollback
+
+Remove the app-owned Worker/Headless bridge and retain foreground plus existing
+Expo periodic recovery. The additive v16/v17 fields remain harmless to older
+code. No meeting/audio/transcript/source row is transformed or deleted by the
+rollback.
+
+## Remaining hard gate
+
+After an artifact is separately reviewed and installation is explicitly
+approved, physical qualification must prove:
+
+1. Process-alive reconnect and process-death reconnect both start the public
+   Worker/JS bridge.
+2. Concurrent network/foreground/Worker signals yield one packet job, one
+   source key, stable job ID/hash, and stable retry accounting.
+3. Killing at request commit, after claim, during each recovery stage, and
+   after durable success recovers without manual foreground/Retry.
+4. Five failed executions terminate native retries while SQLite/outbox work
+   remains recoverable by a later genuine signal.
+5. No raw host, exception, token, or provider error reaches UI.
+
+Until that physical bridge proof passes, Android Test 5 and promotion remain
+**NOT READY**. No build or installation approval is requested by this document.
