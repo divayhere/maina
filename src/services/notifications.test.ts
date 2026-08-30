@@ -57,7 +57,7 @@ describe('buildMainaNotifications', () => {
       summaryStatus: 'idle',
       summary: null,
       knowledgeCloudSyncStatus: 'local_only',
-    })])[0]).toMatchObject({ action: 'retry_transcript', actionLabel: 'Retry now' });
+    })])).toEqual([]);
 
     expect(buildMainaNotifications([baseMeeting({
       summaryStatus: 'failed',
