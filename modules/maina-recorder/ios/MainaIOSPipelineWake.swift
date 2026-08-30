@@ -99,7 +99,13 @@ public final class MainaIOSPipelineWake {
       self.defaults.set(requestedGeneration, forKey: Key.generation)
       self.defaults.set(requiresNetwork, forKey: Key.requiresNetwork)
 
-      if self.activeGate?.isActive == true {
+      let scheduleAction = MainaIOSPipelineWakePolicy.scheduleAction(
+        active: self.activeGate?.isActive == true,
+        activeGeneration: self.activeGeneration,
+        requestedGeneration: requestedGeneration
+      )
+      if scheduleAction == .activeOwnsGeneration {
+        self.defaults.set("running", forKey: Key.scheduleState)
         completion(["scheduled": true, "workId": Self.taskIdentifier])
         return
       }
@@ -111,7 +117,13 @@ public final class MainaIOSPipelineWake {
 
       BGTaskScheduler.shared.getPendingTaskRequests { requests in
         self.queue.async {
-          if requests.contains(where: { $0.identifier == Self.taskIdentifier }) {
+          let pendingRequestExists = requests.contains(where: {
+            $0.identifier == Self.taskIdentifier
+          })
+          if !MainaIOSPipelineWakePolicy.shouldSubmitPendingRequest(
+            action: scheduleAction,
+            pendingRequestExists: pendingRequestExists
+          ) {
             self.defaults.set("pending", forKey: Key.scheduleState)
             completion(["scheduled": true, "workId": Self.taskIdentifier])
             return
@@ -151,9 +163,10 @@ public final class MainaIOSPipelineWake {
   func complete(attemptToken: String, succeeded: Bool) -> Bool {
     queue.sync {
       guard activeToken == attemptToken, let gate = activeGate else { return false }
+      let completedGeneration = activeGeneration
       let completed = gate.complete(success: succeeded)
       guard completed else { return false }
-      clearActiveState(success: succeeded)
+      clearActiveState(success: succeeded, completedGeneration: completedGeneration)
       if !succeeded { scheduleRetryAfterCurrentTask() }
       return true
     }
@@ -208,8 +221,9 @@ public final class MainaIOSPipelineWake {
       guard let self, let gate else { return }
       self.queue.async {
         guard self.activeGate === gate else { return }
+        let completedGeneration = self.activeGeneration
         _ = gate.complete(success: false)
-        self.clearActiveState(success: false)
+        self.clearActiveState(success: false, completedGeneration: completedGeneration)
         self.scheduleRetryAfterCurrentTask()
       }
     }
@@ -222,8 +236,9 @@ public final class MainaIOSPipelineWake {
         self.activeGate === gate,
         !self.jsClaimed
       else { return }
+      let completedGeneration = self.activeGeneration
       _ = gate.complete(success: false)
-      self.clearActiveState(success: false)
+      self.clearActiveState(success: false, completedGeneration: completedGeneration)
       self.scheduleRetryAfterCurrentTask()
     }
   }
@@ -233,16 +248,25 @@ public final class MainaIOSPipelineWake {
     onWakeRequested?(["generation": activeGeneration])
   }
 
-  private func clearActiveState(success: Bool) {
+  private func clearActiveState(success: Bool, completedGeneration: Int) {
+    let requestedGeneration = defaults.integer(forKey: Key.generation)
+    let retainedGeneration = MainaIOSPipelineWakePolicy.retainedGenerationAfterCompletion(
+      completedGeneration: completedGeneration,
+      requestedGeneration: requestedGeneration,
+      succeeded: success
+    )
     activeGate = nil
     activeToken = nil
     activeGeneration = 0
     jsClaimed = false
     defaults.removeObject(forKey: Key.activeToken)
-    defaults.set(success ? "complete" : "deferred", forKey: Key.scheduleState)
-    if success {
+    defaults.set(
+      success && retainedGeneration == 0 ? "complete" : success ? "pending" : "deferred",
+      forKey: Key.scheduleState
+    )
+    defaults.set(retainedGeneration, forKey: Key.generation)
+    if success && retainedGeneration == 0 {
       defaults.set(0, forKey: Key.scheduleAttempts)
-      defaults.set(0, forKey: Key.generation)
     }
   }
 

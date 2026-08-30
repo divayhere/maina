@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
 
 const project = path.resolve(import.meta.dirname, '..');
@@ -11,13 +12,15 @@ const module = path.join(moduleRoot, 'ios', 'MainaRecorderModule.swift');
 const qwen = path.join(moduleRoot, 'ios', 'MainaQwenAsr.swift');
 const continuedProcessing = path.join(moduleRoot, 'ios', 'MainaIOSContinuedProcessing.swift');
 const pipelineWake = path.join(moduleRoot, 'ios', 'MainaIOSPipelineWake.swift');
+const pipelineWakePolicy = path.join(moduleRoot, 'ios', 'MainaIOSPipelineWakePolicy.swift');
+const pipelineWakePolicyTests = path.join(project, 'scripts', 'fixtures', 'MainaIOSPipelineWakePolicyTests.swift');
 const continuedProcessingPlugin = path.join(project, 'plugins', 'withMainaIOSContinuedProcessing.js');
 const sherpaHeaders = path.join(moduleRoot, 'ios', 'vendor', 'sherpa-onnx.xcframework', 'ios-arm64', 'Headers');
 const config = JSON.parse(readFileSync(path.join(moduleRoot, 'expo-module.config.json'), 'utf8'));
 const appConfig = JSON.parse(readFileSync(path.join(project, 'app.json'), 'utf8'));
 const captureSource = readFileSync(capture, 'utf8');
 
-for (const file of [capture, module, qwen, continuedProcessing, pipelineWake, continuedProcessingPlugin]) {
+for (const file of [capture, module, qwen, continuedProcessing, pipelineWake, pipelineWakePolicy, pipelineWakePolicyTests, continuedProcessingPlugin]) {
   if (!existsSync(file) || readFileSync(file, 'utf8').trim().length === 0) {
     throw new Error(`Required iOS recorder source is missing: ${file}`);
   }
@@ -74,6 +77,8 @@ for (const token of [
   'hasActiveExecution()',
   'CompletionGate',
   '.now() + .seconds(10)',
+  'MainaIOSPipelineWakePolicy.scheduleAction',
+  'MainaIOSPipelineWakePolicy.retainedGenerationAfterCompletion',
   'setTaskCompleted(success:',
 ]) {
   if (!readFileSync(pipelineWake, 'utf8').includes(token)) {
@@ -160,8 +165,19 @@ if (process.platform === 'darwin') {
   ], { stdio: 'inherit' });
   execFileSync('xcrun', [
     'swiftc', '-target', 'arm64-apple-ios16.4', '-sdk', sdk,
-    '-typecheck', pipelineWake,
+    '-typecheck', pipelineWakePolicy, pipelineWake,
   ], { stdio: 'inherit' });
+  const policyTestDirectory = mkdtempSync(path.join(tmpdir(), 'maina-ios-pipeline-policy-'));
+  const policyTestExecutable = path.join(policyTestDirectory, 'pipeline-wake-policy-tests');
+  try {
+    execFileSync('xcrun', [
+      'swiftc', pipelineWakePolicy, pipelineWakePolicyTests,
+      '-o', policyTestExecutable,
+    ], { stdio: 'inherit' });
+    execFileSync(policyTestExecutable, [], { stdio: 'inherit' });
+  } finally {
+    rmSync(policyTestDirectory, { recursive: true, force: true });
+  }
   if (!existsSync(sherpaHeaders)) {
     throw new Error('Verified Sherpa iOS runtime is missing; run npm run ios:runtime first.');
   }
