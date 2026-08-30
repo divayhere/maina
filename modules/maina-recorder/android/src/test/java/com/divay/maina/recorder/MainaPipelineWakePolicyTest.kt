@@ -137,6 +137,27 @@ class MainaPipelineWakePolicyTest {
     }
 
     @Test
+    fun `scheduler reconciles the exact current identity after native enqueue outcome crash`() {
+        val request = requireNotNull(MainaPipelineWakePolicy.shared(11, true, 10_000L, 3L))
+        val storedId = UUID.randomUUID()
+        val resolution = MainaPipelineWakeScheduler.resolveExisting(
+            request,
+            storedId.toString(),
+            50_000L,
+            2L,
+            listOf(MainaScheduledWorkSnapshot(
+                storedId,
+                WorkInfo.State.ENQUEUED,
+                setOf(MainaPipelineWakePolicy.scheduleIdentityTag(request)),
+            )),
+        )
+
+        assertEquals(MainaPipelineScheduleAction.KEEP_EXISTING, resolution.action)
+        assertEquals(storedId, resolution.existingId)
+        assertNull(resolution.errorCode)
+    }
+
+    @Test
     fun `terminal exact work permits one KEEP enqueue while current matching work is reused`() {
         val request = requireNotNull(MainaPipelineWakePolicy.shared(11, true, 10_000L, 3L))
         val storedId = UUID.randomUUID()

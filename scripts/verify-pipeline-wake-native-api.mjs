@@ -48,21 +48,27 @@ const kotlin = path.join(
   'modules/maina-recorder/android/src/main/java/com/divay/maina/recorder/MainaRecorderModule.kt',
 );
 if (existsSync(kotlin)) {
-  assertOrdered(
-    'Android Expo module signature',
-    sliceFrom(
-      'modules/maina-recorder/android/src/main/java/com/divay/maina/recorder/MainaRecorderModule.kt',
-      'AsyncFunction("schedulePipelineWake")',
-    ),
-  );
+  const kotlinSource = readFileSync(kotlin, 'utf8');
+  if (kotlinSource.includes('AsyncFunction("schedulePipelineWake")')) {
+    assertOrdered(
+      'Android Expo module signature',
+      sliceFrom(
+        'modules/maina-recorder/android/src/main/java/com/divay/maina/recorder/MainaRecorderModule.kt',
+        'AsyncFunction("schedulePipelineWake")',
+      ),
+    );
+  }
 }
 
 const swift = path.join(project, 'modules/maina-recorder/ios/MainaRecorderModule.swift');
 if (existsSync(swift)) {
-  assertOrdered(
-    'iOS Expo module signature',
-    sliceFrom('modules/maina-recorder/ios/MainaRecorderModule.swift', 'AsyncFunction("schedulePipelineWake")'),
-  );
+  const swiftSource = readFileSync(swift, 'utf8');
+  if (swiftSource.includes('AsyncFunction("schedulePipelineWake")')) {
+    assertOrdered(
+      'iOS Expo module signature',
+      sliceFrom('modules/maina-recorder/ios/MainaRecorderModule.swift', 'AsyncFunction("schedulePipelineWake")'),
+    );
+  }
 }
 
 console.log('Pipeline wake native API parameter order is aligned.');

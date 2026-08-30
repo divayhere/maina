@@ -315,8 +315,20 @@ internal object MainaPipelineWakeScheduler {
                     ),
                 )
             }
-            if (expectedPriorTags.none(exact.tags::contains)) {
+            val priorIdentityMatches = expectedPriorTags.any(exact.tags::contains)
+            val currentIdentityMatches = MainaPipelineWakePolicy.scheduleIdentityTag(request) in exact.tags
+            if (!priorIdentityMatches && !currentIdentityMatches) {
                 return MainaPipelineScheduleResolution(errorCode = "previous_work_identity_mismatch")
+            }
+            if (currentIdentityMatches) {
+                return MainaPipelineScheduleResolution(
+                    action = if (exact.state.isFinished) {
+                        MainaPipelineScheduleAction.ENQUEUE_NEW
+                    } else {
+                        MainaPipelineScheduleAction.KEEP_EXISTING
+                    },
+                    existingId = exact.id,
+                )
             }
             return MainaPipelineScheduleResolution(
                 action = MainaPipelineWakePolicy.scheduleAction(
