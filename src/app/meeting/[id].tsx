@@ -5,9 +5,10 @@ import { FlashList } from '@shopify/flash-list';
 import { router, useFocusEffect, useLocalSearchParams } from 'expo-router';
 import { useSpeechRecognitionEvent } from 'expo-speech-recognition';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ActivityIndicator, Alert, AppState, KeyboardAvoidingView, Modal, Platform, Pressable, StyleSheet, TextInput, View } from 'react-native';
+import { ActivityIndicator, Alert, AppState, KeyboardAvoidingView, Modal, Platform, Pressable, RefreshControl, StyleSheet, TextInput, View } from 'react-native';
 
 import { MEETING_TITLE_MAX_LENGTH, normalizeMeetingTitle } from '@/core/meeting/meetingWorkspace';
+import { safeCloudFailureMessage, safePersistedCloudMessage } from '@/core/pipeline/cloudFailure';
 import { chooseRecognitionLanguage, startFileSession, stopSession, supportsOnDevice } from '@/core/transcription/nativeSpeech';
 import { appendWithoutOverlap } from '@/core/transcription/transcript';
 import {
@@ -60,11 +61,12 @@ const PAGE_SIZE = 60;
 
 type MeetingTab = 'notes' | 'todos' | 'transcript';
 
-function formatMeetingLength(meeting: Pick<Meeting, 'durationMs' | 'audioDurationMs'>): string {
+function formatMeetingLength(meeting: Pick<Meeting, 'durationMs' | 'audioDurationMs' | 'captureGapMs'>): string {
   const elapsedMs = Math.max(0, meeting.durationMs);
   const recordedMs = Math.max(0, meeting.audioDurationMs ?? 0);
-  if (recordedMs > 0 && Math.abs(elapsedMs - recordedMs) >= 5_000) {
-    return `${formatDuration(recordedMs)} recorded · ${formatDuration(elapsedMs)} elapsed`;
+  const gapMs = Math.max(0, meeting.captureGapMs ?? 0);
+  if (recordedMs > 0 && gapMs >= 1_000) {
+    return `${formatDuration(recordedMs)} recorded · ${formatDuration(gapMs)} interrupted`;
   }
   return formatDuration(recordedMs || elapsedMs);
 }
@@ -161,7 +163,15 @@ function TabChip({
         },
       ]}
     >
-      <AppText variant="heading" color={active ? theme.primaryForeground : theme.textSoft}>{label}</AppText>
+      <AppText
+        variant="bodyStrong"
+        color={active ? theme.primaryForeground : theme.textSoft}
+        numberOfLines={1}
+        adjustsFontSizeToFit
+        minimumFontScale={0.86}
+      >
+        {label}
+      </AppText>
     </Pressable>
   );
 }
@@ -222,9 +232,10 @@ function TodoPreviewRow({
 }
 
 function formatPacketError(message?: string | null): string {
-  const normalized = message?.trim() ?? '';
-  if (!normalized) return 'Notes are temporarily unavailable. Maina will retry safely.';
-  return normalized;
+  return safePersistedCloudMessage(
+    message,
+    safeCloudFailureMessage('protocol'),
+  );
 }
 
 export default function MeetingDetail() {
@@ -257,6 +268,7 @@ export default function MeetingDetail() {
   const [titleEditorOpen, setTitleEditorOpen] = useState(false);
   const [titleDraft, setTitleDraft] = useState('');
   const [savingTitle, setSavingTitle] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
 
   const repassRef = useRef(false);
   const repassChainRef = useRef<Promise<void>>(Promise.resolve());
@@ -328,52 +340,61 @@ export default function MeetingDetail() {
     setTranscriptSummary(summary);
   }, []);
 
-  const load = useCallback(() => {
+  const load = useCallback(async () => {
     if (!id) return;
-    getMeeting(id).then(async (initialMeeting) => {
-      let m = initialMeeting;
-      if (m?.status === 'transcribed' && m.summaryStatus === 'idle') {
-        await maybeQueueMeetingPacket(m.id).catch((cause) => {
-          log.warn('summary', 'meeting detail auto-summary handoff failed', {
-            meetingId: m?.id,
-            err: String(cause),
-          });
-        });
-        m = await getMeeting(id);
-      }
-      setMeeting(m);
-      meetingRef.current = m;
-      if (!m) return;
-      if (m.status === 'interrupted' && allowInterrupted !== '1') {
-        router.replace(`/meeting/${m.id}/recover`);
-        return;
-      }
-      await Promise.all([
-        loadTranscript(m.id),
-        listMeetingTodos(m.id).then(setTodos),
-        listKnowledgeCloudCorrections(m.id).then(setCloudCorrections),
-      ]);
-      if (!m.audioUri || m.segmentCount === 0) {
-        setAudioAvailable(false);
-        return;
-      }
-      const rows = await listRecordingSegments(m.id);
-      const uris = rows.length > 0
-        ? rows.map((segment) => segment.audioUri)
-        : Array.from({ length: m.segmentCount }, (_, index) => segmentPath(m.audioUri!, index));
-      // Native capture files live in Maina's private app storage. Expo's file
-      // API cannot reliably stat those URIs, even though the native recorder
-      // can still read and reprocess them. Prefer the native inspector so a
-      // recoverable transcript always exposes its recovery action.
-      const nativeInspection = await inspectNativeCaptureDirectory(m.audioUri, true).catch(() => null);
-      if (nativeInspection) {
-        setAudioAvailable(nativeInspection.finalizedUris.length > 0);
-        return;
-      }
-      const checks = await Promise.all(uris.map((uri) => FileSystem.getInfoAsync(uri).catch(() => ({ exists: false }))));
-      setAudioAvailable(checks.length > 0 && checks.every((info) => info.exists));
-    });
+    const m = await getMeeting(id);
+    setMeeting(m);
+    meetingRef.current = m;
+    if (!m) return;
+    if (m.status === 'interrupted' && allowInterrupted !== '1') {
+      router.replace(`/meeting/${m.id}/recover`);
+      return;
+    }
+    await Promise.all([
+      loadTranscript(m.id),
+      listMeetingTodos(m.id).then(setTodos),
+      listKnowledgeCloudCorrections(m.id).then(setCloudCorrections),
+    ]);
+    if (!m.audioUri || m.segmentCount === 0) {
+      setAudioAvailable(false);
+      return;
+    }
+    const rows = await listRecordingSegments(m.id);
+    const uris = rows.length > 0
+      ? rows.map((segment) => segment.audioUri)
+      : Array.from({ length: m.segmentCount }, (_, index) => segmentPath(m.audioUri!, index));
+    // Native capture files live in Maina's private app storage. Expo's file
+    // API cannot reliably stat those URIs, even though the native recorder
+    // can still read and reprocess them. Prefer the native inspector so a
+    // recoverable transcript always exposes its recovery action.
+    const nativeInspection = await inspectNativeCaptureDirectory(m.audioUri, false).catch(() => null);
+    if (nativeInspection) {
+      setAudioAvailable(nativeInspection.finalizedUris.length > 0);
+      return;
+    }
+    const checks = await Promise.all(uris.map((uri) => FileSystem.getInfoAsync(uri).catch(() => ({ exists: false }))));
+    setAudioAvailable(checks.length > 0 && checks.every((info) => info.exists));
   }, [allowInterrupted, id, loadTranscript]);
+
+  const refreshLocal = useCallback(async () => {
+    setRefreshing(true);
+    try {
+      // A gesture reloads canonical local projections only. It never starts
+      // ASR, creates/polls a cloud job, resets backoff, or repairs audio.
+      await Promise.all([load(), refresh()]);
+    } finally {
+      setRefreshing(false);
+    }
+  }, [load, refresh]);
+
+  const localRefreshControl = (
+    <RefreshControl
+      refreshing={refreshing}
+      onRefresh={() => void refreshLocal()}
+      tintColor={theme.primary}
+      colors={[theme.primary]}
+    />
+  );
 
   useFocusEffect(useCallback(() => { load(); }, [load]));
 
@@ -392,24 +413,6 @@ export default function MeetingDetail() {
     load();
     refresh();
   }), [id, load, refresh]);
-
-  useEffect(() => {
-    if (!meeting) return;
-    const packetPending = meeting.status === 'transcribing'
-      || meeting.summaryStatus === 'queued'
-      || meeting.summaryStatus === 'running';
-    const sourceSyncPending = meeting.knowledgeCloudSyncStatus === 'sync_queued'
-      || meeting.knowledgeCloudSyncStatus === 'syncing';
-    const correctionSyncPending = cloudCorrections.some(
-      (correction) => correction.syncStatus === 'sync_queued' || correction.syncStatus === 'syncing',
-    );
-    if (!packetPending && !sourceSyncPending && !correctionSyncPending) return;
-    const timer = setTimeout(() => {
-      load();
-      refresh();
-    }, 1500);
-    return () => clearTimeout(timer);
-  }, [cloudCorrections, load, meeting, refresh]);
 
   const loadMore = useCallback(async () => {
     if (!id || !hasMore || loadingMore) return;
@@ -698,7 +701,7 @@ export default function MeetingDetail() {
           }
           await deleteMeeting(id);
           await refresh();
-          router.back();
+          router.dismissTo('/');
         },
       },
     ]);
@@ -910,6 +913,7 @@ export default function MeetingDetail() {
           onEndReached={loadMore}
           onEndReachedThreshold={0.4}
           drawDistance={400}
+          refreshControl={localRefreshControl}
           ListHeaderComponent={
             <View>
               {header}
@@ -1023,12 +1027,13 @@ export default function MeetingDetail() {
             data={['todos']}
             keyExtractor={(item) => item}
             ListHeaderComponent={header}
+            refreshControl={localRefreshControl}
             contentContainerStyle={{ paddingBottom: contentBottomPadding, paddingHorizontal: 16 }}
             renderItem={() => (
               <Card style={{ gap: space.lg, marginBottom: space.lg }}>
                 <View style={styles.sectionHeader}>
                   <AppText variant="title">To-dos</AppText>
-                  <ActionLink label="Open all" color={theme.primary} onPress={() => router.push('/todos')} />
+                  <ActionLink label="Open all" color={theme.primary} onPress={() => router.dismissTo('/todos')} />
                 </View>
                 <View style={{ gap: space.md }}>
                   {todos.length ? todos.map((todo) => (
@@ -1081,6 +1086,7 @@ export default function MeetingDetail() {
         data={overviewSections}
         keyExtractor={(item) => item}
         ListHeaderComponent={header}
+        refreshControl={localRefreshControl}
         contentContainerStyle={{ paddingBottom: contentBottomPadding, paddingHorizontal: 16 }}
         renderItem={({ item }) => {
           if (item === 'summary') {

@@ -53,7 +53,7 @@ export function shouldPreserveTerminalNativeMeeting(meeting: NativeCaptureTermin
 export function terminalNativeMeetingRepair(meeting: NativeCaptureTerminalMeeting): {
   status: 'transcribed' | 'summarized';
   durationMs: number;
-  captureEndedAt: number;
+  captureEndedAt?: number;
   lastError: null;
 } | null {
   const staleTerminalStatus = meeting.status === 'interrupted'
@@ -72,7 +72,7 @@ export function terminalNativeMeetingRepair(meeting: NativeCaptureTerminalMeetin
   return {
     status: meeting.summaryStatus === 'ready' ? 'summarized' : 'transcribed',
     durationMs,
-    captureEndedAt: meeting.startedAt + durationMs,
+    ...(meeting.captureEndedAt != null ? { captureEndedAt: meeting.captureEndedAt } : {}),
     lastError: null,
   };
 }

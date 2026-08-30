@@ -47,6 +47,9 @@ vi.mock('@/services/logger', () => ({
 vi.mock('@/services/mainaCloudSession', () => ({
   clearMainaCloudSession: mockClearMainaCloudSession,
 }));
+vi.mock('@/services/pipelineWakeScheduler', () => ({
+  armPipelineNetworkRecovery: vi.fn().mockResolvedValue({ armed: true, generation: 1 }),
+}));
 
 let queueEligibleMainaKnowledgeCloudSyncs: typeof import('./mainaKnowledgeCloud').queueEligibleMainaKnowledgeCloudSyncs;
 let runMainaKnowledgeCloudSync: typeof import('./mainaKnowledgeCloud').runMainaKnowledgeCloudSync;
@@ -132,7 +135,9 @@ describe('mainaKnowledgeCloud service', () => {
     await runMainaKnowledgeCloudSync('meeting-1');
 
     expect(meeting.knowledgeCloudSyncStatus).toBe('sync_failed_auth');
-    expect(meeting.knowledgeCloudError).toBe('Invalid bearer token');
+    expect(meeting.knowledgeCloudError).toBe(
+      'Reconnect Maina Cloud. Your recording and transcript are safe.',
+    );
     expect(mockClearMainaCloudSession).toHaveBeenCalledOnce();
     expect(mockUpdateMeetingPipelineStage).toHaveBeenLastCalledWith(expect.objectContaining({
       stage: 'mkc', state: 'failed',

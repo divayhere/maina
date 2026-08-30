@@ -52,10 +52,22 @@ import { installWatchdog } from '@/services/watchdog';
 import { clearLegacyDirectAiConfiguration } from '@/services/config';
 import {
   registerBackgroundPipelineRecovery,
-  runPipelineRecoveryCycle,
+  runDurablePipelineWake,
 } from '@/services/backgroundPipeline';
+import {
+  registerNativePipelineWakeScheduler,
+  repairDurablePipelineScheduling,
+  requestDurablePipelineWake,
+} from '@/services/pipelineWakeScheduler';
+import { scheduleNativePipelineWake } from '@/hardware/pipelineWake';
+import { persistPipelineConnectivity } from '@/data/pipelineWake';
+import { createPipelineWakeCoordinator } from '@/services/pipelineWakeCoordinator';
 
 initSentry();
+
+export const unstable_settings = {
+  initialRouteName: '(tabs)',
+};
 
 function RootLayout() {
   const { theme } = useAppTheme();
@@ -206,7 +218,7 @@ function RootLayout() {
 
         const deletedAudioMeetingIds = await getMeetingsWithDeletedAudio();
         await markMeetingsAudioDeleted(deletedAudioMeetingIds);
-        await enforceAudioRetentionPolicy();
+        await enforceAudioRetentionPolicy('startup');
         if (Platform.OS === 'android' && Platform.Version >= 33) {
           await PermissionsAndroid.request(PermissionsAndroid.PERMISSIONS.POST_NOTIFICATIONS).catch(() => null);
         }
@@ -240,19 +252,16 @@ function RootLayout() {
 
   useEffect(() => {
     if (!ready) return;
-    let pipelineInFlight: Promise<void> | null = null;
+    const unregisterNativeScheduler = registerNativePipelineWakeScheduler(scheduleNativePipelineWake);
     let packetPollInFlight: Promise<void> | null = null;
     let packetPollTimer: ReturnType<typeof setTimeout> | null = null;
     let stopped = false;
-    const schedulePipelineSync = () => {
-      if (pipelineInFlight) return pipelineInFlight;
-      let work: Promise<void>;
-      work = runPipelineRecoveryCycle().then(() => undefined).finally(() => {
-        if (pipelineInFlight === work) pipelineInFlight = null;
-      });
-      pipelineInFlight = work;
-      return work;
-    };
+    const pipelineCoordinator = createPipelineWakeCoordinator({
+      requestSignal: requestDurablePipelineWake,
+      persistConnectivity: persistPipelineConnectivity,
+      runGeneration: (generation) => runDurablePipelineWake({ expectedGeneration: generation }),
+      repairNativeScheduling: repairDurablePipelineScheduling,
+    });
     const schedulePacketPoll = () => {
       if (stopped || packetPollInFlight) return packetPollInFlight;
       if (packetPollTimer) return Promise.resolve();
@@ -280,33 +289,36 @@ function RootLayout() {
       packetPollInFlight = work;
       return work;
     };
-    const runPipelineFromSignal = () => {
-      void schedulePipelineSync()
+    const runPipelineFromSignal = (
+      reason: 'foreground' | 'native_progress',
+    ) => {
+      void pipelineCoordinator.signal(reason)
         .then(() => schedulePacketPoll())
         .catch((cause) => {
           log.warn('meetings', 'pipeline reconciliation failed', { err: String(cause) });
         });
     };
-    runPipelineFromSignal();
+    runPipelineFromSignal('foreground');
     const subscription = AppState.addEventListener('change', (state) => {
       if (state !== 'active') return;
-      runPipelineFromSignal();
+      runPipelineFromSignal('foreground');
     });
-    let wasConnected: boolean | null = null;
     const unsubscribeNetwork = NetInfo.addEventListener((state) => {
       const connected = state.isConnected === true && state.isInternetReachable !== false;
-      if (connected && wasConnected === false) {
-        log.info('background-pipeline', 'connectivity restored; draining durable pipeline');
-        runPipelineFromSignal();
-      }
-      wasConnected = connected;
+      void pipelineCoordinator.connectivityChanged(connected)
+        .then(() => schedulePacketPoll())
+        .catch((cause) => {
+          log.warn('background-pipeline', 'connectivity state reconciliation deferred', {
+            causeName: cause instanceof Error ? cause.name : typeof cause,
+          });
+        });
     });
     const unsubscribeNative = subscribeNativePostProcessingChanges((event) => {
       log.info('recovery', 'native post-processing state changed', {
         meetingId: event.meetingId,
         state: event.state,
       });
-      runPipelineFromSignal();
+      runPipelineFromSignal('native_progress');
     });
     const unsubscribePipeline = subscribeMeetingPipelineChanges((meetingId) => {
       log.info('summary', 'meeting pipeline state changed; waking poller', { meetingId });
@@ -322,6 +334,7 @@ function RootLayout() {
       unsubscribeNetwork();
       unsubscribeNative();
       unsubscribePipeline();
+      unregisterNativeScheduler();
       if (packetPollTimer) clearTimeout(packetPollTimer);
     };
   }, [ready]);
@@ -355,6 +368,7 @@ function RootLayout() {
           ) : ready ? (
             <Stack screenOptions={{ headerShown: false, contentStyle: { backgroundColor: theme.bg } }}>
               <Stack.Screen name="(tabs)" />
+              <Stack.Screen name="meeting" />
               <Stack.Screen name="record" options={{ presentation: 'modal' }} />
             </Stack>
           ) : (

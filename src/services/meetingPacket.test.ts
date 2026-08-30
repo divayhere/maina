@@ -29,9 +29,19 @@ vi.mock('@/services/mainaKnowledgeCloud', () => ({ maybeQueueMainaKnowledgeCloud
 vi.mock('@/services/mainaKnowledgeCloudCorrections', () => ({ maybeQueueMainaKnowledgeCloudPacketCorrections: mocks.maybeQueueCorrections }));
 vi.mock('@/services/mainaKnowledgeCloudCore', () => ({ mainaKnowledgeCloudSourceKey: (id: string) => `meeting:maina:${id}` }));
 vi.mock('@/services/mainaCloudSession', () => ({
-  MainaCloudApiError: class MainaCloudApiError extends Error { constructor(message: string, readonly status: number, readonly code?: string) { super(message); } },
+  MainaCloudApiError: class MainaCloudApiError extends Error {
+    constructor(
+      message: string,
+      readonly status: number,
+      readonly code?: string,
+      readonly failureClass = status > 0 ? 'http_terminal' : 'transport_unknown',
+    ) { super(message); }
+  },
   getMainaCloudSession: mocks.getSession,
   mainaCloudFetch: mocks.cloudFetch,
+}));
+vi.mock('@/services/pipelineWakeScheduler', () => ({
+  armPipelineNetworkRecovery: vi.fn().mockResolvedValue({ armed: true, generation: 1 }),
 }));
 
 import { buildTranscriptText } from '@/data/meetings';
@@ -211,7 +221,7 @@ describe('meetingPacket cloud broker integration', () => {
 
   it('defers a transport failure durably instead of declaring notes failed', async () => {
     const TransportError = (await import('@/services/mainaCloudSession')).MainaCloudApiError;
-    mocks.cloudFetch.mockRejectedValue(new TransportError('offline', 0, 'network_error'));
+    mocks.cloudFetch.mockRejectedValue(new TransportError('offline', 0, 'network_error', 'offline'));
 
     await runMeetingPacketGeneration('m1');
 
@@ -232,7 +242,7 @@ describe('meetingPacket cloud broker integration', () => {
     await runMeetingPacketGeneration('m1');
 
     expect(mocks.setMeetingSummaryState).toHaveBeenCalledWith('m1', 'failed', expect.objectContaining({
-      error: expect.stringContaining('reconnected'),
+      error: expect.stringContaining('Reconnect Maina Cloud'),
     }));
     expect(mocks.saveMeetingPacket).not.toHaveBeenCalled();
   });

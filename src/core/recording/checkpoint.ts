@@ -33,13 +33,12 @@ export function buildRecordingCheckpoint(input: RecordingCheckpointInput): Recor
 
 export function completedCaptureDurationRepair(input: {
   status: string;
-  startedAt: number;
-  captureEndedAt?: number | null;
   durationMs: number;
+  audioDurationMs: number;
   toleranceMs?: number;
 }): number | null {
-  if (input.status === 'recording' || input.captureEndedAt == null) return null;
-  const canonicalDurationMs = input.captureEndedAt - input.startedAt;
+  if (input.status === 'recording') return null;
+  const canonicalDurationMs = Math.max(0, input.audioDurationMs);
   if (canonicalDurationMs <= 0) return null;
   const toleranceMs = input.toleranceMs ?? 2_000;
   return Math.abs(input.durationMs - canonicalDurationMs) > toleranceMs

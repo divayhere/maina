@@ -26,6 +26,7 @@ import {
   shouldPreserveTerminalNativeMeeting,
 } from '@/core/recording/nativeCaptureReconciliation';
 import { nativeCapturePresentation } from '@/core/recording/nativeCapturePresentation';
+import { openNewlySavedMeetingRoute } from '@/core/navigation/navigationPolicy';
 import {
   commitTranscriptFinalBlocks,
   createMeeting,
@@ -125,6 +126,13 @@ function describeRecordingProblem(message?: string | null): { title: string; bod
     title: 'Recording stopped early',
     body: 'Maina saved what it had. You can keep that part or delete it.',
   };
+}
+
+function openNewlySavedMeeting(meetingId: string) {
+  // A global recording is never a child of an older meeting. Dismiss to the
+  // Home root first, then push the newly saved detail so native Back returns
+  // to Home and cannot expose an unrelated meeting underneath.
+  openNewlySavedMeetingRoute(router, meetingId, (work) => requestAnimationFrame(work));
 }
 
 export default function RecordScreen() {
@@ -757,6 +765,7 @@ export default function RecordScreen() {
       const nativeStatus = CAPTURE_ENGINE === 'native-qwen' ? getNativeCaptureStatus() : null;
       const nativePresentation = nativeCapturePresentation(nativeStatus?.state);
       if (nativePresentation === 'recording' && (pausedRef.current || !listeningRef.current)) {
+        if (pausedRef.current) healthRef.current.pauseEnded(now);
         pausedRef.current = false;
         listeningRef.current = true;
         setPaused(false);
@@ -766,6 +775,7 @@ export default function RecordScreen() {
           routeRecoveryActive: nativeStatus?.routeRecoveryActive,
         });
       } else if (nativePresentation === 'paused' && (!pausedRef.current || listeningRef.current)) {
+        if (!pausedRef.current) healthRef.current.pauseStarted(now);
         pausedRef.current = true;
         listeningRef.current = false;
         setPaused(true);
@@ -815,8 +825,8 @@ export default function RecordScreen() {
       }
 
       if (!cancelled) {
-        const backgroundOrPaused = appStateRef.current !== 'active' || pausedRef.current || !activeRef.current;
-        timer = setTimeout(tick, backgroundOrPaused ? 5000 : 1000);
+        const backgroundOrIdle = appStateRef.current !== 'active' || !activeRef.current;
+        timer = setTimeout(tick, backgroundOrIdle ? 5000 : 1000);
       }
     };
     timer = setTimeout(tick, 1000);
@@ -854,7 +864,7 @@ export default function RecordScreen() {
               setListening(false);
               setPaused(false);
               await refresh();
-              router.replace(`/meeting/${idRef.current}`);
+              openNewlySavedMeeting(idRef.current);
               return;
             }
             const metrics = dirRef.current
@@ -869,9 +879,12 @@ export default function RecordScreen() {
               finalizedChunkCount: metrics.finalizedUris.length,
             }))) {
               await updateMeeting(idRef.current, {
-                durationMs: metrics.wallDurationMs,
+                durationMs: metrics.audioDurationMs > 0 ? metrics.audioDurationMs : currentMeeting?.durationMs ?? 0,
                 audioDurationMs: metrics.audioDurationMs,
-                captureEndedAt: metrics.stoppedAt ?? Date.now(),
+                ...(metrics.stoppedAt != null ? { captureEndedAt: metrics.stoppedAt } : {}),
+                captureGapMs: metrics.captureGapMs,
+                captureDisposition: 'complete',
+                capturePauseReason: null,
                 segmentCount: metrics.finalizedUris.length,
                 restartCount: metrics.routeRestartCount,
                 status: metrics.finalizedUris.length > 0 ? 'transcribing' : 'interrupted',
@@ -879,7 +892,7 @@ export default function RecordScreen() {
               }).catch(() => {});
             }
             await refresh();
-            router.replace(`/meeting/${idRef.current}`);
+            openNewlySavedMeeting(idRef.current);
           })();
           return;
         }
@@ -982,16 +995,24 @@ export default function RecordScreen() {
     controlBusyRef.current = true;
     try {
       await artifactQueueRef.current.catch(() => {});
-      pausedRef.current = false;
-      setPaused(false);
-      healthRef.current.pauseEnded(Date.now());
       if (CAPTURE_ENGINE === 'native-qwen') {
         await resumeNativeCapture();
-        listeningRef.current = true;
-        setListening(true);
+        // Resume can be denied while a call still owns the microphone. Keep
+        // the screen paused until the service proves AudioRecord ownership.
+        const nativeStatus = getNativeCaptureStatus();
+        if (nativeCapturePresentation(nativeStatus?.state) === 'recording') {
+          pausedRef.current = false;
+          setPaused(false);
+          healthRef.current.pauseEnded(Date.now());
+          listeningRef.current = true;
+          setListening(true);
+        }
         log.info('record', 'native resume requested', { nativeStatus: getNativeCaptureStatus() });
         return;
       }
+      pausedRef.current = false;
+      setPaused(false);
+      healthRef.current.pauseEnded(Date.now());
       await beginSession(sessionRef.current + 1);
       log.info('record', 'meeting resumed', { index: sessionRef.current });
     } catch (cause) {
@@ -1042,10 +1063,14 @@ export default function RecordScreen() {
           return null;
         });
         if (metrics) {
+          const persistedMeeting = await getMeeting(id);
           await updateMeeting(id, {
-            durationMs: metrics.wallDurationMs,
+            durationMs: metrics.audioDurationMs > 0 ? metrics.audioDurationMs : persistedMeeting?.durationMs ?? 0,
             audioDurationMs: metrics.audioDurationMs,
-            captureEndedAt: metrics.stoppedAt ?? Date.now(),
+            ...(metrics.stoppedAt != null ? { captureEndedAt: metrics.stoppedAt } : {}),
+            captureGapMs: metrics.captureGapMs,
+            captureDisposition: 'complete',
+            capturePauseReason: null,
             segmentCount: metrics.finalizedUris.length,
             restartCount: metrics.routeRestartCount,
             status: metrics.finalizedUris.length > 0 ? 'transcribing' : 'interrupted',
@@ -1074,7 +1099,7 @@ export default function RecordScreen() {
       });
       clearDiagnosticContext();
       await setNativeCaptureState('idle').catch(() => {});
-      router.replace(`/meeting/${id}`);
+      openNewlySavedMeeting(id);
     } catch (cause) {
       const message = cause instanceof Error ? cause.message : String(cause);
       setError('Maina could not finish the database checkpoint. Your WAV files remain on the phone.');

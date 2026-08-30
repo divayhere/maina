@@ -1,4 +1,5 @@
 import type { Meeting, KnowledgeCloudSyncStatus } from '@/data/meetings';
+import { safeCloudFailureMessage, safePersistedCloudMessage } from '@/core/pipeline/cloudFailure';
 
 export type MainaNotificationTone = 'warn' | 'info' | 'success';
 
@@ -15,26 +16,32 @@ export interface MainaNotification {
 }
 
 function syncFailureCopy(status: KnowledgeCloudSyncStatus, error?: string | null) {
+  const fallback = status === 'sync_failed_auth'
+    ? safeCloudFailureMessage('auth')
+    : status === 'sync_failed_retryable' || status === 'sync_blocked_budget'
+      ? safeCloudFailureMessage('backend_retryable')
+      : safeCloudFailureMessage('backend_terminal');
+  const safeError = safePersistedCloudMessage(error, fallback);
   switch (status) {
     case 'sync_failed_auth':
       return {
         title: 'Reconnect Maina Cloud',
-        body: error ?? 'This phone needs to reconnect to Maina Cloud before it can continue syncing.',
+        body: safeError,
       };
     case 'sync_failed_conflict':
       return {
         title: 'Cloud sync conflict',
-        body: error ?? 'This meeting was frozen for sync earlier and now needs a deliberate retry path.',
+        body: safeError,
       };
     case 'sync_failed_validation':
       return {
         title: 'Cloud sync needs fixing',
-        body: error ?? 'Maina Knowledge Cloud rejected this meeting package.',
+        body: safeError,
       };
     case 'sync_blocked_budget':
       return {
         title: 'Cloud sync paused',
-        body: error ?? 'Cloud sync is blocked by plan or budget rules.',
+        body: safeError,
       };
     case 'sync_failed_retryable':
       // A temporary network/server interruption is self-healing outbox state,

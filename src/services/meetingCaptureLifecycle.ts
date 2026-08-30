@@ -19,6 +19,8 @@ import {
   startNativePostProcessing,
 } from '@/hardware/recording/foreground';
 import { log } from '@/services/logger';
+import { cleanupTerminalMeetingAudio } from '@/services/audioRetention';
+import { notifyMeetingPipelineChanged } from '@/services/meetingPipelineSignals';
 import { getNativeCaptureMetrics } from '@/services/nativeCaptureMetrics';
 import { TERMINAL_PARTIAL_RECOVERY_ROUNDS } from '@/services/transcriptCoverage';
 
@@ -26,6 +28,22 @@ import { TERMINAL_PARTIAL_RECOVERY_ROUNDS } from '@/services/transcriptCoverage'
 // short foreground poll) can arrive together. Serialize them so only one
 // Expo-SQLite import ever observes a completed native outbox run at a time.
 let nativeReconciliationInFlight: Promise<number> | null = null;
+
+/**
+ * A native-result Worker is only a wake signal. The native outbox remains the
+ * durable truth, so stale WorkManager deliveries must validate the exact run
+ * before they are allowed to create a shared pipeline generation.
+ */
+export async function isCurrentNativePostProcessingWake(
+  meetingId: string,
+  runId: string,
+): Promise<boolean> {
+  if (!meetingId || !runId) return false;
+  const result = await readNativePostProcessingResult(meetingId);
+  return result?.meetingId === meetingId
+    && result.runId === runId
+    && ['complete', 'partial', 'deferred'].includes(result.state);
+}
 
 async function launchNativePostProcessing(
   meeting: Meeting,
@@ -45,13 +63,17 @@ async function launchNativePostProcessing(
     return false;
   }
   await updateMeeting(meeting.id, {
-    durationMs: metrics.wallDurationMs,
+    // User-facing meeting length is recorded audio, never wall time spent in
+    // a call/interruption. Keep the excluded interval as captureGapMs.
+    durationMs: metrics.audioDurationMs > 0 ? metrics.audioDurationMs : meeting.durationMs,
     audioDurationMs: metrics.audioDurationMs,
-    captureEndedAt:
-      metrics.stoppedAt
-      ?? (metrics.startedAt != null ? metrics.startedAt + metrics.wallDurationMs : null),
+    captureEndedAt: metrics.stoppedAt ?? meeting.captureEndedAt ?? null,
     segmentCount: metrics.finalizedUris.length,
     restartCount: metrics.routeRestartCount,
+    captureGapMs: metrics.captureGapMs,
+    captureDisposition: meeting.status === 'recording'
+      ? 'partial_capture_failure'
+      : meeting.captureDisposition ?? 'complete',
     status: 'transcribing',
     lastError: materialCaptureGapError(metrics.captureGapMs),
   });
@@ -146,6 +168,18 @@ async function reconcilePendingNativeMeetingWorkInternal(): Promise<number> {
         && nativeResult.completedWindows + nativeResult.failedWindows >= nativeResult.windowCount
         && nativeResult.completedWindows > 0
         && nativeResult.recoveryRounds >= TERMINAL_PARTIAL_RECOVERY_ROUNDS;
+      // A service-owned stop can complete while React Native is absent (for
+      // example after bounded call-resume exhaustion). If the meeting row is
+      // still `recording`, preserve truthful partial-capture ownership before
+      // importing the otherwise usable transcript.
+      if (meeting.status === 'recording') {
+        await updateMeeting(meeting.id, {
+          captureDisposition: nativeResult.captureGapMs > 0
+            ? 'partial_system_interruption'
+            : 'partial_capture_failure',
+          capturePauseReason: nativeResult.captureGapMs > 0 ? 'system' : null,
+        });
+      }
       const imported = await importNativePostProcessingResult({
         meetingId: nativeResult.meetingId,
         runId: nativeResult.runId,
@@ -160,6 +194,7 @@ async function reconcilePendingNativeMeetingWorkInternal(): Promise<number> {
         recoveryRounds: nativeResult.recoveryRounds,
         routeRestartCount: nativeResult.routeRestartCount,
         lastError: nativeResult.lastError,
+        captureTerminal: nativeResult.state === 'complete' || terminalPartial,
         blocks: nativeResult.blocks,
       });
       // Preserve native per-window evidence for a partial transcript. A later
@@ -217,6 +252,10 @@ async function reconcilePendingNativeMeetingWorkInternal(): Promise<number> {
         acknowledged,
         blocks: nativeResult.blocks.length,
       });
+      if (nativeResult.state === 'complete') {
+        await cleanupTerminalMeetingAudio(nativeResult.meetingId);
+      }
+      notifyMeetingPipelineChanged(nativeResult.meetingId);
       continue;
     }
     if (nativeResult) {
@@ -242,6 +281,7 @@ async function reconcilePendingNativeMeetingWorkInternal(): Promise<number> {
           failedWindows: nativeResult.failedWindows,
         },
       });
+      notifyMeetingPipelineChanged(nativeResult.meetingId);
     }
     // Window counters alone are not transcript proof: native ASR can finish
     // before its outbox is imported into Expo SQLite. Repair an old terminal

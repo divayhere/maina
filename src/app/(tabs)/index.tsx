@@ -12,6 +12,7 @@ import { radius, space } from '@/design/tokens';
 import { describeMainaKnowledgeCloudSyncStatus } from '@/services/mainaKnowledgeCloudCore';
 import { describeMeetingPresentation } from '@/services/meetingPresentation';
 import { useMeetings } from '@/state/meetingsStore';
+import { subscribeMeetingPipelineChanges } from '@/services/meetingPipelineSignals';
 import { formatDate, formatDuration, formatTime } from '@/utils/format';
 
 function MeetingRow({ item }: { item: Meeting }) {
@@ -100,6 +101,10 @@ export default function MeetingsScreen() {
     });
     return () => subscription.remove();
   }, [refresh]);
+
+  useEffect(() => subscribeMeetingPipelineChanges(() => {
+    void refresh();
+  }), [refresh]);
 
   const filtered = useMemo(() => {
     const needle = query.trim().toLowerCase();

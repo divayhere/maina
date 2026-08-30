@@ -37,6 +37,9 @@ vi.mock('@/services/logger', () => ({
 vi.mock('@/services/mainaCloudSession', () => ({
   clearMainaCloudSession: mocks.clearSession,
 }));
+vi.mock('@/services/pipelineWakeScheduler', () => ({
+  armPipelineNetworkRecovery: vi.fn().mockResolvedValue({ armed: true, generation: 1 }),
+}));
 
 let maybeQueuePacketCorrections: typeof import('./mainaKnowledgeCloudCorrections').maybeQueueMainaKnowledgeCloudPacketCorrections;
 let reconcileCorrectionsForMeeting: typeof import('./mainaKnowledgeCloudCorrections').reconcileMainaKnowledgeCloudCorrectionsForMeeting;

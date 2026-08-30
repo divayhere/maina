@@ -15,6 +15,7 @@ import { didTranscriptCoverageImprove } from '../services/transcriptCoverage';
 import { deriveStageTransition } from '../core/pipeline/stageState';
 import * as FileSystem from 'expo-file-system/legacy';
 import { resolveDocumentReference, toPortableDocumentReference } from '../core/recording/appFileReference';
+import { canCommitLocalAsrWindow } from '../core/transcription/asr/localAsrClaimPolicy';
 
 const documentDirectory = FileSystem.documentDirectory;
 const storeAudioUri = (value: string | null | undefined) => toPortableDocumentReference(value, documentDirectory);
@@ -32,6 +33,28 @@ export type MeetingStatus =
   | 'summarized';
 
 export type SummaryStatus = 'idle' | 'queued' | 'running' | 'retryable' | 'ready' | 'failed';
+export type CaptureDisposition =
+  | 'active'
+  | 'complete'
+  | 'partial_system_interruption'
+  | 'partial_capture_failure'
+  | 'aborted';
+export type CapturePauseReason = 'manual' | 'system';
+export type CloudFailureClass =
+  | 'offline'
+  | 'dns'
+  | 'tls'
+  | 'socket'
+  | 'timeout'
+  | 'http_retryable'
+  | 'http_terminal'
+  | 'backend_retryable'
+  | 'backend_terminal'
+  | 'auth'
+  | 'protocol'
+  | 'transport_unknown';
+export type CloudNotesFailureOperation = 'create_job' | 'poll_job' | 'retry_provider';
+export type AudioCleanupState = 'not_due' | 'pending' | 'retryable' | 'complete';
 export type MeetingPipelineStage =
   | 'recording'
   | 'audio_finalized'
@@ -165,6 +188,20 @@ export interface Meeting {
   cloudNotesNextRetryAt?: number | null;
   nativePostprocessRunId?: string | null;
   nativePostprocessImportedAt?: number | null;
+  captureDisposition?: CaptureDisposition;
+  capturePauseReason?: CapturePauseReason | null;
+  captureGapMs?: number;
+  captureHeartbeatTerminalAt?: number | null;
+  cloudNotesFailureClass?: CloudFailureClass | null;
+  cloudNotesFailureOperation?: CloudNotesFailureOperation | null;
+  cloudNotesLastWakeEpoch?: number;
+  knowledgeCloudFailureClass?: CloudFailureClass | null;
+  knowledgeCloudRetryCount?: number;
+  knowledgeCloudNextRetryAt?: number | null;
+  knowledgeCloudLastWakeEpoch?: number;
+  audioCleanupState?: AudioCleanupState;
+  audioCleanupRetryCount?: number;
+  audioCleanupNextRetryAt?: number | null;
 }
 
 interface Row {
@@ -210,6 +247,20 @@ interface Row {
   cloud_notes_next_retry_at: number | null;
   native_postprocess_run_id: string | null;
   native_postprocess_imported_at: number | null;
+  capture_disposition: CaptureDisposition;
+  capture_pause_reason: CapturePauseReason | null;
+  capture_gap_ms: number;
+  capture_heartbeat_terminal_at: number | null;
+  cloud_notes_failure_class: CloudFailureClass | null;
+  cloud_notes_failure_operation: CloudNotesFailureOperation | null;
+  cloud_notes_last_wake_epoch: number;
+  knowledge_cloud_failure_class: CloudFailureClass | null;
+  knowledge_cloud_retry_count: number;
+  knowledge_cloud_next_retry_at: number | null;
+  knowledge_cloud_last_wake_epoch: number;
+  audio_cleanup_state: AudioCleanupState;
+  audio_cleanup_retry_count: number;
+  audio_cleanup_next_retry_at: number | null;
 }
 
 function parseJsonList(value: string | null | undefined): string[] {
@@ -277,6 +328,20 @@ const toMeeting = (r: Row): Meeting => ({
   cloudNotesNextRetryAt: r.cloud_notes_next_retry_at,
   nativePostprocessRunId: r.native_postprocess_run_id,
   nativePostprocessImportedAt: r.native_postprocess_imported_at,
+  captureDisposition: r.capture_disposition ?? undefined,
+  capturePauseReason: r.capture_pause_reason,
+  captureGapMs: Math.max(0, r.capture_gap_ms ?? 0),
+  captureHeartbeatTerminalAt: r.capture_heartbeat_terminal_at,
+  cloudNotesFailureClass: r.cloud_notes_failure_class,
+  cloudNotesFailureOperation: r.cloud_notes_failure_operation,
+  cloudNotesLastWakeEpoch: Math.max(0, r.cloud_notes_last_wake_epoch ?? 0),
+  knowledgeCloudFailureClass: r.knowledge_cloud_failure_class,
+  knowledgeCloudRetryCount: Math.max(0, r.knowledge_cloud_retry_count ?? 0),
+  knowledgeCloudNextRetryAt: r.knowledge_cloud_next_retry_at,
+  knowledgeCloudLastWakeEpoch: Math.max(0, r.knowledge_cloud_last_wake_epoch ?? 0),
+  audioCleanupState: r.audio_cleanup_state ?? 'not_due',
+  audioCleanupRetryCount: Math.max(0, r.audio_cleanup_retry_count ?? 0),
+  audioCleanupNextRetryAt: r.audio_cleanup_next_retry_at,
 });
 
 export interface TodoItem {
@@ -539,15 +604,18 @@ export async function listMeetingsEligibleForSummaryQueue(): Promise<Meeting[]> 
   return rows.map(toMeeting);
 }
 
-export async function listMeetingsNeedingKnowledgeCloudSync(): Promise<Meeting[]> {
+export async function listMeetingsNeedingKnowledgeCloudSync(now = Date.now()): Promise<Meeting[]> {
   const db = await getDb();
   const rows = await db.getAllAsync<Row>(
     `SELECT m.*,
             (SELECT COUNT(*) FROM todo_items t WHERE t.meeting_id = m.id AND t.done = 0) AS open_todo_count,
             (SELECT COUNT(*) FROM todo_items t WHERE t.meeting_id = m.id) AS total_todo_count
      FROM meetings m
-     WHERE m.knowledge_cloud_sync_status IN ('sync_queued', 'syncing', 'sync_failed_retryable', 'sync_blocked_budget')
+     WHERE m.knowledge_cloud_sync_status IN ('sync_queued', 'syncing')
+        OR (m.knowledge_cloud_sync_status IN ('sync_failed_retryable', 'sync_blocked_budget')
+            AND (m.knowledge_cloud_next_retry_at IS NULL OR m.knowledge_cloud_next_retry_at <= ?))
      ORDER BY m.started_at DESC`,
+    [now],
   );
   return rows.map(toMeeting);
 }
@@ -774,6 +842,20 @@ export async function updateMeeting(id: string, patch: Partial<Meeting>): Promis
     cloudNotesNextRetryAt: 'cloud_notes_next_retry_at',
     nativePostprocessRunId: 'native_postprocess_run_id',
     nativePostprocessImportedAt: 'native_postprocess_imported_at',
+    captureDisposition: 'capture_disposition',
+    capturePauseReason: 'capture_pause_reason',
+    captureGapMs: 'capture_gap_ms',
+    captureHeartbeatTerminalAt: 'capture_heartbeat_terminal_at',
+    cloudNotesFailureClass: 'cloud_notes_failure_class',
+    cloudNotesFailureOperation: 'cloud_notes_failure_operation',
+    cloudNotesLastWakeEpoch: 'cloud_notes_last_wake_epoch',
+    knowledgeCloudFailureClass: 'knowledge_cloud_failure_class',
+    knowledgeCloudRetryCount: 'knowledge_cloud_retry_count',
+    knowledgeCloudNextRetryAt: 'knowledge_cloud_next_retry_at',
+    knowledgeCloudLastWakeEpoch: 'knowledge_cloud_last_wake_epoch',
+    audioCleanupState: 'audio_cleanup_state',
+    audioCleanupRetryCount: 'audio_cleanup_retry_count',
+    audioCleanupNextRetryAt: 'audio_cleanup_next_retry_at',
   };
   const cols: string[] = [];
   const vals: (string | number | null)[] = [];
@@ -1161,9 +1243,23 @@ export async function commitTranscriptFinalBlocks(input: {
   endedAt?: number | null;
   language?: string | null;
   speakerId?: string | null;
+  checkpoint?: {
+    windowKey: string;
+    chunkIndex: number;
+    windowIndex: number;
+    startedMs: number;
+    endedMs: number;
+    asrGeneration: number;
+    claimToken: string;
+  };
 }): Promise<TranscriptBlock[]> {
   const normalized = input.text.trim();
   const db = await getDb();
+  if (input.checkpoint && !await isLocalAsrRunClaimActive({
+    meetingId: input.meetingId,
+    generation: input.checkpoint.asrGeneration,
+    token: input.checkpoint.claimToken,
+  })) return [];
   const draft = await getDraftTranscriptBlock(input.meetingId);
   if (!normalized) {
     if (draft) await discardTranscriptDraftBlock(input.meetingId);
@@ -1180,7 +1276,46 @@ export async function commitTranscriptFinalBlocks(input: {
   const baseEndedAt = input.endedAt ?? draft?.endedAt ?? Date.now();
   const createdAt = Date.now();
 
+  let accepted = true;
   await db.withExclusiveTransactionAsync(async (transaction) => {
+    if (input.checkpoint) {
+      const owner = await transaction.getFirstAsync<{
+        generation: number;
+        claim_token: string | null;
+        state: string;
+      }>(
+        `SELECT generation, claim_token, state FROM local_asr_run_claims WHERE meeting_id = ?`,
+        [input.meetingId],
+      );
+      const window = await transaction.getFirstAsync<{
+        asr_generation: number;
+        claim_token: string | null;
+        claim_state: string;
+      }>(
+        `SELECT asr_generation, claim_token, claim_state FROM local_asr_windows
+         WHERE meeting_id = ? AND window_key = ?`,
+        [input.meetingId, input.checkpoint.windowKey],
+      );
+      if (!canCommitLocalAsrWindow({
+        expected: {
+          generation: input.checkpoint.asrGeneration,
+          token: input.checkpoint.claimToken,
+        },
+        run: owner ? {
+          generation: owner.generation,
+          token: owner.claim_token ?? '',
+          state: owner.state,
+        } : null,
+        window: window ? {
+          generation: window.asr_generation,
+          token: window.claim_token ?? '',
+          state: window.claim_state,
+        } : null,
+      })) {
+        accepted = false;
+        return;
+      }
+    }
     if (draft) {
       await transaction.runAsync(`DELETE FROM transcript_blocks WHERE block_id = ?`, [draft.blockId]);
     }
@@ -1207,7 +1342,24 @@ export async function commitTranscriptFinalBlocks(input: {
         ],
       );
     }
+    if (input.checkpoint) {
+      await transaction.runAsync(
+        `UPDATE local_asr_windows SET claim_state = 'committed', committed_at = ?, completed_at = ?,
+           lease_until = NULL
+         WHERE meeting_id = ? AND window_key = ? AND asr_generation = ? AND claim_token = ?`,
+        [
+          createdAt,
+          createdAt,
+          input.meetingId,
+          input.checkpoint.windowKey,
+          input.checkpoint.asrGeneration,
+          input.checkpoint.claimToken,
+        ],
+      );
+    }
   });
+
+  if (!accepted) return [];
 
   const rows = await db.getAllAsync<TranscriptBlockRow>(
     `SELECT * FROM transcript_blocks
@@ -1216,6 +1368,176 @@ export async function commitTranscriptFinalBlocks(input: {
     [input.meetingId, baseSequence, baseSequence + chunks.length],
   );
   return rows.map(toTranscriptBlock);
+}
+
+export type LocalAsrRunClaim = {
+  meetingId: string;
+  generation: number;
+  token: string;
+};
+
+export async function beginLocalAsrRun(meetingId: string): Promise<LocalAsrRunClaim> {
+  const db = await getDb();
+  const now = Date.now();
+  const token = newId();
+  let generation = 1;
+  await db.withExclusiveTransactionAsync(async (transaction) => {
+    const existing = await transaction.getFirstAsync<{ generation: number }>(
+      `SELECT generation FROM local_asr_run_claims WHERE meeting_id = ?`,
+      [meetingId],
+    );
+    generation = (existing?.generation ?? 0) + 1;
+    await transaction.runAsync(
+      `INSERT INTO local_asr_run_claims
+        (meeting_id, generation, claim_token, state, claimed_at, invalidated_at, completed_at, updated_at)
+       VALUES (?, ?, ?, 'claimed', ?, NULL, NULL, ?)
+       ON CONFLICT(meeting_id) DO UPDATE SET
+         generation = excluded.generation, claim_token = excluded.claim_token,
+         state = 'claimed', claimed_at = excluded.claimed_at,
+         invalidated_at = NULL, completed_at = NULL, updated_at = excluded.updated_at`,
+      [meetingId, generation, token, now, now],
+    );
+  });
+  return { meetingId, generation, token };
+}
+
+export async function isLocalAsrRunClaimActive(claim: LocalAsrRunClaim): Promise<boolean> {
+  const db = await getDb();
+  const row = await db.getFirstAsync<{ found: number }>(
+    `SELECT 1 AS found FROM local_asr_run_claims
+     WHERE meeting_id = ? AND generation = ? AND claim_token = ? AND state = 'claimed'`,
+    [claim.meetingId, claim.generation, claim.token],
+  );
+  return row?.found === 1;
+}
+
+export async function invalidateLocalAsrRun(claim: LocalAsrRunClaim): Promise<boolean> {
+  const db = await getDb();
+  const now = Date.now();
+  const result = await db.runAsync(
+    `UPDATE local_asr_run_claims SET state = 'deferred', invalidated_at = ?, updated_at = ?
+     WHERE meeting_id = ? AND generation = ? AND claim_token = ? AND state = 'claimed'`,
+    [now, now, claim.meetingId, claim.generation, claim.token],
+  );
+  return result.changes === 1;
+}
+
+export async function completeLocalAsrRun(claim: LocalAsrRunClaim): Promise<boolean> {
+  const db = await getDb();
+  const now = Date.now();
+  const result = await db.runAsync(
+    `UPDATE local_asr_run_claims SET state = 'complete', completed_at = ?, updated_at = ?
+     WHERE meeting_id = ? AND generation = ? AND claim_token = ? AND state = 'claimed'`,
+    [now, now, claim.meetingId, claim.generation, claim.token],
+  );
+  return result.changes === 1;
+}
+
+export async function claimLocalAsrWindow(input: LocalAsrRunClaim & {
+  windowKey: string;
+  chunkIndex: number;
+  windowIndex: number;
+  startedMs: number;
+  endedMs: number;
+}): Promise<'claimed' | 'committed' | 'lost'> {
+  const db = await getDb();
+  const now = Date.now();
+  let outcome: 'claimed' | 'committed' | 'lost' = 'lost';
+  await db.withExclusiveTransactionAsync(async (transaction) => {
+    const owner = await transaction.getFirstAsync<{ found: number }>(
+      `SELECT 1 AS found FROM local_asr_run_claims
+       WHERE meeting_id = ? AND generation = ? AND claim_token = ? AND state = 'claimed'`,
+      [input.meetingId, input.generation, input.token],
+    );
+    if (owner?.found !== 1) return;
+    const existing = await transaction.getFirstAsync<{ claim_state: string }>(
+      `SELECT claim_state FROM local_asr_windows WHERE meeting_id = ? AND window_key = ?`,
+      [input.meetingId, input.windowKey],
+    );
+    if (existing?.claim_state === 'committed') {
+      outcome = 'committed';
+      return;
+    }
+    await transaction.runAsync(
+      `INSERT INTO local_asr_windows
+        (meeting_id, window_key, chunk_index, window_index, started_ms, ended_ms, completed_at,
+         asr_generation, claim_token, claim_state, claimed_at, lease_until, committed_at)
+       VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, 'claimed', ?, ?, NULL)
+       ON CONFLICT(meeting_id, window_key) DO UPDATE SET
+         chunk_index = excluded.chunk_index, window_index = excluded.window_index,
+         started_ms = excluded.started_ms, ended_ms = excluded.ended_ms,
+         asr_generation = excluded.asr_generation, claim_token = excluded.claim_token,
+         claim_state = 'claimed', claimed_at = excluded.claimed_at,
+         lease_until = excluded.lease_until, committed_at = NULL`,
+      [
+        input.meetingId,
+        input.windowKey,
+        input.chunkIndex,
+        input.windowIndex,
+        input.startedMs,
+        input.endedMs,
+        input.generation,
+        input.token,
+        now,
+        now + 30 * 60_000,
+      ],
+    );
+    outcome = 'claimed';
+  });
+  return outcome;
+}
+
+export async function markLocalAsrWindowComplete(input: LocalAsrRunClaim & {
+  windowKey: string;
+  chunkIndex: number;
+  windowIndex: number;
+  startedMs: number;
+  endedMs: number;
+}): Promise<boolean> {
+  const db = await getDb();
+  const now = Date.now();
+  const result = await db.runAsync(
+    `UPDATE local_asr_windows SET claim_state = 'committed', completed_at = ?, committed_at = ?, lease_until = NULL
+     WHERE meeting_id = ? AND window_key = ? AND asr_generation = ? AND claim_token = ?
+       AND claim_state = 'claimed'
+       AND EXISTS (
+         SELECT 1 FROM local_asr_run_claims
+         WHERE meeting_id = ? AND generation = ? AND claim_token = ? AND state = 'claimed'
+       )`,
+    [
+      now,
+      now,
+      input.meetingId,
+      input.windowKey,
+      input.generation,
+      input.token,
+      input.meetingId,
+      input.generation,
+      input.token,
+    ],
+  );
+  return result.changes === 1;
+}
+
+export async function listCompletedLocalAsrWindowKeys(meetingId: string): Promise<Set<string>> {
+  const db = await getDb();
+  const rows = await db.getAllAsync<{ window_key: string }>(
+    `SELECT window_key FROM local_asr_windows
+     WHERE meeting_id = ? AND claim_state = 'committed'`,
+    [meetingId],
+  );
+  return new Set(rows.map((row) => row.window_key));
+}
+
+export async function getLastFinalTranscriptText(meetingId: string): Promise<string> {
+  const db = await getDb();
+  const row = await db.getFirstAsync<{ text: string }>(
+    `SELECT text FROM transcript_blocks
+     WHERE meeting_id = ? AND status = 'final'
+     ORDER BY sequence DESC LIMIT 1`,
+    [meetingId],
+  );
+  return row?.text?.trim() ?? '';
 }
 
 /**
@@ -1238,6 +1560,8 @@ export async function importNativePostProcessingResult(input: {
   recoveryRounds?: number;
   routeRestartCount: number;
   lastError?: string | null;
+  /** True only when native work is durably terminal (complete or bounded partial). */
+  captureTerminal: boolean;
   blocks: {
     sequence: number;
     segmentIndex?: number | null;
@@ -1320,6 +1644,13 @@ export async function importNativePostProcessingResult(input: {
     .sort((left, right) => left.sequence - right.sequence), current.started_at, input.durationMs);
   const now = Date.now();
   const outcome = incomingOutcome;
+  const verifiedAudioDurationMs = Math.max(0, input.audioDurationMs);
+  const recordedDurationMs = verifiedAudioDurationMs > 0
+    ? verifiedAudioDurationMs
+    : 0;
+  const measuredCaptureGapMs = verifiedAudioDurationMs > 0
+    ? Math.max(0, input.durationMs - verifiedAudioDurationMs)
+    : 0;
 
   let didImport = false;
   await db.withExclusiveTransactionAsync(async (transaction) => {
@@ -1391,7 +1722,11 @@ export async function importNativePostProcessingResult(input: {
     }
     await transaction.runAsync(
       `UPDATE meetings
-       SET duration_ms = ?, audio_duration_ms = ?, capture_ended_at = ?,
+       SET duration_ms = CASE WHEN ? > 0 THEN ? ELSE duration_ms END,
+           audio_duration_ms = CASE WHEN ? > audio_duration_ms THEN ? ELSE audio_duration_ms END,
+           capture_ended_at = COALESCE(capture_ended_at, ?),
+           capture_gap_ms = MAX(capture_gap_ms, ?),
+           capture_heartbeat_terminal_at = CASE WHEN ? = 1 THEN ? ELSE capture_heartbeat_terminal_at END,
            segment_count = ?, transcribed_segments = ?,
            transcription_window_count = ?, transcription_completed_windows = ?,
            transcription_failed_windows = ?, transcription_recovery_rounds = ?, restart_count = ?,
@@ -1412,9 +1747,14 @@ export async function importNativePostProcessingResult(input: {
            last_error = ?, native_postprocess_run_id = ?, native_postprocess_imported_at = ?, updated_at = ?
        WHERE id = ?`,
       [
-        Math.max(0, input.durationMs),
-        Math.max(0, input.audioDurationMs),
+        recordedDurationMs,
+        recordedDurationMs,
+        verifiedAudioDurationMs,
+        verifiedAudioDurationMs,
         input.captureEndedAt ?? null,
+        measuredCaptureGapMs,
+        input.captureTerminal ? 1 : 0,
+        now,
         Math.max(0, input.segmentCount),
         Math.max(0, input.processedSegments),
         Math.max(0, input.windowCount),

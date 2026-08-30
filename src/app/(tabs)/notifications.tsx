@@ -1,7 +1,7 @@
 import { Ionicons } from '@expo/vector-icons';
 import { router, useFocusEffect } from 'expo-router';
-import { useCallback, useState } from 'react';
-import { ActivityIndicator, FlatList, Pressable, View } from 'react-native';
+import { useCallback, useEffect, useState } from 'react';
+import { ActivityIndicator, FlatList, Pressable, RefreshControl, View } from 'react-native';
 
 import { AppText, Banner, Card } from '@/design/components';
 import { useMainaLayout } from '@/design/layout';
@@ -14,18 +14,35 @@ import { runMeetingPacketGeneration } from '@/services/meetingPacket';
 import { maybeQueueMainaKnowledgeCloudSync } from '@/services/mainaKnowledgeCloud';
 import { useMeetings } from '@/state/meetingsStore';
 import { formatDate, formatTime } from '@/utils/format';
+import { subscribeMeetingPipelineChanges } from '@/services/meetingPipelineSignals';
 
 export default function NotificationsScreen() {
   const { theme } = useAppTheme();
   const { topPadding, contentBottomPadding } = useMainaLayout();
   const { meetings, refresh } = useMeetings();
   const [runningActionId, setRunningActionId] = useState<string | null>(null);
+  const [refreshing, setRefreshing] = useState(false);
 
   useFocusEffect(
     useCallback(() => {
       void refresh();
     }, [refresh]),
   );
+
+  useEffect(() => subscribeMeetingPipelineChanges(() => {
+    void refresh();
+  }), [refresh]);
+
+  const refreshFromGesture = useCallback(async () => {
+    setRefreshing(true);
+    try {
+      // Local SQLite/store projection only. Recovery scheduling remains owned
+      // by pipeline signals and OS workers, never by a pull gesture.
+      await refresh();
+    } finally {
+      setRefreshing(false);
+    }
+  }, [refresh]);
 
   const notifications = buildMainaNotifications(meetings);
 
@@ -102,6 +119,14 @@ export default function NotificationsScreen() {
           </Pressable>
         )}
         ItemSeparatorComponent={() => <View style={{ height: space.lg }} />}
+        refreshControl={(
+          <RefreshControl
+            refreshing={refreshing}
+            onRefresh={() => void refreshFromGesture()}
+            tintColor={theme.primary}
+            colors={[theme.primary]}
+          />
+        )}
         ListHeaderComponent={<View style={{ height: topPadding }} />}
         ListEmptyComponent={
           <Banner tone="info" style={{ alignItems: 'center', gap: 8, paddingVertical: 28 }}>
