@@ -23,6 +23,11 @@ import {
   type MainaKnowledgeCloudSourcePackage,
 } from '@/services/mainaKnowledgeCloudCore';
 import { reconcileMainaKnowledgeCloudCorrectionsForMeeting } from '@/services/mainaKnowledgeCloudCorrections';
+import {
+  classifyTransportCause,
+  safeCloudFailureMessage,
+} from '@/core/pipeline/cloudFailure';
+import { nextCloudRetry } from '@/services/cloudRetryPolicy';
 
 const inflight = new Map<string, Promise<void>>();
 const TRANSCRIPT_PAGE_SIZE = 100;
@@ -153,6 +158,7 @@ async function syncMeetingToMainaKnowledgeCloud(meetingId: string): Promise<void
     knowledgeCloudSyncStatus: 'syncing',
     knowledgeCloudLastAttemptAt: Date.now(),
     knowledgeCloudError: null,
+    knowledgeCloudFailureClass: null,
     knowledgeCloudSourceKey: frozen.payload.source_key,
   });
 
@@ -177,6 +183,9 @@ async function syncMeetingToMainaKnowledgeCloud(meetingId: string): Promise<void
         knowledgeCloudSyncedAt: Date.now(),
         knowledgeCloudCanonicalSha256: result.canonicalSha256 ?? null,
         knowledgeCloudError: null,
+        knowledgeCloudFailureClass: null,
+        knowledgeCloudRetryCount: 0,
+        knowledgeCloudNextRetryAt: null,
       });
       log.info('maina-cloud', 'meeting synced', {
         meetingId,
@@ -199,7 +208,8 @@ async function syncMeetingToMainaKnowledgeCloud(meetingId: string): Promise<void
       await clearMainaCloudSession();
       await setCloudSyncState(meetingId, {
         knowledgeCloudSyncStatus: 'sync_failed_auth',
-        knowledgeCloudError: result.message,
+        knowledgeCloudError: safeCloudFailureMessage('auth'),
+        knowledgeCloudFailureClass: 'auth',
       });
       return;
     }
@@ -207,7 +217,8 @@ async function syncMeetingToMainaKnowledgeCloud(meetingId: string): Promise<void
     if (result.outcome === 'conflict') {
       await setCloudSyncState(meetingId, {
         knowledgeCloudSyncStatus: 'sync_failed_conflict',
-        knowledgeCloudError: result.message,
+        knowledgeCloudError: safeCloudFailureMessage('conflict'),
+        knowledgeCloudFailureClass: 'conflict',
       });
       return;
     }
@@ -215,32 +226,46 @@ async function syncMeetingToMainaKnowledgeCloud(meetingId: string): Promise<void
     if (result.outcome === 'validation') {
       await setCloudSyncState(meetingId, {
         knowledgeCloudSyncStatus: 'sync_failed_validation',
-        knowledgeCloudError: result.message,
+        knowledgeCloudError: safeCloudFailureMessage('validation'),
+        knowledgeCloudFailureClass: 'validation',
       });
       return;
     }
 
     if (result.outcome === 'blocked_budget') {
+      const retry = nextCloudRetry({ attemptCount: meeting.knowledgeCloudRetryCount ?? 0 });
       await setCloudSyncState(meetingId, {
         knowledgeCloudSyncStatus: 'sync_blocked_budget',
-        knowledgeCloudError: result.message,
+        knowledgeCloudError: safeCloudFailureMessage('budget'),
+        knowledgeCloudFailureClass: 'budget',
+        knowledgeCloudRetryCount: retry.attemptCount,
+        knowledgeCloudNextRetryAt: retry.nextRetryAt,
       });
       return;
     }
 
+    const retry = nextCloudRetry({ attemptCount: meeting.knowledgeCloudRetryCount ?? 0 });
     await setCloudSyncState(meetingId, {
       knowledgeCloudSyncStatus: 'sync_failed_retryable',
-      knowledgeCloudError: result.message,
+      knowledgeCloudError: safeCloudFailureMessage('http_5xx'),
+      knowledgeCloudFailureClass: 'http_5xx',
+      knowledgeCloudRetryCount: retry.attemptCount,
+      knowledgeCloudNextRetryAt: retry.nextRetryAt,
     });
   } catch (cause) {
-    const message = cause instanceof Error ? cause.message : String(cause);
+    const failureClass = classifyTransportCause(cause);
+    const retry = nextCloudRetry({ attemptCount: meeting.knowledgeCloudRetryCount ?? 0 });
     await setCloudSyncState(meetingId, {
       knowledgeCloudSyncStatus: 'sync_failed_retryable',
-      knowledgeCloudError: message,
+      knowledgeCloudError: safeCloudFailureMessage(failureClass),
+      knowledgeCloudFailureClass: failureClass,
+      knowledgeCloudRetryCount: retry.attemptCount,
+      knowledgeCloudNextRetryAt: retry.nextRetryAt,
     });
     log.warn('maina-cloud', 'meeting sync failed', {
       meetingId,
-      err: message,
+      failureClass,
+      causeName: cause instanceof Error ? cause.name : typeof cause,
     });
   }
 }

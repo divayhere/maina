@@ -1,6 +1,12 @@
 import * as SecureStore from 'expo-secure-store';
 
 import { deleteSetting } from '@/data/settings';
+import type { CloudFailureClass } from '@/data/meetings';
+import {
+  classifyHttpFailure,
+  classifyTransportCause,
+  safeCloudFailureMessage,
+} from '@/core/pipeline/cloudFailure';
 import { log } from '@/services/logger';
 import { clearMkcMemoryCacheForOwner } from '@/services/mkc-memory-cache';
 
@@ -41,6 +47,9 @@ export class MainaCloudApiError extends Error {
     message: string,
     readonly status: number,
     readonly code?: string,
+    readonly failureClass: CloudFailureClass = status > 0
+      ? classifyHttpFailure(status, code)
+      : 'unknown',
   ) {
     super(message);
     this.name = 'MainaCloudApiError';
@@ -153,18 +162,40 @@ export async function mainaCloudFetch(path: string, init: RequestInit = {}): Pro
         // is mutated here. The caller maps this to an auth-blocked cloud job.
         await clearMainaCloudSession();
       }
-      throw new MainaCloudApiError(failure.message, response.status, failure.code);
+      const failureClass = classifyHttpFailure(response.status, failure.code);
+      log.warn('maina-cloud-session', 'authenticated cloud request was rejected', {
+        status: response.status,
+        code: failure.code ?? null,
+        failureClass,
+      });
+      throw new MainaCloudApiError(
+        safeCloudFailureMessage(failureClass),
+        response.status,
+        failure.code,
+        failureClass,
+      );
     }
     return response;
   } catch (cause) {
     if (cause instanceof MainaCloudApiError) throw cause;
     if (cause instanceof Error && cause.name === 'AbortError') {
-      throw new MainaCloudApiError('Maina Cloud took too long to respond. Maina will retry later.', 0, 'network_timeout');
+      throw new MainaCloudApiError(
+        safeCloudFailureMessage('timeout'),
+        0,
+        'network_timeout',
+        'timeout',
+      );
     }
+    const failureClass = classifyTransportCause(cause);
+    log.warn('maina-cloud-session', 'authenticated cloud transport failed', {
+      failureClass,
+      causeName: cause instanceof Error ? cause.name : typeof cause,
+    });
     throw new MainaCloudApiError(
-      cause instanceof Error ? cause.message : 'Maina Cloud is temporarily unavailable.',
+      safeCloudFailureMessage(failureClass),
       0,
       'network_error',
+      failureClass,
     );
   } finally {
     clearTimeout(timeout);

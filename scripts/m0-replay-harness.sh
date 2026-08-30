@@ -22,6 +22,13 @@ preflight() {
   test -x "$PMD"
 
   android get-state >/dev/null
+  [[ "$ANDROID_SERIAL" == *"._adb-tls-connect._tcp" ]] || {
+    echo "M0 replay requires the pinned Wi-Fi ADB endpoint, not USB/emulator." >&2
+    return 1
+  }
+  local matching_targets
+  matching_targets="$(adb devices | awk -v serial="$ANDROID_SERIAL" 'NR > 1 && $1 == serial && $2 == "device" { count += 1 } END { print count + 0 }')"
+  test "$matching_targets" = "1"
   local android_hardware android_version android_code ios_details ios_apps
   android_hardware="$(android shell getprop ro.serialno | tr -d '\r')"
   test "$android_hardware" = "47011FDAP000VE"
@@ -37,7 +44,7 @@ preflight() {
   grep -q "$IOS_BUNDLE_ID" <<<"$ios_apps"
 
   printf 'M0 replay preflight passed\n'
-  printf 'Android: Pixel serial %s, Maina %s (%s)\n' "$android_hardware" "$android_version" "$android_code"
+  printf 'Android: Wi-Fi Pixel %s (%s), Maina %s (%s)\n' "$android_hardware" "$ANDROID_SERIAL" "$android_version" "$android_code"
   printf 'iOS: iPhone 15 serial %s, bundle %s\n' "$IOS_SERIAL" "$IOS_BUNDLE_ID"
 }
 

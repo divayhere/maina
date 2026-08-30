@@ -25,7 +25,6 @@ export default function TabsLayout() {
       />
       <Tabs.Screen name="settings" options={{ href: null }} />
       <Tabs.Screen name="notifications" options={{ href: null }} />
-      <Tabs.Screen name="meeting" options={{ href: null }} />
       <Tabs.Screen name="diagnostics" options={{ href: null }} />
       <Tabs.Screen name="help" options={{ href: null }} />
       <Tabs.Screen name="memory" options={{ href: null }} />

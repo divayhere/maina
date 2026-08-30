@@ -8,6 +8,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ActivityIndicator, Alert, AppState, KeyboardAvoidingView, Modal, Platform, Pressable, StyleSheet, TextInput, View } from 'react-native';
 
 import { MEETING_TITLE_MAX_LENGTH, normalizeMeetingTitle } from '@/core/meeting/meetingWorkspace';
+import { safePersistedCloudMessage } from '@/core/pipeline/cloudFailure';
 import { chooseRecognitionLanguage, startFileSession, stopSession, supportsOnDevice } from '@/core/transcription/nativeSpeech';
 import { appendWithoutOverlap } from '@/core/transcription/transcript';
 import {
@@ -60,11 +61,12 @@ const PAGE_SIZE = 60;
 
 type MeetingTab = 'notes' | 'todos' | 'transcript';
 
-function formatMeetingLength(meeting: Pick<Meeting, 'durationMs' | 'audioDurationMs'>): string {
+function formatMeetingLength(meeting: Pick<Meeting, 'durationMs' | 'audioDurationMs' | 'captureGapMs'>): string {
   const elapsedMs = Math.max(0, meeting.durationMs);
   const recordedMs = Math.max(0, meeting.audioDurationMs ?? 0);
-  if (recordedMs > 0 && Math.abs(elapsedMs - recordedMs) >= 5_000) {
-    return `${formatDuration(recordedMs)} recorded · ${formatDuration(elapsedMs)} elapsed`;
+  const gapMs = Math.max(0, meeting.captureGapMs ?? 0);
+  if (recordedMs > 0 && gapMs >= 1_000) {
+    return `${formatDuration(recordedMs)} recorded · ${formatDuration(gapMs)} interrupted`;
   }
   return formatDuration(recordedMs || elapsedMs);
 }
@@ -222,9 +224,10 @@ function TodoPreviewRow({
 }
 
 function formatPacketError(message?: string | null): string {
-  const normalized = message?.trim() ?? '';
-  if (!normalized) return 'Notes are temporarily unavailable. Maina will retry safely.';
-  return normalized;
+  return safePersistedCloudMessage(
+    message,
+    'Notes are temporarily unavailable. Maina will retry safely.',
+  );
 }
 
 export default function MeetingDetail() {
@@ -698,7 +701,7 @@ export default function MeetingDetail() {
           }
           await deleteMeeting(id);
           await refresh();
-          router.back();
+          router.dismissTo('/');
         },
       },
     ]);
@@ -1028,7 +1031,7 @@ export default function MeetingDetail() {
               <Card style={{ gap: space.lg, marginBottom: space.lg }}>
                 <View style={styles.sectionHeader}>
                   <AppText variant="title">To-dos</AppText>
-                  <ActionLink label="Open all" color={theme.primary} onPress={() => router.push('/todos')} />
+                  <ActionLink label="Open all" color={theme.primary} onPress={() => router.dismissTo('/todos')} />
                 </View>
                 <View style={{ gap: space.md }}>
                   {todos.length ? todos.map((todo) => (

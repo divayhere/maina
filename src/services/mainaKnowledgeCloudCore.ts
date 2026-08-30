@@ -1,3 +1,5 @@
+import { safePersistedCloudMessage } from '@/core/pipeline/cloudFailure';
+
 export type MainaKnowledgeCloudSyncStatus =
   | 'local_only'
   | 'sync_queued'
@@ -259,21 +261,25 @@ export function describeMainaKnowledgeCloudSyncStatus(input: {
   status: MainaKnowledgeCloudSyncStatus;
   error?: string | null;
 }) {
+  const safeError = safePersistedCloudMessage(
+    input.error,
+    'Your local meeting is safe. Maina will continue through the normal recovery path.',
+  );
   switch (input.status) {
     case 'sync_succeeded':
       return { label: 'Synced to cloud', detail: 'This meeting is stored in Maina Knowledge Cloud.', tone: 'primary' as MainaKnowledgeCloudTone };
     case 'sync_failed_auth':
-      return { label: 'Cloud connection needs attention', detail: input.error ?? 'Reconnect Maina Cloud in Settings, then Maina can continue syncing safely.', tone: 'warn' as MainaKnowledgeCloudTone };
+      return { label: 'Cloud connection needs attention', detail: safeError, tone: 'warn' as MainaKnowledgeCloudTone };
     case 'sync_queued':
       return { label: 'Waiting to sync', detail: 'This meeting is queued for Maina Knowledge Cloud.', tone: 'muted' as MainaKnowledgeCloudTone };
     case 'syncing':
       return { label: 'Syncing now', detail: 'Maina is sending this meeting to Maina Knowledge Cloud.', tone: 'muted' as MainaKnowledgeCloudTone };
     case 'sync_failed_conflict':
-      return { label: 'Cloud conflict', detail: input.error ?? 'This meeting changed after a cloud sync was already frozen.', tone: 'warn' as MainaKnowledgeCloudTone };
+      return { label: 'Cloud conflict', detail: safeError, tone: 'warn' as MainaKnowledgeCloudTone };
     case 'sync_failed_validation':
-      return { label: 'Cloud format issue', detail: input.error ?? 'This meeting could not be accepted by Maina Knowledge Cloud.', tone: 'warn' as MainaKnowledgeCloudTone };
+      return { label: 'Cloud format issue', detail: safeError, tone: 'warn' as MainaKnowledgeCloudTone };
     case 'sync_blocked_budget':
-      return { label: 'Cloud sync paused', detail: input.error ?? 'Maina Knowledge Cloud budget guardrails blocked sync for now.', tone: 'warn' as MainaKnowledgeCloudTone };
+      return { label: 'Cloud sync paused', detail: safeError, tone: 'warn' as MainaKnowledgeCloudTone };
     case 'sync_failed_retryable':
       return { label: 'Cloud sync waiting', detail: 'Maina will continue automatically when the cloud is reachable.', tone: 'muted' as MainaKnowledgeCloudTone };
     case 'local_only':

@@ -132,7 +132,9 @@ describe('mainaKnowledgeCloud service', () => {
     await runMainaKnowledgeCloudSync('meeting-1');
 
     expect(meeting.knowledgeCloudSyncStatus).toBe('sync_failed_auth');
-    expect(meeting.knowledgeCloudError).toBe('Invalid bearer token');
+    expect(meeting.knowledgeCloudError).toBe(
+      'Maina Cloud needs to be reconnected. Your recording and transcript are safe.',
+    );
     expect(mockClearMainaCloudSession).toHaveBeenCalledOnce();
     expect(mockUpdateMeetingPipelineStage).toHaveBeenLastCalledWith(expect.objectContaining({
       stage: 'mkc', state: 'failed',

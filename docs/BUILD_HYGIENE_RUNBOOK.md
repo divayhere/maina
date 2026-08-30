@@ -46,11 +46,12 @@ The scripts source `scripts/maina-env.sh`, which requires:
 - Node 24
 - JDK 17
 - Android SDK platform-tools
-- the wired Pixel serial configured in `MAINA_ADB_SERIAL`
+- the pinned, authorized Wi-Fi Pixel endpoint configured in `MAINA_ADB_SERIAL`
 - external Gradle cache/output directories configured by `MAINA_BUILD_ROOT`
 
-Use `scripts/adb-usb.sh` rather than bare `adb` so a Wi-Fi ADB identity cannot
-accidentally be selected.
+Use `scripts/adb-target.sh` rather than bare `adb`. It accepts only the pinned
+Wi-Fi ADB endpoint and verifies the physical Pixel serial before every command,
+so an emulator, stale USB transport, or another phone cannot be selected.
 
 ## Native generation contract
 

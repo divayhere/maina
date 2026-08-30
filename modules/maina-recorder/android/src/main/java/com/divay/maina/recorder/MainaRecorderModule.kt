@@ -219,6 +219,20 @@ class MainaRecorderModule : Module() {
             )
         }
 
+        AsyncFunction("schedulePipelineWake") { generation: Long ->
+            mapOf(
+                "scheduled" to MainaPipelineWakeScheduler.enqueueShared(requireContext(), generation),
+            )
+        }
+
+        AsyncFunction("completePipelineWake") { attemptToken: String, succeeded: Boolean ->
+            mapOf("completed" to MainaPipelineWakeCompletion.complete(attemptToken, succeeded))
+        }
+
+        AsyncFunction("isPipelineWakeAttemptActive") { attemptToken: String ->
+            mapOf("active" to MainaPipelineWakeCompletion.isActive(attemptToken))
+        }
+
         Function("getNativeCaptureStatus") {
             MainaRecordingService.nativeCaptureStatus
         }

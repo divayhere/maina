@@ -1,6 +1,6 @@
 {
   "name": "maina",
-  "main": "expo-router/entry",
+  "main": "index.js",
   "version": "0.10.34",
   "dependencies": {
     "@expo/ui": "~57.0.14",

@@ -26,6 +26,7 @@ import {
   shouldPreserveTerminalNativeMeeting,
 } from '@/core/recording/nativeCaptureReconciliation';
 import { nativeCapturePresentation } from '@/core/recording/nativeCapturePresentation';
+import { openNewlySavedMeetingRoute } from '@/core/navigation/navigationPolicy';
 import {
   commitTranscriptFinalBlocks,
   createMeeting,
@@ -125,6 +126,13 @@ function describeRecordingProblem(message?: string | null): { title: string; bod
     title: 'Recording stopped early',
     body: 'Maina saved what it had. You can keep that part or delete it.',
   };
+}
+
+function openNewlySavedMeeting(meetingId: string) {
+  // A global recording is never a child of an older meeting. Dismiss to the
+  // Home root first, then push the newly saved detail so native Back returns
+  // to Home and cannot expose an unrelated meeting underneath.
+  openNewlySavedMeetingRoute(router, meetingId, (work) => requestAnimationFrame(work));
 }
 
 export default function RecordScreen() {
@@ -854,7 +862,7 @@ export default function RecordScreen() {
               setListening(false);
               setPaused(false);
               await refresh();
-              router.replace(`/meeting/${idRef.current}`);
+              openNewlySavedMeeting(idRef.current);
               return;
             }
             const metrics = dirRef.current
@@ -869,9 +877,11 @@ export default function RecordScreen() {
               finalizedChunkCount: metrics.finalizedUris.length,
             }))) {
               await updateMeeting(idRef.current, {
-                durationMs: metrics.wallDurationMs,
+                durationMs: metrics.audioDurationMs > 0 ? metrics.audioDurationMs : currentMeeting?.durationMs ?? 0,
                 audioDurationMs: metrics.audioDurationMs,
                 captureEndedAt: metrics.stoppedAt ?? Date.now(),
+                captureGapMs: metrics.captureGapMs,
+                captureDisposition: metrics.captureGapMs > 0 ? 'system_paused' : 'normal',
                 segmentCount: metrics.finalizedUris.length,
                 restartCount: metrics.routeRestartCount,
                 status: metrics.finalizedUris.length > 0 ? 'transcribing' : 'interrupted',
@@ -879,7 +889,7 @@ export default function RecordScreen() {
               }).catch(() => {});
             }
             await refresh();
-            router.replace(`/meeting/${idRef.current}`);
+            openNewlySavedMeeting(idRef.current);
           })();
           return;
         }
@@ -1043,9 +1053,11 @@ export default function RecordScreen() {
         });
         if (metrics) {
           await updateMeeting(id, {
-            durationMs: metrics.wallDurationMs,
+            durationMs: metrics.audioDurationMs > 0 ? metrics.audioDurationMs : Date.now() - startedAtRef.current,
             audioDurationMs: metrics.audioDurationMs,
             captureEndedAt: metrics.stoppedAt ?? Date.now(),
+            captureGapMs: metrics.captureGapMs,
+            captureDisposition: metrics.captureGapMs > 0 ? 'system_paused' : 'normal',
             segmentCount: metrics.finalizedUris.length,
             restartCount: metrics.routeRestartCount,
             status: metrics.finalizedUris.length > 0 ? 'transcribing' : 'interrupted',
@@ -1074,7 +1086,7 @@ export default function RecordScreen() {
       });
       clearDiagnosticContext();
       await setNativeCaptureState('idle').catch(() => {});
-      router.replace(`/meeting/${id}`);
+      openNewlySavedMeeting(id);
     } catch (cause) {
       const message = cause instanceof Error ? cause.message : String(cause);
       setError('Maina could not finish the database checkpoint. Your WAV files remain on the phone.');

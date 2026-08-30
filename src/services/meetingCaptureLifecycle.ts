@@ -27,6 +27,22 @@ import { TERMINAL_PARTIAL_RECOVERY_ROUNDS } from '@/services/transcriptCoverage'
 // Expo-SQLite import ever observes a completed native outbox run at a time.
 let nativeReconciliationInFlight: Promise<number> | null = null;
 
+/**
+ * A native-result Worker is only a wake signal. The native outbox remains the
+ * durable truth, so stale WorkManager deliveries must validate the exact run
+ * before they are allowed to create a shared pipeline generation.
+ */
+export async function isCurrentNativePostProcessingWake(
+  meetingId: string,
+  runId: string,
+): Promise<boolean> {
+  if (!meetingId || !runId) return false;
+  const result = await readNativePostProcessingResult(meetingId);
+  return result?.meetingId === meetingId
+    && result.runId === runId
+    && ['complete', 'partial', 'deferred'].includes(result.state);
+}
+
 async function launchNativePostProcessing(
   meeting: Meeting,
   options: { forceRetry?: boolean } = {},
@@ -45,13 +61,17 @@ async function launchNativePostProcessing(
     return false;
   }
   await updateMeeting(meeting.id, {
-    durationMs: metrics.wallDurationMs,
+    // User-facing meeting length is recorded audio, never wall time spent in
+    // a call/interruption. Keep the excluded interval as captureGapMs.
+    durationMs: metrics.audioDurationMs > 0 ? metrics.audioDurationMs : meeting.durationMs,
     audioDurationMs: metrics.audioDurationMs,
     captureEndedAt:
       metrics.stoppedAt
       ?? (metrics.startedAt != null ? metrics.startedAt + metrics.wallDurationMs : null),
     segmentCount: metrics.finalizedUris.length,
     restartCount: metrics.routeRestartCount,
+    captureGapMs: metrics.captureGapMs,
+    captureDisposition: metrics.captureGapMs > 0 ? 'system_paused' : 'normal',
     status: 'transcribing',
     lastError: materialCaptureGapError(metrics.captureGapMs),
   });

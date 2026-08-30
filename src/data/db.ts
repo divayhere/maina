@@ -259,6 +259,82 @@ const MIGRATIONS: Migration[] = [
     CREATE INDEX IF NOT EXISTS idx_mkc_memory_cache_owner_access
       ON mkc_memory_cache(owner_user_id, last_accessed_at DESC);`);
   },
+  // v16 — one durable recovery/wake truth shared by foreground, connectivity,
+  // and OS workers. Meeting columns retain typed failure and capture facts;
+  // native ASR claims fence late callbacks after expiration/recovery.
+  async (db) => {
+    await addColumnIfMissing(db, 'meetings', 'capture_disposition', `TEXT NOT NULL DEFAULT 'normal'`);
+    await addColumnIfMissing(db, 'meetings', 'capture_pause_reason', 'TEXT');
+    await addColumnIfMissing(db, 'meetings', 'capture_gap_ms', 'INTEGER NOT NULL DEFAULT 0');
+    await addColumnIfMissing(db, 'meetings', 'capture_heartbeat_terminal_at', 'INTEGER');
+    await addColumnIfMissing(db, 'meetings', 'cloud_notes_failure_class', 'TEXT');
+    await addColumnIfMissing(db, 'meetings', 'cloud_notes_failure_operation', 'TEXT');
+    await addColumnIfMissing(db, 'meetings', 'cloud_notes_last_wake_epoch', 'INTEGER NOT NULL DEFAULT 0');
+    await addColumnIfMissing(db, 'meetings', 'knowledge_cloud_failure_class', 'TEXT');
+    await addColumnIfMissing(db, 'meetings', 'knowledge_cloud_retry_count', 'INTEGER NOT NULL DEFAULT 0');
+    await addColumnIfMissing(db, 'meetings', 'knowledge_cloud_next_retry_at', 'INTEGER');
+    await addColumnIfMissing(db, 'meetings', 'knowledge_cloud_last_wake_epoch', 'INTEGER NOT NULL DEFAULT 0');
+    await addColumnIfMissing(db, 'meetings', 'audio_cleanup_state', `TEXT NOT NULL DEFAULT 'not_due'`);
+    await addColumnIfMissing(db, 'meetings', 'audio_cleanup_retry_count', 'INTEGER NOT NULL DEFAULT 0');
+    await addColumnIfMissing(db, 'meetings', 'audio_cleanup_next_retry_at', 'INTEGER');
+    await db.execAsync(`CREATE TABLE IF NOT EXISTS pipeline_wake_state (
+      singleton_id INTEGER PRIMARY KEY NOT NULL CHECK (singleton_id = 1),
+      generation INTEGER NOT NULL DEFAULT 0,
+      enqueue_required INTEGER NOT NULL DEFAULT 0,
+      connectivity_epoch INTEGER NOT NULL DEFAULT 0,
+      active_attempt_token TEXT,
+      active_attempt_generation INTEGER,
+      active_attempt_lease_until INTEGER,
+      last_reason TEXT,
+      last_request_key TEXT,
+      last_enqueued_generation INTEGER,
+      last_enqueued_at INTEGER,
+      last_started_at INTEGER,
+      last_completed_at INTEGER,
+      attempt_count INTEGER NOT NULL DEFAULT 0,
+      last_error_code TEXT,
+      updated_at INTEGER NOT NULL
+    );
+    INSERT OR IGNORE INTO pipeline_wake_state
+      (singleton_id, generation, enqueue_required, connectivity_epoch, attempt_count, updated_at)
+      VALUES (1, 0, 0, 0, 0, 0);
+
+    CREATE TABLE IF NOT EXISTS local_asr_run_claims (
+      meeting_id TEXT PRIMARY KEY NOT NULL,
+      generation INTEGER NOT NULL DEFAULT 0,
+      claim_token TEXT,
+      state TEXT NOT NULL DEFAULT 'deferred',
+      claimed_at INTEGER,
+      invalidated_at INTEGER,
+      completed_at INTEGER,
+      updated_at INTEGER NOT NULL,
+      FOREIGN KEY (meeting_id) REFERENCES meetings(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_local_asr_run_claim_state
+      ON local_asr_run_claims(state, updated_at ASC);
+    CREATE INDEX IF NOT EXISTS idx_meetings_cloud_transport_retry
+      ON meetings(summary_status, cloud_notes_failure_class, cloud_notes_next_retry_at);
+    CREATE INDEX IF NOT EXISTS idx_meetings_source_transport_retry
+      ON meetings(knowledge_cloud_sync_status, knowledge_cloud_failure_class, knowledge_cloud_next_retry_at);
+    CREATE INDEX IF NOT EXISTS idx_meetings_audio_cleanup
+      ON meetings(audio_cleanup_state, audio_cleanup_next_retry_at);
+
+    UPDATE meetings
+      SET knowledge_cloud_error = 'Waiting for internet. Maina will continue automatically.'
+      WHERE knowledge_cloud_sync_status = 'sync_failed_retryable';
+    UPDATE meetings
+      SET last_error = 'Waiting for internet. Maina will continue automatically.'
+      WHERE summary_status = 'retryable';`);
+  },
+  // v17 — additive lease/generation fencing for devices that already opened
+  // the v16 staging schema. Fresh databases receive these columns in v16;
+  // addColumnIfMissing keeps this replay-safe and preserves every user row.
+  async (db) => {
+    await addColumnIfMissing(db, 'pipeline_wake_state', 'active_attempt_generation', 'INTEGER');
+    await addColumnIfMissing(db, 'pipeline_wake_state', 'active_attempt_lease_until', 'INTEGER');
+    await addColumnIfMissing(db, 'pipeline_wake_state', 'last_request_key', 'TEXT');
+    await addColumnIfMissing(db, 'pipeline_wake_state', 'last_enqueued_generation', 'INTEGER');
+  },
 ];
 
 export async function initDb(): Promise<void> {

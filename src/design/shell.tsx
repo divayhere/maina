@@ -18,6 +18,7 @@ import { countActionableNotifications } from '@/services/notifications';
 import { MKC_MEMORY_FEATURE_FLAGS } from '@/services/mkc-memory-flags';
 import { getMainaDrawerDestinations, MAIN_TAB_DESTINATIONS } from '@/services/mkc-memory-navigation';
 import { useMeetings } from '@/state/meetingsStore';
+import { backOrHome } from '@/core/navigation/navigationPolicy';
 
 export function TopBar({
   title,
@@ -49,7 +50,13 @@ export function TopBar({
           <IconCircle
             icon="chevron-back"
             label="Back"
-            onPress={() => router.back()}
+            onPress={() => {
+              backOrHome({
+                canGoBack: router.canGoBack(),
+                back: () => router.back(),
+                home: () => router.replace('/'),
+              });
+            }}
           />
         ) : (
           <IconCircle icon="menu-outline" label="Open menu" onPress={onMenu} />
@@ -85,7 +92,7 @@ export function DrawerMenu() {
           <Pressable
             accessibilityRole="button"
             accessibilityLabel="Notifications"
-            onPress={() => router.push('/notifications')}
+            onPress={() => router.navigate('/notifications')}
             hitSlop={10}
             style={({ pressed }) => [
               styles.iconButton,
@@ -133,7 +140,7 @@ export function DrawerMenu() {
                   key={item.label}
                   onPress={() => {
                     setOpen(false);
-                    router.push(item.href as never);
+                    router.navigate(item.href as never);
                   }}
                   style={({ pressed }) => [
                     styles.drawerItem,

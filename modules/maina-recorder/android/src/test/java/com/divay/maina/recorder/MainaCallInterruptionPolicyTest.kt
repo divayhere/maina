@@ -9,6 +9,7 @@ class MainaCallInterruptionPolicyTest {
     fun `communication and call modes pause active capture`() {
         assertTrue(MainaCallInterruptionPolicy.communicationActive(2, false))
         assertTrue(MainaCallInterruptionPolicy.communicationActive(3, false))
+        assertTrue(MainaCallInterruptionPolicy.communicationActive(6, false))
         assertTrue(MainaCallInterruptionPolicy.communicationActive(0, true))
         assertFalse(MainaCallInterruptionPolicy.communicationActive(0, false))
     }
@@ -17,7 +18,14 @@ class MainaCallInterruptionPolicyTest {
     fun `only automatic call pauses are automatically resumed`() {
         assertTrue(MainaCallInterruptionPolicy.shouldPause("recording", false, true))
         assertFalse(MainaCallInterruptionPolicy.shouldPause("paused", false, true))
-        assertTrue(MainaCallInterruptionPolicy.shouldResume("recording", true, false))
-        assertFalse(MainaCallInterruptionPolicy.shouldResume("paused", true, false))
+        assertTrue(MainaCallInterruptionPolicy.shouldResume("paused", true, false))
+        assertFalse(MainaCallInterruptionPolicy.shouldResume("recording", true, false))
+        assertFalse(MainaCallInterruptionPolicy.shouldResume("paused", false, false))
+    }
+
+    @Test
+    fun `resume retries are bounded and begin after stable normal audio mode`() {
+        assertTrue(MainaCallInterruptionPolicy.resumeRetryDelayMs(0) >= 750L)
+        assertTrue(MainaCallInterruptionPolicy.resumeRetryDelayMs(4) <= 5_000L)
     }
 }

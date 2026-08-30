@@ -71,6 +71,7 @@ export interface NativeCaptureStatus {
   routedDeviceName?: string | null;
   lastRouteChangeElapsedMs?: number | null;
   captureGapMs?: number;
+  pauseReason?: 'manual' | 'communication' | string | null;
   rmsDbfs?: number;
   peakDbfs?: number;
 }
@@ -268,6 +269,9 @@ interface MainaRecorderNativeModule {
   isNativePostProcessingServiceRunning(): boolean;
   readNativePostProcessingResult(meetingId: string): Promise<NativePostProcessingResult | null>;
   acknowledgeNativePostProcessingResult(meetingId: string, runId: string): Promise<{ acknowledged: boolean }>;
+  schedulePipelineWake(generation: number): Promise<{ scheduled: boolean }>;
+  completePipelineWake(attemptToken: string, succeeded: boolean): Promise<{ completed: boolean }>;
+  isPipelineWakeAttemptActive(attemptToken: string): Promise<{ active: boolean }>;
   getNativeCaptureStatus(): NativeCaptureStatus;
   inspectNativeCaptureDirectory(directory: string, recoverPartials: boolean): Promise<NativeCaptureDirectoryInspection>;
   deleteNativeCaptureDirectory(directory: string): Promise<boolean>;

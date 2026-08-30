@@ -25,10 +25,20 @@ gradle_version="$($MAINA_GRADLE_HOME/bin/gradle --version | sed -n 's/^Gradle //
 [[ "$gradle_version" == "9.3.1" ]] || { echo "Expected Gradle 9.3.1; found $gradle_version." >&2; exit 1; }
 
 adb="$ANDROID_HOME/platform-tools/adb"
-if ! "$adb" devices | awk 'NR > 1 && $1 == serial && $2 == "device" { found = 1 } END { exit found ? 0 : 1 }' serial="$MAINA_ADB_SERIAL"; then
-  echo "Expected USB Pixel $MAINA_ADB_SERIAL is not connected and authorized." >&2
+if [[ "$MAINA_ADB_SERIAL" != *"._adb-tls-connect._tcp" ]]; then
+  echo "Android target must be the pinned Wi-Fi ADB endpoint; found $MAINA_ADB_SERIAL." >&2
   exit 1
 fi
+if ! "$adb" devices | awk 'NR > 1 && $1 == serial && $2 == "device" { found = 1 } END { exit found ? 0 : 1 }' serial="$MAINA_ADB_SERIAL"; then
+  echo "Expected Wi-Fi Pixel endpoint $MAINA_ADB_SERIAL is not connected and authorized." >&2
+  exit 1
+fi
+hardware_serial="$("$adb" -s "$MAINA_ADB_SERIAL" shell getprop ro.serialno | tr -d '\r')"
+model="$("$adb" -s "$MAINA_ADB_SERIAL" shell getprop ro.product.model | tr -d '\r')"
+[[ "$hardware_serial" == "$MAINA_DEVICE_SERIAL" && "$model" == "Pixel 9 Pro" ]] || {
+  echo "Wi-Fi ADB target identity mismatch: serial=$hardware_serial model=$model." >&2
+  exit 1
+}
 
-printf 'Toolchain OK: Node %s, %s, Gradle %s, USB device %s\n' \
-  "$(node --version)" "$java_version" "$gradle_version" "$MAINA_ADB_SERIAL"
+printf 'Toolchain OK: Node %s, %s, Gradle %s, Wi-Fi device %s (%s)\n' \
+  "$(node --version)" "$java_version" "$gradle_version" "$MAINA_ADB_SERIAL" "$model"

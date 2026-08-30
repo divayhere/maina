@@ -17,6 +17,8 @@ import java.net.URI
 import java.nio.file.Files
 import java.nio.file.StandardCopyOption
 import java.util.UUID
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.concurrent.thread
 import kotlin.math.abs
@@ -129,6 +131,8 @@ internal class MainaNativeAudioCapture(
     @Volatile private var rmsDbfs = -90.0
     @Volatile private var peakDbfs = -90.0
     @Volatile private var lastStatusPublishElapsedMs = 0L
+    @Volatile private var pauseCheckpointLatch: CountDownLatch? = null
+    @Volatile private var pauseStartedElapsedMs: Long? = null
 
     private val routingListener = AudioRouting.OnRoutingChangedListener { routing ->
         val activeRecorder = routing as? AudioRecord ?: return@OnRoutingChangedListener
@@ -192,6 +196,8 @@ internal class MainaNativeAudioCapture(
         val created = createAndStartRecorder()
         running.set(true)
         paused.set(false)
+        pauseCheckpointLatch = null
+        pauseStartedElapsedMs = null
         updateRoutedDevice(created)
         appendJournal(directory, "started", mapOf(
             "meetingId" to options.meetingId,
@@ -223,8 +229,15 @@ internal class MainaNativeAudioCapture(
 
     fun pause(): Snapshot {
         if (!running.get()) return snapshot()
+        if (paused.get()) return snapshot()
+        val checkpoint = CountDownLatch(1)
+        pauseCheckpointLatch = checkpoint
+        pauseStartedElapsedMs = SystemClock.elapsedRealtime()
         paused.set(true)
         runCatching { recorder?.stop() }
+        check(checkpoint.await(PAUSE_CHECKPOINT_TIMEOUT_MS, TimeUnit.MILLISECONDS)) {
+            "Native capture did not finalize its active chunk before pause"
+        }
         currentOptions?.let { appendJournal(directoryFrom(it.directory), "paused", emptyMap()) }
         onEvent("info", "native-capture-paused", snapshot().asMap())
         publishStatus()
@@ -233,6 +246,11 @@ internal class MainaNativeAudioCapture(
 
     fun resume(): Snapshot {
         if (!running.get() || !paused.get()) return snapshot()
+        pauseStartedElapsedMs?.let { started ->
+            captureGapMs += max(0L, SystemClock.elapsedRealtime() - started)
+        }
+        pauseStartedElapsedMs = null
+        pauseCheckpointLatch = null
         paused.set(false)
         routeRefreshReason = "resume"
         routeRefreshRequested.set(true)
@@ -275,6 +293,7 @@ internal class MainaNativeAudioCapture(
                     closeChunk(activeChunk, directory, "pause")
                     activeChunk = null
                     currentBytesWritten = 0L
+                    pauseCheckpointLatch?.countDown()
                     Thread.sleep(50)
                     continue
                 }
@@ -355,6 +374,7 @@ internal class MainaNativeAudioCapture(
             fail("capture-loop-failed", cause)
         } finally {
             closeChunk(activeChunk, directory, "stop")
+            pauseCheckpointLatch?.countDown()
         }
     }
 
@@ -637,6 +657,7 @@ internal class MainaNativeAudioCapture(
         const val SYNC_INTERVAL_MS = 2_000L
         const val STATUS_PUBLISH_INTERVAL_MS = 250L
         const val STOP_JOIN_TIMEOUT_MS = 15_000L
+        const val PAUSE_CHECKPOINT_TIMEOUT_MS = 3_000L
         const val JOURNAL_NAME = "capture-journal.jsonl"
         private const val STORAGE_CHECK_INTERVAL_MS = 5_000L
         private const val MIN_CAPTURE_FREE_BYTES = 256L * 1024L * 1024L

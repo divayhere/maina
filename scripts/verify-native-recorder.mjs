@@ -19,6 +19,7 @@ const requiredFiles = [
   'android/src/main/java/com/divay/maina/recorder/MainaRecordingService.kt',
   'android/src/main/java/com/divay/maina/recorder/MainaPostProcessingService.kt',
   'android/src/main/java/com/divay/maina/recorder/MainaPostProcessingRecoveryWorker.kt',
+  'android/src/main/java/com/divay/maina/recorder/MainaPipelineWakeWorker.kt',
   'android/src/main/java/com/divay/maina/recorder/MainaPostProcessingOutbox.kt',
   'android/src/main/java/com/divay/maina/recorder/MainaQwenAsr.kt',
   'android/src/main/java/com/divay/maina/recorder/MainaVoiceActivity.kt',
@@ -66,6 +67,20 @@ for (const invariant of [
   'WINDOW_RETRY_PENDING',
 ]) {
   if (!postProcessing.includes(invariant)) throw new Error(`Post-processing reliability invariant missing: ${invariant}`);
+}
+
+const pipelineWake = readFileSync(path.join(androidRoot, 'src/main/java/com/divay/maina/recorder/MainaPipelineWakeWorker.kt'), 'utf8');
+for (const invariant of [
+  'ExistingWorkPolicy.KEEP',
+  'MAX_RUN_ATTEMPTS = 5',
+  'reactHost.start()',
+  'hasActiveReactInstance()',
+  'MainaPipelineWakeCompletion.abandon(attemptToken)',
+]) {
+  if (!pipelineWake.includes(invariant)) throw new Error(`Pipeline wake reliability invariant missing: ${invariant}`);
+}
+if (pipelineWake.includes('APPEND_OR_REPLACE') || pipelineWake.includes('HeadlessJsTaskService')) {
+  throw new Error('Pipeline wake must not append Worker chains or start a background service.');
 }
 
 const manifest = readFileSync(path.join(androidRoot, 'src/main/AndroidManifest.xml'), 'utf8');

@@ -1,6 +1,6 @@
 import { Ionicons } from '@expo/vector-icons';
 import { router, useFocusEffect } from 'expo-router';
-import { useCallback, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { FlatList, Pressable, RefreshControl, View } from 'react-native';
 
 import { listTodos, updateTodoDone, type TodoItem } from '@/data/meetings';
@@ -10,6 +10,7 @@ import { useMainaLayout } from '@/design/layout';
 import { useAppTheme } from '@/design/theme';
 import { space } from '@/design/tokens';
 import { useMeetings } from '@/state/meetingsStore';
+import { subscribeMeetingPipelineChanges } from '@/services/meetingPipelineSignals';
 
 function TodoRow({
   todo,
@@ -89,6 +90,10 @@ export default function TodosScreen() {
       void load();
     }, [load]),
   );
+
+  useEffect(() => subscribeMeetingPipelineChanges(() => {
+    void load();
+  }), [load]);
 
   const [openTodos, doneTodos] = useMemo(
     () => [todos.filter((todo) => !todo.done), todos.filter((todo) => todo.done)],

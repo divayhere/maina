@@ -52,10 +52,19 @@ import { installWatchdog } from '@/services/watchdog';
 import { clearLegacyDirectAiConfiguration } from '@/services/config';
 import {
   registerBackgroundPipelineRecovery,
-  runPipelineRecoveryCycle,
+  runDurablePipelineWake,
 } from '@/services/backgroundPipeline';
+import {
+  registerNativePipelineWakeScheduler,
+  requestDurablePipelineWake,
+} from '@/services/pipelineWakeScheduler';
+import { scheduleNativePipelineWake } from '@/hardware/pipelineWake';
 
 initSentry();
+
+export const unstable_settings = {
+  initialRouteName: '(tabs)',
+};
 
 function RootLayout() {
   const { theme } = useAppTheme();
@@ -240,14 +249,27 @@ function RootLayout() {
 
   useEffect(() => {
     if (!ready) return;
+    const unregisterNativeScheduler = registerNativePipelineWakeScheduler(scheduleNativePipelineWake);
     let pipelineInFlight: Promise<void> | null = null;
     let packetPollInFlight: Promise<void> | null = null;
     let packetPollTimer: ReturnType<typeof setTimeout> | null = null;
+    let pipelineSignalSequence = 0;
     let stopped = false;
-    const schedulePipelineSync = () => {
+    const schedulePipelineSync = (
+      reason: 'foreground' | 'connectivity_restored' | 'native_progress',
+      connectivityRestored = false,
+    ) => {
       if (pipelineInFlight) return pipelineInFlight;
       let work: Promise<void>;
-      work = runPipelineRecoveryCycle().then(() => undefined).finally(() => {
+      work = requestDurablePipelineWake({
+        reason,
+        requestKey: `${reason}:${++pipelineSignalSequence}`,
+        connectivityRestored,
+        scheduleNative: reason === 'connectivity_restored',
+      })
+        .then(({ generation }) => runDurablePipelineWake({ expectedGeneration: generation }))
+        .then(() => undefined)
+        .finally(() => {
         if (pipelineInFlight === work) pipelineInFlight = null;
       });
       pipelineInFlight = work;
@@ -280,24 +302,27 @@ function RootLayout() {
       packetPollInFlight = work;
       return work;
     };
-    const runPipelineFromSignal = () => {
-      void schedulePipelineSync()
+    const runPipelineFromSignal = (
+      reason: 'foreground' | 'connectivity_restored' | 'native_progress',
+      connectivityRestored = false,
+    ) => {
+      void schedulePipelineSync(reason, connectivityRestored)
         .then(() => schedulePacketPoll())
         .catch((cause) => {
           log.warn('meetings', 'pipeline reconciliation failed', { err: String(cause) });
         });
     };
-    runPipelineFromSignal();
+    runPipelineFromSignal('foreground');
     const subscription = AppState.addEventListener('change', (state) => {
       if (state !== 'active') return;
-      runPipelineFromSignal();
+      runPipelineFromSignal('foreground');
     });
     let wasConnected: boolean | null = null;
     const unsubscribeNetwork = NetInfo.addEventListener((state) => {
       const connected = state.isConnected === true && state.isInternetReachable !== false;
       if (connected && wasConnected === false) {
         log.info('background-pipeline', 'connectivity restored; draining durable pipeline');
-        runPipelineFromSignal();
+        runPipelineFromSignal('connectivity_restored', true);
       }
       wasConnected = connected;
     });
@@ -306,7 +331,7 @@ function RootLayout() {
         meetingId: event.meetingId,
         state: event.state,
       });
-      runPipelineFromSignal();
+      runPipelineFromSignal('native_progress');
     });
     const unsubscribePipeline = subscribeMeetingPipelineChanges((meetingId) => {
       log.info('summary', 'meeting pipeline state changed; waking poller', { meetingId });
@@ -322,6 +347,7 @@ function RootLayout() {
       unsubscribeNetwork();
       unsubscribeNative();
       unsubscribePipeline();
+      unregisterNativeScheduler();
       if (packetPollTimer) clearTimeout(packetPollTimer);
     };
   }, [ready]);
@@ -355,6 +381,7 @@ function RootLayout() {
           ) : ready ? (
             <Stack screenOptions={{ headerShown: false, contentStyle: { backgroundColor: theme.bg } }}>
               <Stack.Screen name="(tabs)" />
+              <Stack.Screen name="meeting" />
               <Stack.Screen name="record" options={{ presentation: 'modal' }} />
             </Stack>
           ) : (
