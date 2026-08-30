@@ -1,5 +1,9 @@
 # Test 3, Test 5, navigation and refresh — pre-build review round 1
 
+> **Superseded:** Round 2 adversarial review is authoritative:
+> `docs/TEST3_TEST5_NAVIGATION_PREBUILD_REVIEW_ROUND2_2026-08-30.md`.
+> Do not implement or build from this Round 1 plan.
+
 Date: 2026-08-30  
 Decision: **NO-GO for product edits/build until Maina Admin approves this plan**  
 Scope: one data-preserving Android/iOS reliability increment; no Backend/Web change
