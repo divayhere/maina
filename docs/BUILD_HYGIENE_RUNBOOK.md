@@ -46,11 +46,17 @@ The scripts source `scripts/maina-env.sh`, which requires:
 - Node 24
 - JDK 17
 - Android SDK platform-tools
-- the wired Pixel serial configured in `MAINA_ADB_SERIAL`
+- the pinned Pixel Wi-Fi ADB endpoint in `MAINA_ADB_SERIAL` and matching
+  hardware serial in `MAINA_DEVICE_SERIAL`
 - external Gradle cache/output directories configured by `MAINA_BUILD_ROOT`
 
-Use `scripts/adb-usb.sh` rather than bare `adb` so a Wi-Fi ADB identity cannot
-accidentally be selected.
+Use the identity-pinned scripts rather than bare `adb`. For an approved
+in-place update, first run `npm run android:install-preserving --
+/absolute/path.apk --dry-run`, then invoke the same command without
+`--dry-run` exactly once. If the command yields while `adb install` is still
+running, resume or poll that existing execution session; never reinvoke the
+installer. Its per-device/package/candidate lock remains in place when the
+outcome is unknown and requires explicit reconciliation before another update.
 
 ## Native generation contract
 
