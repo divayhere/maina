@@ -1,7 +1,7 @@
 /* eslint-disable import/first -- Vitest mocks must be declared before importing the module under test. */
 import { describe, expect, it, vi } from 'vitest';
 
-const mocks = vi.hoisted(() => ({ mainaCloudFetch: vi.fn() }));
+const mocks = vi.hoisted(() => ({ mainaCloudRequestJson: vi.fn() }));
 
 vi.mock('./mainaCloudSession', () => ({
   MainaCloudApiError: class MainaCloudApiError extends Error {
@@ -9,14 +9,14 @@ vi.mock('./mainaCloudSession', () => ({
       super(message);
     }
   },
-  mainaCloudFetch: mocks.mainaCloudFetch,
+  mainaCloudRequestJson: mocks.mainaCloudRequestJson,
 }));
 
 import { MkcMemoryReadError, readMkcMemory } from './mkc-memory-client';
 
 describe('MKC Memory read adapter', () => {
   it('uses a caller-supplied decoder and returns verified data', async () => {
-    mocks.mainaCloudFetch.mockResolvedValue(new Response(JSON.stringify({ opaque: true }), { status: 200 }));
+    mocks.mainaCloudRequestJson.mockResolvedValue({ status: 200, ok: true, data: { opaque: true } });
     await expect(readMkcMemory({
       path: '/v1/future-versioned-resource',
       decode: () => ({
@@ -30,7 +30,7 @@ describe('MKC Memory read adapter', () => {
   });
 
   it('blocks mismatched integrity and token-bearing or absolute paths', async () => {
-    mocks.mainaCloudFetch.mockResolvedValue(new Response('{}', { status: 200 }));
+    mocks.mainaCloudRequestJson.mockResolvedValue({ status: 200, ok: true, data: {} });
     await expect(readMkcMemory({
       path: '/v1/future-versioned-resource',
       decode: () => ({

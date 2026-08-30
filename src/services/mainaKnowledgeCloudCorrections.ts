@@ -7,36 +7,25 @@ import {
   listKnowledgeCloudCorrectionsNeedingSync,
   listKnowledgeCloudCorrections,
   listMeetingKnowledgeCloudCorrectionsNeedingSync,
+  persistKnowledgeCloudCorrectionRetry,
   updateKnowledgeCloudCorrection,
   type KnowledgeCloudCorrection,
 } from '@/data/meetings';
 import { getMainaKnowledgeCloudSettings } from '@/services/config';
 import { log } from '@/services/logger';
-import { clearMainaCloudSession } from '@/services/mainaCloudSession';
-import { safeCloudFailureMessage } from '@/core/pipeline/cloudFailure';
+import { clearMainaCloudSession, mainaCloudRequestJson } from '@/services/mainaCloudSession';
+import { classifyTransportCause, safeCloudFailureMessage } from '@/core/pipeline/cloudFailure';
 import { armPipelineNetworkRecovery } from '@/services/pipelineWakeScheduler';
+import { nextCloudRetry } from '@/services/cloudRetryPolicy';
 import {
   buildMainaKnowledgeCloudCorrectionPackage,
   packetCorrectionSnapshots,
   sourceFieldFingerprint,
   type MeetingPacketCorrectionValues,
 } from './mainaKnowledgeCloudCorrectionsCore';
-import {
-  classifyMainaKnowledgeCloudResponse,
-  normalizeMainaKnowledgeCloudBaseUrl,
-} from './mainaKnowledgeCloudCore';
+import { classifyMainaKnowledgeCloudResponse } from './mainaKnowledgeCloudCore';
 
 const inflight = new Map<string, Promise<void>>();
-
-async function decodeResponseBody(response: Response) {
-  const text = await response.text();
-  if (!text.trim()) return null;
-  try {
-    return JSON.parse(text) as unknown;
-  } catch {
-    return { error: { message: text } };
-  }
-}
 
 async function syncCorrection(correctionKey: string): Promise<void> {
   const settings = await getMainaKnowledgeCloudSettings();
@@ -50,6 +39,10 @@ async function syncCorrection(correctionKey: string): Promise<void> {
   if (correction.syncStatus === 'sync_failed_auth') return;
   if (correction.syncStatus === 'sync_failed_conflict') return;
   if (correction.syncStatus === 'sync_failed_validation') return;
+  if ((correction.syncStatus === 'sync_failed_retryable'
+      || correction.syncStatus === 'sync_blocked_budget')
+    && correction.nextRetryAt != null
+    && correction.nextRetryAt > Date.now()) return;
 
   await armPipelineNetworkRecovery();
 
@@ -60,20 +53,16 @@ async function syncCorrection(correctionKey: string): Promise<void> {
   });
 
   try {
-    const response = await fetch(
-      `${normalizeMainaKnowledgeCloudBaseUrl(settings.baseUrl)}/v1/corrections`,
-      {
+    const response = await mainaCloudRequestJson('/v1/corrections', {
         method: 'POST',
         headers: {
-          Authorization: `Bearer ${settings.token}`,
           'Content-Type': 'application/json',
         },
         body: correction.payloadJson,
-      },
-    );
+      }, { acceptHttpErrors: true });
     const result = classifyMainaKnowledgeCloudResponse({
       status: response.status,
-      body: await decodeResponseBody(response),
+      body: response.data,
     });
 
     if (result.outcome === 'success') {
@@ -82,6 +71,10 @@ async function syncCorrection(correctionKey: string): Promise<void> {
         canonicalSha256: result.canonicalSha256 ?? null,
         syncedAt: Date.now(),
         error: null,
+        failureClass: null,
+        retryCount: 0,
+        lastRetryAt: null,
+        nextRetryAt: null,
       });
       log.info('maina-cloud-correction', 'meeting knowledge correction synced', {
         meetingId: correction.meetingId,
@@ -108,18 +101,40 @@ async function syncCorrection(correctionKey: string): Promise<void> {
       : syncStatus === 'sync_failed_retryable' || syncStatus === 'sync_blocked_budget'
         ? safeCloudFailureMessage('backend_retryable')
         : safeCloudFailureMessage('backend_terminal');
-    await updateKnowledgeCloudCorrection(correctionKey, {
-      syncStatus,
-      error: safeError,
-    });
+    if (syncStatus === 'sync_failed_retryable' || syncStatus === 'sync_blocked_budget') {
+      const retry = nextCloudRetry({ attemptCount: correction.retryCount ?? 0 });
+      await persistKnowledgeCloudCorrectionRetry({
+        correctionKey,
+        syncStatus,
+        retryCount: retry.attemptCount,
+        lastRetryAt: retry.lastRetryAt,
+        nextRetryAt: retry.nextRetryAt,
+        failureClass: 'backend_retryable',
+        visibleError: safeError,
+      });
+    } else {
+      await updateKnowledgeCloudCorrection(correctionKey, {
+        syncStatus,
+        error: safeError,
+        failureClass: syncStatus === 'sync_failed_auth' ? 'auth' : 'backend_terminal',
+      });
+    }
   } catch (cause) {
-    await updateKnowledgeCloudCorrection(correctionKey, {
+    const failureClass = classifyTransportCause(cause);
+    const retry = nextCloudRetry({ attemptCount: correction.retryCount ?? 0 });
+    await persistKnowledgeCloudCorrectionRetry({
+      correctionKey,
       syncStatus: 'sync_failed_retryable',
-      error: safeCloudFailureMessage('transport_unknown'),
+      retryCount: retry.attemptCount,
+      lastRetryAt: retry.lastRetryAt,
+      nextRetryAt: retry.nextRetryAt,
+      failureClass,
+      visibleError: safeCloudFailureMessage(failureClass),
     });
     log.warn('maina-cloud-correction', 'meeting knowledge correction sync failed', {
       meetingId: correction.meetingId,
       correctionKey,
+      failureClass,
       causeName: cause instanceof Error ? cause.name : typeof cause,
     });
   }
@@ -237,6 +252,7 @@ export async function requeueMainaKnowledgeCloudCorrectionsForMeeting(
     await updateKnowledgeCloudCorrection(correction.correctionKey, {
       syncStatus: 'sync_queued',
       error: null,
+      nextRetryAt: null,
     });
   }
   await reconcileMainaKnowledgeCloudCorrectionsForMeeting(meetingId);
@@ -251,17 +267,22 @@ export async function reconcilePendingMainaKnowledgeCloudCorrections(): Promise<
 
 export async function queueEligibleMainaKnowledgeCloudCorrections(options?: {
   includeAuthFailures?: boolean;
+  forceRetry?: boolean;
 }): Promise<number> {
   const settings = await getMainaKnowledgeCloudSettings();
   if (!settings.enabled || !settings.baseUrl.trim() || !settings.token.trim()) return 0;
   const corrections = await listKnowledgeCloudCorrectionsEligibleForQueue(options);
-  for (const correction of corrections) {
+  const due = options?.forceRetry === true
+    ? corrections
+    : corrections.filter((correction) => correction.nextRetryAt == null || correction.nextRetryAt <= Date.now());
+  for (const correction of due) {
     await updateKnowledgeCloudCorrection(correction.correctionKey, {
       syncStatus: 'sync_queued',
       error: null,
+      nextRetryAt: options?.forceRetry === true ? null : correction.nextRetryAt,
     });
   }
-  return syncSequentially(corrections.map((correction) => ({
+  return syncSequentially(due.map((correction) => ({
     ...correction,
     syncStatus: 'sync_queued',
     error: null,

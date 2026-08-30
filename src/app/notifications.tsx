@@ -57,9 +57,12 @@ export default function NotificationsScreen() {
         const started = await retryNativeMeetingTranscription(item.meetingId);
         if (!started) router.push(item.href as never);
       } else if (item.action === 'retry_notes') {
-        await runMeetingPacketGeneration(item.meetingId);
+        await runMeetingPacketGeneration(item.meetingId, { forceRetry: true });
       } else if (item.action === 'retry_cloud') {
-        await maybeQueueMainaKnowledgeCloudSync(item.meetingId, { includeAuthFailures: true });
+        await maybeQueueMainaKnowledgeCloudSync(item.meetingId, {
+          includeAuthFailures: true,
+          forceRetry: true,
+        });
       }
       await refresh();
     } finally {

@@ -2,7 +2,8 @@
  * Meetings repository — the only place SQL for meetings lives. UI and state
  * talk to these functions, never to the DB directly (swap-seam: storage).
  */
-import { getDb } from './db';
+import { getDb, withDurableWakeTransaction } from './db';
+import { persistDeferredPipelineWakeInTransaction } from './pipelineWake';
 import { log } from '../services/logger';
 import { splitTranscriptChunks, transcriptWordCount } from '../core/transcription/transcript';
 import { normalizeNativeBlockTimeline } from '../core/transcription/nativeBlockTiming';
@@ -103,6 +104,11 @@ export interface KnowledgeCloudCorrection {
   lastAttemptAt?: number | null;
   syncedAt?: number | null;
   error?: string | null;
+  failureClass?: CloudFailureClass | null;
+  retryCount: number;
+  lastRetryAt?: number | null;
+  nextRetryAt?: number | null;
+  lastWakeEpoch: number;
   createdAt: number;
   updatedAt: number;
 }
@@ -122,6 +128,11 @@ interface KnowledgeCloudCorrectionRow {
   last_attempt_at: number | null;
   synced_at: number | null;
   error: string | null;
+  failure_class: CloudFailureClass | null;
+  retry_count: number;
+  last_retry_at: number | null;
+  next_retry_at: number | null;
+  last_wake_epoch: number;
   created_at: number;
   updated_at: number;
 }
@@ -141,6 +152,11 @@ const toKnowledgeCloudCorrection = (row: KnowledgeCloudCorrectionRow): Knowledge
   lastAttemptAt: row.last_attempt_at,
   syncedAt: row.synced_at,
   error: row.error,
+  failureClass: row.failure_class,
+  retryCount: Math.max(0, row.retry_count ?? 0),
+  lastRetryAt: row.last_retry_at,
+  nextRetryAt: row.next_retry_at,
+  lastWakeEpoch: Math.max(0, row.last_wake_epoch ?? 0),
   createdAt: row.created_at,
   updatedAt: row.updated_at,
 });
@@ -590,16 +606,28 @@ export async function getNextMeetingPacketRetryAt(): Promise<number | null> {
   return row?.next_retry_at ?? null;
 }
 
-export async function listMeetingsEligibleForSummaryQueue(): Promise<Meeting[]> {
+export async function listMeetingsEligibleForSummaryQueue(options?: {
+  forceRetry?: boolean;
+  now?: number;
+}): Promise<Meeting[]> {
   const db = await getDb();
+  const now = options?.now ?? Date.now();
+  const forceRetry = options?.forceRetry === true ? 1 : 0;
   const rows = await db.getAllAsync<Row>(
     `SELECT m.*,
             (SELECT COUNT(*) FROM todo_items t WHERE t.meeting_id = m.id AND t.done = 0) AS open_todo_count,
             (SELECT COUNT(*) FROM todo_items t WHERE t.meeting_id = m.id) AS total_todo_count
      FROM meetings m
      WHERE m.status IN ('transcribed', 'transcript_partial', 'summarizing', 'summarized')
-       AND m.summary_status IN ('idle', 'failed', 'queued', 'running', 'retryable')
+       AND (
+         m.summary_status IN ('idle', 'failed', 'queued', 'running')
+         OR (
+           m.summary_status = 'retryable'
+           AND (? = 1 OR m.cloud_notes_next_retry_at IS NULL OR m.cloud_notes_next_retry_at <= ?)
+         )
+       )
      ORDER BY m.started_at DESC`,
+    [forceRetry, now],
   );
   return rows.map(toMeeting);
 }
@@ -626,8 +654,11 @@ export async function listMeetingsEligibleForKnowledgeCloudQueue(): Promise<Meet
 
 export async function listMeetingsEligibleForKnowledgeCloudQueueWithOptions(options?: {
   includeAuthFailures?: boolean;
+  forceRetry?: boolean;
+  now?: number;
 }): Promise<Meeting[]> {
   const db = await getDb();
+  const now = options?.now ?? Date.now();
   const eligibleStatuses = options?.includeAuthFailures
     ? `'local_only', 'sync_failed_auth', 'sync_failed_retryable', 'sync_blocked_budget'`
     : `'local_only', 'sync_failed_retryable', 'sync_blocked_budget'`;
@@ -639,7 +670,14 @@ export async function listMeetingsEligibleForKnowledgeCloudQueueWithOptions(opti
      WHERE m.status IN ('transcribed', 'summarized')
        AND m.summary_status NOT IN ('queued', 'running')
        AND m.knowledge_cloud_sync_status IN (${eligibleStatuses})
+       AND (
+         ? = 1
+         OR m.knowledge_cloud_sync_status = 'local_only'
+         OR m.knowledge_cloud_next_retry_at IS NULL
+         OR m.knowledge_cloud_next_retry_at <= ?
+       )
      ORDER BY m.started_at DESC`,
+    [options?.forceRetry === true ? 1 : 0, now],
   );
   return rows.map(toMeeting);
 }
@@ -719,21 +757,37 @@ export async function listKnowledgeCloudCorrections(
   return rows.map(toKnowledgeCloudCorrection);
 }
 
-export async function listKnowledgeCloudCorrectionsNeedingSync(): Promise<KnowledgeCloudCorrection[]> {
+export async function listKnowledgeCloudCorrectionsNeedingSync(
+  now = Date.now(),
+): Promise<KnowledgeCloudCorrection[]> {
   const db = await getDb();
   const rows = await db.getAllAsync<KnowledgeCloudCorrectionRow>(
     `SELECT c.*
      FROM knowledge_cloud_corrections c
      JOIN meetings m ON m.id = c.meeting_id
      WHERE m.knowledge_cloud_sync_status = 'sync_succeeded'
-       AND c.sync_status IN ('sync_queued', 'syncing', 'sync_failed_retryable', 'sync_blocked_budget')
+       AND (
+         c.sync_status IN ('sync_queued', 'syncing')
+         OR (c.sync_status IN ('sync_failed_retryable', 'sync_blocked_budget')
+             AND (c.next_retry_at IS NULL OR c.next_retry_at <= ?))
+       )
+       AND (
+         c.supersedes_correction_key IS NULL
+         OR EXISTS (
+           SELECT 1 FROM knowledge_cloud_corrections predecessor
+           WHERE predecessor.correction_key = c.supersedes_correction_key
+             AND predecessor.sync_status = 'sync_succeeded'
+         )
+       )
      ORDER BY c.meeting_id ASC, c.field_path ASC, c.version_number ASC`,
+    [now],
   );
   return rows.map(toKnowledgeCloudCorrection);
 }
 
 export async function listMeetingKnowledgeCloudCorrectionsNeedingSync(
   meetingId: string,
+  now = Date.now(),
 ): Promise<KnowledgeCloudCorrection[]> {
   const db = await getDb();
   const rows = await db.getAllAsync<KnowledgeCloudCorrectionRow>(
@@ -742,17 +796,32 @@ export async function listMeetingKnowledgeCloudCorrectionsNeedingSync(
      JOIN meetings m ON m.id = c.meeting_id
      WHERE c.meeting_id = ?
        AND m.knowledge_cloud_sync_status = 'sync_succeeded'
-       AND c.sync_status IN ('sync_queued', 'syncing', 'sync_failed_retryable', 'sync_blocked_budget')
+       AND (
+         c.sync_status IN ('sync_queued', 'syncing')
+         OR (c.sync_status IN ('sync_failed_retryable', 'sync_blocked_budget')
+             AND (c.next_retry_at IS NULL OR c.next_retry_at <= ?))
+       )
+       AND (
+         c.supersedes_correction_key IS NULL
+         OR EXISTS (
+           SELECT 1 FROM knowledge_cloud_corrections predecessor
+           WHERE predecessor.correction_key = c.supersedes_correction_key
+             AND predecessor.sync_status = 'sync_succeeded'
+         )
+       )
      ORDER BY c.field_path ASC, c.version_number ASC`,
-    [meetingId],
+    [meetingId, now],
   );
   return rows.map(toKnowledgeCloudCorrection);
 }
 
 export async function listKnowledgeCloudCorrectionsEligibleForQueue(options?: {
   includeAuthFailures?: boolean;
+  forceRetry?: boolean;
+  now?: number;
 }): Promise<KnowledgeCloudCorrection[]> {
   const db = await getDb();
+  const now = options?.now ?? Date.now();
   const eligibleStatuses = options?.includeAuthFailures
     ? `'sync_failed_auth', 'sync_failed_retryable', 'sync_blocked_budget'`
     : `'sync_failed_retryable', 'sync_blocked_budget'`;
@@ -762,7 +831,17 @@ export async function listKnowledgeCloudCorrectionsEligibleForQueue(options?: {
      JOIN meetings m ON m.id = c.meeting_id
      WHERE m.knowledge_cloud_sync_status = 'sync_succeeded'
        AND c.sync_status IN (${eligibleStatuses})
+       AND (? = 1 OR c.next_retry_at IS NULL OR c.next_retry_at <= ?)
+       AND (
+         c.supersedes_correction_key IS NULL
+         OR EXISTS (
+           SELECT 1 FROM knowledge_cloud_corrections predecessor
+           WHERE predecessor.correction_key = c.supersedes_correction_key
+             AND predecessor.sync_status = 'sync_succeeded'
+         )
+       )
      ORDER BY c.meeting_id ASC, c.field_path ASC, c.version_number ASC`,
+    [options?.forceRetry === true ? 1 : 0, now],
   );
   return rows.map(toKnowledgeCloudCorrection);
 }
@@ -775,6 +854,11 @@ export async function updateKnowledgeCloudCorrection(
     | 'lastAttemptAt'
     | 'syncedAt'
     | 'error'
+    | 'failureClass'
+    | 'retryCount'
+    | 'lastRetryAt'
+    | 'nextRetryAt'
+    | 'lastWakeEpoch'
   >>,
 ): Promise<void> {
   const map: Record<string, string> = {
@@ -783,6 +867,11 @@ export async function updateKnowledgeCloudCorrection(
     lastAttemptAt: 'last_attempt_at',
     syncedAt: 'synced_at',
     error: 'error',
+    failureClass: 'failure_class',
+    retryCount: 'retry_count',
+    lastRetryAt: 'last_retry_at',
+    nextRetryAt: 'next_retry_at',
+    lastWakeEpoch: 'last_wake_epoch',
   };
   const columns: string[] = [];
   const values: (string | number | null)[] = [];
@@ -800,6 +889,123 @@ export async function updateKnowledgeCloudCorrection(
     `UPDATE knowledge_cloud_corrections SET ${columns.join(', ')} WHERE correction_key = ?`,
     values,
   );
+}
+
+/** Persist packet retry truth and its future wake owner atomically. */
+export async function persistMeetingPacketRetry(input: {
+  meetingId: string;
+  meetingStatus: MeetingStatus;
+  jobId?: string | null;
+  providerId?: string | null;
+  model?: string | null;
+  retryCount: number;
+  lastRetryAt: number;
+  nextRetryAt: number;
+  failureClass: CloudFailureClass;
+  failureOperation: CloudNotesFailureOperation;
+  visibleError: string;
+}): Promise<void> {
+  await withDurableWakeTransaction(async (transaction) => {
+    await transaction.runAsync(
+      `UPDATE meetings SET status = ?, summary_status = 'retryable',
+        cloud_notes_job_id = COALESCE(?, cloud_notes_job_id),
+        cloud_notes_last_polled_at = ?, cloud_notes_retry_count = ?,
+        cloud_notes_last_retry_at = ?, cloud_notes_next_retry_at = ?,
+        summary_provider_id = COALESCE(?, summary_provider_id),
+        summary_model = COALESCE(?, summary_model),
+        cloud_notes_failure_class = ?, cloud_notes_failure_operation = ?,
+        last_error = ?, updated_at = ? WHERE id = ?`,
+      [
+        input.meetingStatus,
+        input.jobId ?? null,
+        input.lastRetryAt,
+        input.retryCount,
+        input.lastRetryAt,
+        input.nextRetryAt,
+        input.providerId ?? null,
+        input.model ?? null,
+        input.failureClass,
+        input.failureOperation,
+        input.visibleError,
+        input.lastRetryAt,
+        input.meetingId,
+      ],
+    );
+    await persistDeferredPipelineWakeInTransaction(transaction, {
+      notBeforeAt: input.nextRetryAt,
+      requiresNetwork: true,
+      now: input.lastRetryAt,
+    });
+  });
+}
+
+/** Persist immutable-source retry truth and its future wake owner atomically. */
+export async function persistKnowledgeCloudSourceRetry(input: {
+  meetingId: string;
+  syncStatus: 'sync_failed_retryable' | 'sync_blocked_budget';
+  retryCount: number;
+  lastRetryAt: number;
+  nextRetryAt: number;
+  failureClass: CloudFailureClass;
+  visibleError: string;
+}): Promise<void> {
+  await withDurableWakeTransaction(async (transaction) => {
+    await transaction.runAsync(
+      `UPDATE meetings SET knowledge_cloud_sync_status = ?, knowledge_cloud_error = ?,
+        knowledge_cloud_failure_class = ?, knowledge_cloud_retry_count = ?,
+        knowledge_cloud_last_attempt_at = ?, knowledge_cloud_next_retry_at = ?,
+        updated_at = ? WHERE id = ?`,
+      [
+        input.syncStatus,
+        input.visibleError,
+        input.failureClass,
+        input.retryCount,
+        input.lastRetryAt,
+        input.nextRetryAt,
+        input.lastRetryAt,
+        input.meetingId,
+      ],
+    );
+    await persistDeferredPipelineWakeInTransaction(transaction, {
+      notBeforeAt: input.nextRetryAt,
+      requiresNetwork: true,
+      now: input.lastRetryAt,
+    });
+  });
+}
+
+/** Persist correction retry/backoff without mutating its immutable lineage. */
+export async function persistKnowledgeCloudCorrectionRetry(input: {
+  correctionKey: string;
+  syncStatus: 'sync_failed_retryable' | 'sync_blocked_budget';
+  retryCount: number;
+  lastRetryAt: number;
+  nextRetryAt: number;
+  failureClass: CloudFailureClass;
+  visibleError: string;
+}): Promise<void> {
+  await withDurableWakeTransaction(async (transaction) => {
+    await transaction.runAsync(
+      `UPDATE knowledge_cloud_corrections SET sync_status = ?, error = ?,
+        failure_class = ?, retry_count = ?, last_retry_at = ?,
+        next_retry_at = ?, updated_at = ? WHERE correction_key = ?`,
+      [
+        input.syncStatus,
+        input.visibleError,
+        input.failureClass,
+        input.retryCount,
+        input.lastRetryAt,
+        input.nextRetryAt,
+        input.lastRetryAt,
+        input.correctionKey,
+      ],
+    );
+    await persistDeferredPipelineWakeInTransaction(transaction, {
+      notBeforeAt: input.nextRetryAt,
+      requiresNetwork: true,
+      now: input.lastRetryAt,
+    });
+  });
 }
 
 export async function updateMeeting(id: string, patch: Partial<Meeting>): Promise<void> {

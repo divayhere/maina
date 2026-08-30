@@ -39,7 +39,7 @@ vi.mock('./mainaCloudSession', () => {
   return {
     MainaCloudApiError,
     getMainaCloudSession: mocks.getSession,
-    mainaCloudFetch: mocks.fetch,
+    mainaCloudRequestJson: mocks.fetch,
   };
 });
 
@@ -73,7 +73,7 @@ describe('MKC Release A Meetings client', () => {
   });
 
   it('strictly decodes and owner-scopes a successful network result before caching', async () => {
-    mocks.fetch.mockResolvedValue({ json: async () => meetingLibraryFixture });
+    mocks.fetch.mockResolvedValue({ status: 200, ok: true, data: meetingLibraryFixture });
     await expect(listCloudMeetings({ enabled: true, query: { sort: 'newest' } })).resolves.toEqual({
       data: meetingLibraryFixture,
       source: 'network',
@@ -88,7 +88,7 @@ describe('MKC Release A Meetings client', () => {
   });
 
   it('does not fail a verified network read when the rebuildable cache cannot be written', async () => {
-    mocks.fetch.mockResolvedValue({ json: async () => meetingLibraryFixture });
+    mocks.fetch.mockResolvedValue({ status: 200, ok: true, data: meetingLibraryFixture });
     mocks.putCache.mockRejectedValue(new Error('synthetic cache write failure'));
     await expect(listCloudMeetings({ enabled: true })).resolves.toEqual({
       data: meetingLibraryFixture,
@@ -99,8 +99,8 @@ describe('MKC Release A Meetings client', () => {
 
   it('binds detail and transcript continuation to the requested source and frozen transcript checksum', async () => {
     mocks.fetch
-      .mockResolvedValueOnce({ json: async () => meetingDetailFixture })
-      .mockResolvedValueOnce({ json: async () => meetingTranscriptFixture });
+      .mockResolvedValueOnce({ status: 200, ok: true, data: meetingDetailFixture })
+      .mockResolvedValueOnce({ status: 200, ok: true, data: meetingTranscriptFixture });
     await expect(getCloudMeetingDetail({
       sourceKey: meetingDetailFixture.source_key,
       enabled: true,
@@ -119,7 +119,7 @@ describe('MKC Release A Meetings client', () => {
   });
 
   it('rejects a transcript that changed after detail was opened', async () => {
-    mocks.fetch.mockResolvedValue({ json: async () => meetingTranscriptFixture });
+    mocks.fetch.mockResolvedValue({ status: 200, ok: true, data: meetingTranscriptFixture });
     await expect(getCloudMeetingTranscriptPage({
       sourceKey: meetingDetailFixture.source_key,
       transcriptSha256: 'b'.repeat(64),
@@ -155,7 +155,11 @@ describe('MKC Release A Meetings client', () => {
     );
     expect(mocks.getCache).not.toHaveBeenCalled();
 
-    mocks.fetch.mockResolvedValueOnce({ json: async () => ({ ...meetingLibraryFixture, schema_version: 'wrong' }) });
+    mocks.fetch.mockResolvedValueOnce({
+      status: 200,
+      ok: true,
+      data: { ...meetingLibraryFixture, schema_version: 'wrong' },
+    });
     await expect(listCloudMeetings({ enabled: true })).rejects.toEqual(
       expect.objectContaining({ kind: 'integrity', retryable: false } satisfies Partial<MkcMemoryReadError>),
     );
@@ -173,9 +177,9 @@ describe('MKC Release A Meetings client', () => {
 
   it('opens frozen Recall then binds chapter and source reads to its immutable identity', async () => {
     mocks.fetch
-      .mockResolvedValueOnce({ json: async () => frozenRecallOpenFixture })
-      .mockResolvedValueOnce({ json: async () => frozenRecallChapterFixture })
-      .mockResolvedValueOnce({ json: async () => frozenRecallSourceFixture });
+      .mockResolvedValueOnce({ status: 200, ok: true, data: frozenRecallOpenFixture })
+      .mockResolvedValueOnce({ status: 200, ok: true, data: frozenRecallChapterFixture })
+      .mockResolvedValueOnce({ status: 200, ok: true, data: frozenRecallSourceFixture });
     await expect(openFrozenRecall({
       searchId: frozenRecallOpenFixture.search_id,
       enabled: true,

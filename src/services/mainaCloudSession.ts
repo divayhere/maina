@@ -1,17 +1,20 @@
 import * as SecureStore from 'expo-secure-store';
 
 import { deleteSetting } from '@/data/settings';
-import type { CloudFailureClass } from '@/data/meetings';
 import {
   classifyHttpFailure,
-  classifyTransportCause,
   safeCloudFailureMessage,
 } from '@/core/pipeline/cloudFailure';
-import { log } from '@/services/logger';
 import { clearMkcMemoryCacheForOwner } from '@/services/mkc-memory-cache';
+import { log } from '@/services/logger';
+import {
+  MainaCloudApiError,
+  rejectedMainaCloudResponse,
+  requestMainaCloudJson,
+  type MainaCloudJsonResponse,
+} from '@/services/mainaCloudTransport';
 
 const SESSION_KEY = 'maina_cloud_session_v1';
-const REQUEST_TIMEOUT_MS = 20_000;
 const MAINAKC_BASE_URL = process.env.EXPO_PUBLIC_MKC_BASE_URL?.trim().replace(/\/+$/, '')
   || 'https://mkc-backend.maina-knowledge-cloud.workers.dev';
 
@@ -42,19 +45,7 @@ export function formatMainaCloudPairingCode(value: string) {
   return value;
 }
 
-export class MainaCloudApiError extends Error {
-  constructor(
-    message: string,
-    readonly status: number,
-    readonly code?: string,
-    readonly failureClass: CloudFailureClass = status > 0
-      ? classifyHttpFailure(status, code)
-      : 'transport_unknown',
-  ) {
-    super(message);
-    this.name = 'MainaCloudApiError';
-  }
-}
+export { MainaCloudApiError } from '@/services/mainaCloudTransport';
 
 function apiBaseUrl() {
   return MAINAKC_BASE_URL;
@@ -86,35 +77,12 @@ function isExpired(expiresAt?: string | null) {
   return Number.isFinite(value) && value <= Date.now() + 30_000;
 }
 
-async function readJson(response: Response): Promise<unknown> {
-  const text = await response.text();
-  if (!text.trim()) return null;
-  try {
-    return JSON.parse(text) as unknown;
-  } catch {
-    return { error: { message: text } };
-  }
-}
-
 function apiMessage(body: unknown, fallback: string) {
   const candidate = body as { error?: { code?: unknown; message?: unknown } } | null;
   return {
     code: typeof candidate?.error?.code === 'string' ? candidate.error.code : undefined,
     message: typeof candidate?.error?.message === 'string' ? candidate.error.message : fallback,
   };
-}
-
-function safeTransportError(cause: unknown): MainaCloudApiError {
-  if (cause instanceof MainaCloudApiError) return cause;
-  const failureClass: CloudFailureClass = cause instanceof Error && cause.name === 'AbortError'
-    ? 'timeout'
-    : classifyTransportCause(cause);
-  return new MainaCloudApiError(
-    safeCloudFailureMessage(failureClass),
-    0,
-    failureClass === 'timeout' ? 'network_timeout' : 'network_error',
-    failureClass,
-  );
 }
 
 export async function getMainaCloudSession(): Promise<MainaCloudSession | null> {
@@ -154,145 +122,112 @@ export async function clearMainaCloudSession(): Promise<void> {
   }
 }
 
-export async function mainaCloudFetch(path: string, init: RequestInit = {}): Promise<Response> {
+export async function mainaCloudRequestJson(
+  path: string,
+  init: RequestInit = {},
+  options?: { acceptHttpErrors?: boolean },
+): Promise<MainaCloudJsonResponse> {
   const session = await getMainaCloudSession();
-  if (!session) throw new MainaCloudApiError('Maina Cloud is not connected on this phone.', 401, 'cloud_session_missing');
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
-  try {
-    const response = await fetch(`${apiBaseUrl()}${path}`, {
+  if (!session) {
+    throw new MainaCloudApiError(
+      'Maina Cloud is not connected on this phone.',
+      401,
+      'cloud_session_missing',
+      'auth',
+    );
+  }
+  const response = await requestMainaCloudJson({
+    url: `${apiBaseUrl()}${path}`,
+    init: {
       ...init,
-      signal: init.signal ?? controller.signal,
       headers: {
         Accept: 'application/json',
         Authorization: `Bearer ${session.accessToken}`,
         ...init.headers,
       },
-    });
-    if (!response.ok) {
-      const body = await readJson(response);
-      const failure = apiMessage(body, `Maina Cloud request failed (${response.status})`);
-      if (response.status === 401 || response.status === 403) {
-        // Preserve nothing but an opaque expired token; no local meeting state
-        // is mutated here. The caller maps this to an auth-blocked cloud job.
-        await clearMainaCloudSession();
-      }
-      const failureClass = classifyHttpFailure(response.status, failure.code);
-      log.warn('maina-cloud-session', 'authenticated cloud request was rejected', {
-        status: response.status,
-        code: failure.code ?? null,
-        failureClass,
-      });
-      throw new MainaCloudApiError(
-        safeCloudFailureMessage(failureClass),
-        response.status,
-        failure.code,
-        failureClass,
-      );
+    },
+  });
+  if (!response.ok && options?.acceptHttpErrors !== true) {
+    const failure = rejectedMainaCloudResponse(response);
+    if (response.status === 401 || response.status === 403) {
+      // Preserve nothing but an opaque expired token; no local meeting state
+      // is mutated here. The caller maps this to an auth-blocked cloud job.
+      await clearMainaCloudSession();
     }
-    return response;
-  } catch (cause) {
-    if (cause instanceof MainaCloudApiError) throw cause;
-    if (cause instanceof Error && cause.name === 'AbortError') {
-      throw new MainaCloudApiError(
-        safeCloudFailureMessage('timeout'),
-        0,
-        'network_timeout',
-        'timeout',
-      );
-    }
-    const failureClass = classifyTransportCause(cause);
-    log.warn('maina-cloud-session', 'authenticated cloud transport failed', {
-      failureClass,
-      causeName: cause instanceof Error ? cause.name : typeof cause,
+    log.warn('maina-cloud-session', 'authenticated cloud request was rejected', {
+      status: response.status,
+      code: failure.code ?? null,
+      failureClass: failure.failureClass,
     });
-    throw new MainaCloudApiError(
-      safeCloudFailureMessage(failureClass),
-      0,
-      'network_error',
-      failureClass,
-    );
-  } finally {
-    clearTimeout(timeout);
+    throw failure;
   }
+  return response;
 }
 
 export async function createMainaCloudPairing(deviceLabel: string): Promise<MainaCloudPairingRequest> {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
-  try {
-    const response = await fetch(`${apiBaseUrl()}/v1/mobile/pairings`, {
+  const response = await requestMainaCloudJson({
+    url: `${apiBaseUrl()}/v1/mobile/pairings`,
+    init: {
       method: 'POST',
-      signal: controller.signal,
       headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
       body: JSON.stringify({ device_label: deviceLabel.trim() || 'Maina mobile' }),
-    });
-    const body = await readJson(response) as {
-      pairing_id?: unknown;
-      verification_code?: unknown;
-      expires_at?: unknown;
-    };
-    if (!response.ok || typeof body.pairing_id !== 'string' || typeof body.verification_code !== 'string' || typeof body.expires_at !== 'string') {
-      const failure = apiMessage(body, 'Could not start Maina Cloud pairing.');
-      const failureClass = classifyHttpFailure(response.status, failure.code);
-      throw new MainaCloudApiError(safeCloudFailureMessage(failureClass), response.status, failure.code, failureClass);
-    }
-    return { pairingId: body.pairing_id, verificationCode: body.verification_code, expiresAt: body.expires_at };
-  } catch (cause) {
-    throw safeTransportError(cause);
-  } finally {
-    clearTimeout(timeout);
+    },
+  });
+  const body = response.data as {
+    pairing_id?: unknown;
+    verification_code?: unknown;
+    expires_at?: unknown;
+  };
+  if (!response.ok || typeof body.pairing_id !== 'string' || typeof body.verification_code !== 'string' || typeof body.expires_at !== 'string') {
+    const failure = apiMessage(body, 'Could not start Maina Cloud pairing.');
+    const failureClass = classifyHttpFailure(response.status, failure.code);
+    throw new MainaCloudApiError(safeCloudFailureMessage(failureClass), response.status, failure.code, failureClass);
   }
+  return { pairingId: body.pairing_id, verificationCode: body.verification_code, expiresAt: body.expires_at };
 }
 
 export async function exchangeMainaCloudPairing(input: MainaCloudPairingRequest): Promise<MainaCloudSession> {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
-  try {
-    const response = await fetch(`${apiBaseUrl()}/v1/mobile/pairings/${encodeURIComponent(input.pairingId)}/exchange`, {
+  const response = await requestMainaCloudJson({
+    url: `${apiBaseUrl()}/v1/mobile/pairings/${encodeURIComponent(input.pairingId)}/exchange`,
+    init: {
       method: 'POST',
-      signal: controller.signal,
       headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
       body: JSON.stringify({ verification_code: input.verificationCode }),
-    });
-    const body = await readJson(response) as {
-      access_token?: unknown;
-      expires_at?: unknown;
-      user?: { id?: unknown; user_id?: unknown; email?: unknown; display_name?: unknown; role?: unknown };
-    };
-    const userId = typeof body.user?.id === 'string'
-      ? body.user.id
-      : typeof body.user?.user_id === 'string'
-        ? body.user.user_id
-        : null;
-    if (!response.ok || typeof body.access_token !== 'string' || !userId || typeof body.user?.email !== 'string') {
-      const failure = apiMessage(body, 'Maina Cloud pairing was not approved yet.');
-      const failureClass = classifyHttpFailure(response.status, failure.code);
-      throw new MainaCloudApiError(safeCloudFailureMessage(failureClass), response.status, failure.code, failureClass);
-    }
-    const session: MainaCloudSession = {
-      accessToken: body.access_token,
-      expiresAt: typeof body.expires_at === 'string' ? body.expires_at : null,
-      user: {
-        userId,
-        email: body.user.email,
-        displayName: typeof body.user.display_name === 'string' ? body.user.display_name : null,
-        role: typeof body.user.role === 'string' ? body.user.role : null,
-      },
-    };
-    await saveMainaCloudSession(session);
-    log.info('maina-cloud-session', 'mobile cloud pairing established', { userId: session.user.userId });
-    return session;
-  } catch (cause) {
-    throw safeTransportError(cause);
-  } finally {
-    clearTimeout(timeout);
+    },
+  });
+  const body = response.data as {
+    access_token?: unknown;
+    expires_at?: unknown;
+    user?: { id?: unknown; user_id?: unknown; email?: unknown; display_name?: unknown; role?: unknown };
+  };
+  const userId = typeof body.user?.id === 'string'
+    ? body.user.id
+    : typeof body.user?.user_id === 'string'
+      ? body.user.user_id
+      : null;
+  if (!response.ok || typeof body.access_token !== 'string' || !userId || typeof body.user?.email !== 'string') {
+    const failure = apiMessage(body, 'Maina Cloud pairing was not approved yet.');
+    const failureClass = classifyHttpFailure(response.status, failure.code);
+    throw new MainaCloudApiError(safeCloudFailureMessage(failureClass), response.status, failure.code, failureClass);
   }
+  const session: MainaCloudSession = {
+    accessToken: body.access_token,
+    expiresAt: typeof body.expires_at === 'string' ? body.expires_at : null,
+    user: {
+      userId,
+      email: body.user.email,
+      displayName: typeof body.user.display_name === 'string' ? body.user.display_name : null,
+      role: typeof body.user.role === 'string' ? body.user.role : null,
+    },
+  };
+  await saveMainaCloudSession(session);
+  log.info('maina-cloud-session', 'mobile cloud pairing established', { userId: session.user.userId });
+  return session;
 }
 
 export async function signOutMainaCloud(): Promise<void> {
   try {
-    await mainaCloudFetch('/v1/auth/logout', { method: 'POST' });
+    await mainaCloudRequestJson('/v1/auth/logout', { method: 'POST' });
   } catch (cause) {
     // Local removal is the important safety behavior: revoked/expired remote
     // sessions and unreachable networks must both leave the phone signed out.
@@ -308,8 +243,8 @@ export async function getMainaCloudConnection(): Promise<MainaCloudSession | nul
   const session = await getMainaCloudSession();
   if (!session) return null;
   try {
-    const response = await mainaCloudFetch('/v1/auth/me');
-    const body = await readJson(response) as {
+    const response = await mainaCloudRequestJson('/v1/auth/me');
+    const body = response.data as {
       expires_at?: unknown;
       user?: { user_id?: unknown; email?: unknown; display_name?: unknown; role?: unknown };
     };

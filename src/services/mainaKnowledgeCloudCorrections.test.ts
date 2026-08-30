@@ -10,8 +10,10 @@ const mocks = vi.hoisted(() => ({
   listMeetingCorrections: vi.fn(),
   listMeetingNeedingSync: vi.fn(),
   updateCorrection: vi.fn(),
+  persistCorrectionRetry: vi.fn(),
   getSettings: vi.fn(),
   clearSession: vi.fn(),
+  cloudRequest: vi.fn(),
 }));
 
 vi.mock('@/data/meetings', () => ({
@@ -24,6 +26,7 @@ vi.mock('@/data/meetings', () => ({
   listKnowledgeCloudCorrections: mocks.listMeetingCorrections,
   listMeetingKnowledgeCloudCorrectionsNeedingSync: mocks.listMeetingNeedingSync,
   updateKnowledgeCloudCorrection: mocks.updateCorrection,
+  persistKnowledgeCloudCorrectionRetry: mocks.persistCorrectionRetry,
 }));
 
 vi.mock('@/services/config', () => ({
@@ -36,6 +39,7 @@ vi.mock('@/services/logger', () => ({
 
 vi.mock('@/services/mainaCloudSession', () => ({
   clearMainaCloudSession: mocks.clearSession,
+  mainaCloudRequestJson: mocks.cloudRequest,
 }));
 vi.mock('@/services/pipelineWakeScheduler', () => ({
   armPipelineNetworkRecovery: vi.fn().mockResolvedValue({ armed: true, generation: 1 }),
@@ -88,6 +92,18 @@ describe('Maina Knowledge Cloud correction service', () => {
     mocks.getLatestCorrection.mockResolvedValue(null);
     mocks.insertCorrection.mockResolvedValue(true);
     mocks.listMeetingNeedingSync.mockResolvedValue([]);
+    mocks.persistCorrectionRetry.mockImplementation(async (input: Record<string, unknown>) => {
+      const existing = await mocks.getCorrection(input.correctionKey);
+      if (existing) {
+        await mocks.updateCorrection(input.correctionKey, {
+          syncStatus: input.syncStatus,
+          error: input.visibleError,
+          failureClass: input.failureClass,
+          retryCount: input.retryCount,
+          nextRetryAt: input.nextRetryAt,
+        });
+      }
+    });
   });
 
   it('freezes only fields that changed after the source snapshot', async () => {
@@ -174,17 +190,18 @@ describe('Maina Knowledge Cloud correction service', () => {
     };
     mocks.getCorrection.mockResolvedValue(correction);
     mocks.getMeeting.mockResolvedValue({ id: 'meeting-1', knowledgeCloudSyncStatus: 'sync_succeeded' });
-    const fetchMock = vi.fn().mockResolvedValue(new Response(
-      JSON.stringify({ canonical_sha256: 'correction-sha' }),
-      { status: 201 },
-    ));
-    vi.stubGlobal('fetch', fetchMock);
+    mocks.cloudRequest.mockResolvedValue({
+      status: 201,
+      ok: true,
+      data: { canonical_sha256: 'correction-sha' },
+    });
 
     await runCorrectionSync('correction:1');
 
-    expect(fetchMock).toHaveBeenCalledWith(
-      'https://mkc.example.test/v1/corrections',
+    expect(mocks.cloudRequest).toHaveBeenCalledWith(
+      '/v1/corrections',
       expect.objectContaining({ body: payloadJson }),
+      { acceptHttpErrors: true },
     );
     expect(mocks.updateCorrection).toHaveBeenLastCalledWith('correction:1', expect.objectContaining({
       syncStatus: 'sync_succeeded',
@@ -221,14 +238,32 @@ describe('Maina Knowledge Cloud correction service', () => {
       const existing = state.get(key);
       if (existing) state.set(key, { ...existing, ...patch });
     });
-    const fetchMock = vi.fn().mockRejectedValue(new TypeError('Network request failed'));
-    vi.stubGlobal('fetch', fetchMock);
+    mocks.cloudRequest.mockRejectedValue(new TypeError('Network request failed'));
 
     const attempted = await reconcileCorrectionsForMeeting('meeting-1');
 
     expect(attempted).toBe(1);
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(mocks.cloudRequest).toHaveBeenCalledTimes(1);
     expect(state.get(previous.correctionKey)?.syncStatus).toBe('sync_failed_retryable');
     expect(state.get(next.correctionKey)?.syncStatus).toBe('sync_queued');
+  });
+
+  it('does not bypass a persisted correction retry due time', async () => {
+    mocks.getMeeting.mockResolvedValue({ id: 'meeting-1', knowledgeCloudSyncStatus: 'sync_succeeded' });
+    mocks.getCorrection.mockResolvedValue({
+      correctionKey: 'correction:future',
+      meetingId: 'meeting-1',
+      fieldPath: 'content.summary',
+      versionTag: 'summary.v2',
+      payloadJson: '{"correction_key":"correction:future"}',
+      syncStatus: 'sync_failed_retryable',
+      retryCount: 1,
+      nextRetryAt: Date.now() + 60_000,
+    });
+
+    await runCorrectionSync('correction:future');
+
+    expect(mocks.cloudRequest).not.toHaveBeenCalled();
+    expect(mocks.updateCorrection).not.toHaveBeenCalled();
   });
 });

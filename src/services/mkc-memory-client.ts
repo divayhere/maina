@@ -1,4 +1,4 @@
-import { MainaCloudApiError, mainaCloudFetch } from './mainaCloudSession';
+import { MainaCloudApiError, mainaCloudRequestJson } from './mainaCloudSession';
 import { assessMkcMemoryIntegrity, classifyMkcMemoryFailure, type MkcMemoryIntegrityState } from './mkc-memory-core';
 
 export type DecodedMkcMemory<T> = {
@@ -31,8 +31,8 @@ export async function readMkcMemory<T>(input: {
 }): Promise<T> {
   assertReadPath(input.path);
   try {
-    const response = await mainaCloudFetch(input.path, { method: 'GET', signal: input.signal });
-    const decoded = input.decode(await response.json());
+    const response = await mainaCloudRequestJson(input.path, { method: 'GET', signal: input.signal });
+    const decoded = input.decode(response.data);
     const integrity = assessMkcMemoryIntegrity(decoded.integrity);
     if (integrity.state !== 'verified') {
       throw new MkcMemoryReadError(

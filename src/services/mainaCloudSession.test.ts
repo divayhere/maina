@@ -2,7 +2,10 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const store = new Map<string, string>();
-const mocks = vi.hoisted(() => ({ clearMkcMemoryCacheForOwner: vi.fn(async () => {}) }));
+const mocks = vi.hoisted(() => ({
+  clearMkcMemoryCacheForOwner: vi.fn(async () => {}),
+  fetch: vi.fn(),
+}));
 
 vi.mock('expo-secure-store', () => ({
   getItemAsync: vi.fn(async (key: string) => store.get(key) ?? null),
@@ -13,6 +16,7 @@ vi.mock('expo-secure-store', () => ({
 vi.mock('@/data/settings', () => ({ deleteSetting: vi.fn(async () => {}) }));
 vi.mock('@/services/logger', () => ({ log: { info: vi.fn(), warn: vi.fn(), error: vi.fn() } }));
 vi.mock('@/services/mkc-memory-cache', () => ({ clearMkcMemoryCacheForOwner: mocks.clearMkcMemoryCacheForOwner }));
+vi.mock('expo/fetch', () => ({ fetch: mocks.fetch }));
 
 import {
   MainaCloudApiError,
@@ -21,7 +25,7 @@ import {
   exchangeMainaCloudPairing,
   formatMainaCloudPairingCode,
   getMainaCloudSession,
-  mainaCloudFetch,
+  mainaCloudRequestJson,
   saveMainaCloudSession,
 } from './mainaCloudSession';
 
@@ -36,6 +40,7 @@ describe('mainaCloudSession', () => {
     store.clear();
     vi.restoreAllMocks();
     mocks.clearMkcMemoryCacheForOwner.mockClear();
+    mocks.fetch.mockReset();
     await clearMainaCloudSession();
   });
 
@@ -58,11 +63,11 @@ describe('mainaCloudSession', () => {
   });
 
   it('accepts the deployed pairing exchange user.id contract', async () => {
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({
+    mocks.fetch.mockResolvedValue(new Response(JSON.stringify({
       access_token: 'scoped-mobile-session',
       expires_at: '2030-01-01T00:00:00.000Z',
       user: { id: 'user-production-shape', email: 'owner@maina.local', display_name: 'Divay', role: 'owner' },
-    }), { status: 200 })));
+    }), { status: 200 }));
 
     const session = await exchangeMainaCloudPairing({
       pairingId: 'mobile_pairing_test',
@@ -80,7 +85,7 @@ describe('mainaCloudSession', () => {
       verification_code: 'mp_case-sensitive',
       expires_at: '2030-01-01T00:00:00.000Z',
     }), { status: 201 }));
-    vi.stubGlobal('fetch', fetchMock);
+    mocks.fetch.mockImplementation(fetchMock);
 
     await createMainaCloudPairing('');
 
@@ -90,9 +95,9 @@ describe('mainaCloudSession', () => {
   });
 
   it('never exposes a transport hostname during pairing or exchange', async () => {
-    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(
+    mocks.fetch.mockRejectedValue(
       new TypeError('Failed to fetch https://private-backend.example'),
-    ));
+    );
 
     await expect(createMainaCloudPairing('iPhone')).rejects.toEqual(expect.objectContaining({
       name: 'MainaCloudApiError',
@@ -116,11 +121,28 @@ describe('mainaCloudSession', () => {
 
   it('turns an unauthorized server reply into a typed auth error and clears the phone session', async () => {
     await saveMainaCloudSession(validSession);
-    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(new Response(JSON.stringify({ error: { code: 'auth_invalid', message: 'expired' } }), { status: 401 })));
-    await expect(mainaCloudFetch('/v1/auth/me')).rejects.toEqual(expect.objectContaining({
+    mocks.fetch.mockResolvedValue(new Response(JSON.stringify({ error: { code: 'auth_invalid', message: 'expired' } }), { status: 401 }));
+    await expect(mainaCloudRequestJson('/v1/auth/me')).rejects.toEqual(expect.objectContaining({
       name: 'MainaCloudApiError', status: 401, code: 'auth_invalid', failureClass: 'auth',
       message: 'Reconnect Maina Cloud. Your recording and transcript are safe.',
     } satisfies Partial<MainaCloudApiError>));
     expect(await getMainaCloudSession()).toBeNull();
+  });
+
+  it('keeps malformed gateway bodies classified by their retryable HTTP status', async () => {
+    await saveMainaCloudSession(validSession);
+    mocks.fetch.mockResolvedValue(new Response(
+      '<html>private upstream hostname and provider detail</html>',
+      { status: 503 },
+    ));
+
+    await expect(mainaCloudRequestJson('/v1/meeting-packets/job-stable')).rejects.toEqual(
+      expect.objectContaining({
+        name: 'MainaCloudApiError',
+        status: 503,
+        failureClass: 'http_retryable',
+        message: 'Maina Cloud is temporarily busy. Maina will retry automatically.',
+      } satisfies Partial<MainaCloudApiError>),
+    );
   });
 });

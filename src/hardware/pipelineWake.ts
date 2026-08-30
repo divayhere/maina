@@ -1,4 +1,5 @@
 import { requireOptionalNativeModule } from 'expo';
+import type { SchedulePipelineWake } from '../../modules/maina-recorder/src';
 import { Platform } from 'react-native';
 
 type NativePipelineWakeModule = {
@@ -6,11 +7,7 @@ type NativePipelineWakeModule = {
     eventName: 'onPipelineWakeRequested',
     listener: (event: { generation: number }) => void,
   ): { remove(): void };
-  schedulePipelineWake?(generation: number, requiresNetwork: boolean): Promise<{
-    scheduled: boolean;
-    workId?: string | null;
-    errorCode?: string | null;
-  } | boolean>;
+  schedulePipelineWake?: SchedulePipelineWake;
   completePipelineWake?(attemptToken: string, succeeded: boolean): Promise<{ completed: boolean } | boolean>;
   isPipelineWakeAttemptActive?(attemptToken: string): Promise<{ active: boolean } | boolean>;
   claimPendingPipelineWake?(): Promise<{
@@ -23,8 +20,15 @@ type NativePipelineWakeModule = {
 const nativeModule = requireOptionalNativeModule<NativePipelineWakeModule>('MainaRecorder');
 
 export async function scheduleNativePipelineWake(
-  generation: number,
-  requiresNetwork: boolean,
+  input: {
+    generation: number;
+    requiresNetwork: boolean;
+    notBeforeAt: number;
+    scheduleRevision: number;
+    previousWorkId: string | null;
+    previousNotBeforeAt: number | null;
+    previousScheduleRevision: number | null;
+  },
 ): Promise<{
   outcome: 'enqueued' | 'unavailable' | 'failed';
   workId?: string | null;
@@ -34,13 +38,22 @@ export async function scheduleNativePipelineWake(
     return { outcome: 'unavailable', errorCode: 'native_scheduler_unavailable' };
   }
   try {
-    const result = await nativeModule.schedulePipelineWake(generation, requiresNetwork);
-    const scheduled = typeof result === 'boolean' ? result : result.scheduled;
+    const result = await nativeModule.schedulePipelineWake(
+      input.generation,
+      input.requiresNetwork,
+      input.notBeforeAt,
+      input.scheduleRevision,
+      input.previousWorkId,
+      input.previousNotBeforeAt,
+      input.previousScheduleRevision,
+      2,
+    );
+    const scheduled = result.scheduled;
     return scheduled
-      ? { outcome: 'enqueued', workId: typeof result === 'boolean' ? null : result.workId ?? null }
+      ? { outcome: 'enqueued', workId: result.workId ?? null }
       : {
           outcome: 'failed',
-          errorCode: typeof result === 'boolean' ? 'native_enqueue_rejected' : result.errorCode ?? 'native_enqueue_rejected',
+          errorCode: result.errorCode ?? 'native_enqueue_rejected',
         };
   } catch (cause) {
     return {
