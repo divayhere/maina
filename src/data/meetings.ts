@@ -1422,6 +1422,22 @@ export async function invalidateLocalAsrRun(claim: LocalAsrRunClaim): Promise<bo
   return result.changes === 1;
 }
 
+/**
+ * Native iOS expiration carries the persisted meeting/generation identity but
+ * never the private SQLite claim token. Fence that exact generation while it
+ * is still claimed; later or duplicate callbacks are harmless no-ops.
+ */
+export async function deferLocalAsrRunGeneration(meetingId: string, generation: number): Promise<boolean> {
+  const db = await getDb();
+  const now = Date.now();
+  const result = await db.runAsync(
+    `UPDATE local_asr_run_claims SET state = 'deferred', invalidated_at = ?, updated_at = ?
+     WHERE meeting_id = ? AND generation = ? AND state = 'claimed'`,
+    [now, now, meetingId, generation],
+  );
+  return result.changes === 1;
+}
+
 export async function completeLocalAsrRun(claim: LocalAsrRunClaim): Promise<boolean> {
   const db = await getDb();
   const now = Date.now();

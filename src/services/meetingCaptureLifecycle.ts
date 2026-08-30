@@ -1,5 +1,6 @@
 import {
   getMeeting,
+  deferLocalAsrRunGeneration,
   getTranscriptSummary,
   importNativePostProcessingResult,
   listMeetings,
@@ -12,16 +13,23 @@ import { Platform } from 'react-native';
 import { completedCaptureDurationRepair } from '@/core/recording/checkpoint';
 import { materialCaptureGapError } from '@/core/recording/captureGap';
 import { createKeyedExecutionOwner } from '@/core/pipeline/keyedExecutionOwner';
+import {
+  acceptIOSContinuedProcessingDeferral,
+  type IOSContinuedProcessingHandleState,
+} from '@/core/transcription/asr/iosContinuedProcessingPolicy';
 import { hasCompleteNativeTranscript, terminalNativeMeetingRepair } from '@/core/recording/nativeCaptureReconciliation';
 import {
   acknowledgeNativePostProcessingResult,
+  acknowledgeIOSContinuedProcessingDeferral,
   beginIOSContinuedProcessing,
+  bindIOSContinuedProcessingRun,
   finishIOSContinuedProcessing,
   getNativeCaptureStatusAsync,
   isNativePostProcessingServiceRunning,
   isIOSContinuedProcessingActive,
   readNativePostProcessingResult,
   startNativePostProcessing,
+  subscribeIOSPostProcessingDeferralRequests,
   updateIOSContinuedProcessing,
 } from '@/hardware/recording/foreground';
 import { log } from '@/services/logger';
@@ -46,6 +54,37 @@ import {
 let nativeReconciliationInFlight: Promise<number> | null = null;
 const iosPostProcessingOwner = createKeyedExecutionOwner<string, boolean>();
 const iosPostProcessingRetryTimers = new Map<string, ReturnType<typeof setTimeout>>();
+type IOSPostProcessingHandle = IOSContinuedProcessingHandleState;
+const iosPostProcessingHandles = new Map<string, IOSPostProcessingHandle>();
+
+// Native expiration is a request to stop owning new work, not permission to
+// discard an in-flight decoder callback. Fence the exact SQLite generation;
+// localAsrPipeline rechecks ownership after decode and before every commit.
+subscribeIOSPostProcessingDeferralRequests((event) => {
+  const handle = iosPostProcessingHandles.get(event.requestId);
+  const disposition = acceptIOSContinuedProcessingDeferral(handle, event);
+  if (disposition === 'identity_mismatch') return;
+  if (disposition === 'duplicate') {
+    acknowledgeIOSContinuedProcessingDeferral(event.requestId, event.meetingId, event.asrGeneration);
+    return;
+  }
+  void deferLocalAsrRunGeneration(event.meetingId, event.asrGeneration)
+    .catch(() => false)
+    .then(async () => {
+      await updateMeetingPipelineStage({
+        meetingId: event.meetingId,
+        stage: 'asr',
+        state: 'deferred',
+        error: 'Local transcription paused safely. Maina will continue automatically.',
+        metadata: {
+          executionOwner: 'ios-js-resumable',
+          asrGeneration: event.asrGeneration,
+          deferredBy: 'ios-continued-processing-expiration',
+        },
+      }).catch(() => {});
+      acknowledgeIOSContinuedProcessingDeferral(event.requestId, event.meetingId, event.asrGeneration);
+    });
+});
 
 function scheduleIOSPostProcessingRetry(meetingId: string, recoveryRounds: number): void {
   const existing = iosPostProcessingRetryTimers.get(meetingId);
@@ -85,7 +124,19 @@ async function launchIOSPostProcessing(meeting: Meeting): Promise<boolean> {
       state: 'running',
       error: null,
     });
-    beginIOSContinuedProcessing(meeting.id, Math.max(1, meeting.transcriptionWindowCount));
+    const continuedRequest = beginIOSContinuedProcessing(
+      meeting.id,
+      Math.max(1, meeting.transcriptionWindowCount),
+    );
+    const continuedHandle: IOSPostProcessingHandle | null = continuedRequest?.requestId
+      ? {
+        requestId: continuedRequest.requestId,
+        meetingId: meeting.id,
+        asrGeneration: null,
+        deferralRequested: false,
+      }
+      : null;
+    if (continuedHandle) iosPostProcessingHandles.set(continuedHandle.requestId, continuedHandle);
     let terminal = false;
     try {
       const runPass = () => runLocalAsrPipeline({
@@ -94,8 +145,24 @@ async function launchIOSPostProcessing(meeting: Meeting): Promise<boolean> {
         meetingStartedAt: meeting.startedAt,
         recoverPartials: true,
         resetTranscript: false,
-        onProgress: updateIOSContinuedProcessing,
-        isExecutionActive: () => isIOSContinuedProcessingActive(meeting.id),
+        onRunClaim: (claim) => {
+          if (!continuedHandle) return;
+          continuedHandle.asrGeneration = claim.generation;
+          if (!bindIOSContinuedProcessingRun(
+            continuedHandle.requestId,
+            meeting.id,
+            claim.generation,
+          )) {
+            continuedHandle.deferralRequested = true;
+          }
+        },
+        onProgress: (completed, total) => {
+          if (continuedHandle) {
+            updateIOSContinuedProcessing(continuedHandle.requestId, completed, total);
+          }
+        },
+        isExecutionActive: () => !continuedHandle?.deferralRequested
+          && isIOSContinuedProcessingActive(continuedHandle?.requestId ?? '', meeting.id),
       });
       const firstResult = await runPass();
       const result = firstResult.coverageComplete ? firstResult : await runPass();
@@ -182,7 +249,10 @@ async function launchIOSPostProcessing(meeting: Meeting): Promise<boolean> {
       });
       return false;
     } finally {
-      finishIOSContinuedProcessing(terminal);
+      if (continuedHandle) {
+        finishIOSContinuedProcessing(continuedHandle.requestId, terminal);
+        iosPostProcessingHandles.delete(continuedHandle.requestId);
+      }
     }
   });
 }

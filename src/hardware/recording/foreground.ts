@@ -10,6 +10,7 @@ import {
   type NativePostProcessingRequest,
   type NativePostProcessingResult,
   type NativePostProcessingChangedEvent,
+  type IOSPostProcessingDeferralEvent,
   type NativeCaptureStatus,
   type QwenAsrResult,
   type QwenAsrStatus,
@@ -156,8 +157,18 @@ export async function releaseQwenAsr(): Promise<void> {
   if (MainaRecorder) await MainaRecorder.releaseQwenAsr();
 }
 
-export function beginIOSContinuedProcessing(meetingId: string, totalUnits: number): void {
-  if (Platform.OS !== 'ios' || !MainaRecorder?.beginIOSContinuedProcessing) return;
+export type IOSContinuedProcessingRequest = {
+  started: boolean;
+  mode: string;
+  reason?: string;
+  requestId?: string;
+};
+
+export function beginIOSContinuedProcessing(
+  meetingId: string,
+  totalUnits: number,
+): IOSContinuedProcessingRequest | null {
+  if (Platform.OS !== 'ios' || !MainaRecorder?.beginIOSContinuedProcessing) return null;
   const result = MainaRecorder.beginIOSContinuedProcessing(
     meetingId,
     'Preparing meeting transcript',
@@ -171,23 +182,59 @@ export function beginIOSContinuedProcessing(meetingId: string, totalUnits: numbe
     mode: result.mode,
     reason: result.reason ?? null,
   });
+  return result;
 }
 
-export function updateIOSContinuedProcessing(completedUnits: number, totalUnits: number): void {
+export function bindIOSContinuedProcessingRun(
+  requestId: string,
+  meetingId: string,
+  asrGeneration: number,
+): boolean {
+  if (Platform.OS !== 'ios' || !MainaRecorder?.bindIOSContinuedProcessingRun) return false;
+  return MainaRecorder.bindIOSContinuedProcessingRun(requestId, meetingId, asrGeneration);
+}
+
+export function updateIOSContinuedProcessing(
+  requestId: string,
+  completedUnits: number,
+  totalUnits: number,
+): void {
   if (Platform.OS !== 'ios' || !MainaRecorder?.updateIOSContinuedProcessing) return;
   const completed = Math.max(0, completedUnits);
   const total = Math.max(1, totalUnits);
-  MainaRecorder.updateIOSContinuedProcessing(completed, total, `${completed} of ${total} audio windows checked`);
+  MainaRecorder.updateIOSContinuedProcessing(
+    requestId,
+    completed,
+    total,
+    `${completed} of ${total} audio windows checked`,
+  );
 }
 
-export function finishIOSContinuedProcessing(success: boolean): void {
+export function finishIOSContinuedProcessing(requestId: string, success: boolean): void {
   if (Platform.OS !== 'ios' || !MainaRecorder?.finishIOSContinuedProcessing) return;
-  MainaRecorder.finishIOSContinuedProcessing(success);
+  MainaRecorder.finishIOSContinuedProcessing(requestId, success);
 }
 
-export function isIOSContinuedProcessingActive(meetingId: string): boolean {
+export function acknowledgeIOSContinuedProcessingDeferral(
+  requestId: string,
+  meetingId: string,
+  asrGeneration: number,
+): boolean {
+  if (Platform.OS !== 'ios' || !MainaRecorder?.acknowledgeIOSContinuedProcessingDeferral) return false;
+  return MainaRecorder.acknowledgeIOSContinuedProcessingDeferral(requestId, meetingId, asrGeneration);
+}
+
+export function isIOSContinuedProcessingActive(requestId: string, meetingId: string): boolean {
   if (Platform.OS !== 'ios') return true;
-  return MainaRecorder?.isIOSContinuedProcessingActive?.(meetingId) ?? false;
+  return MainaRecorder?.isIOSContinuedProcessingActive?.(requestId, meetingId) ?? false;
+}
+
+export function subscribeIOSPostProcessingDeferralRequests(
+  listener: (event: IOSPostProcessingDeferralEvent) => void,
+): () => void {
+  if (Platform.OS !== 'ios' || !MainaRecorder) return () => {};
+  const subscription = MainaRecorder.addListener('onIOSPostProcessingDeferralRequested', listener);
+  return () => subscription.remove();
 }
 
 export async function getRemoteControlStatus(): Promise<RemoteControlStatus | null> {
