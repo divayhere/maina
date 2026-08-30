@@ -17,7 +17,7 @@ describe('local ASR native-expiration fence', () => {
   it('defers only the exact still-claimed meeting generation', async () => {
     await expect(deferLocalAsrRunGeneration('meeting-a', 7)).resolves.toBe(true);
     expect(sqlite.runAsync).toHaveBeenCalledTimes(1);
-    const [sql, values] = sqlite.runAsync.mock.calls[0];
+    const [sql, values] = sqlite.runAsync.mock.calls[0] as unknown as [string, unknown[]];
     expect(sql).toContain("generation = ? AND state = 'claimed'");
     expect(values.slice(2)).toEqual(['meeting-a', 7]);
   });

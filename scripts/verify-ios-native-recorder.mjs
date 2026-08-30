@@ -9,6 +9,7 @@ const project = path.resolve(import.meta.dirname, '..');
 const moduleRoot = path.join(project, 'modules', 'maina-recorder');
 const capture = path.join(moduleRoot, 'ios', 'MainaIOSNativeAudioCapture.swift');
 const module = path.join(moduleRoot, 'ios', 'MainaRecorderModule.swift');
+const podspec = path.join(moduleRoot, 'ios', 'MainaRecorder.podspec');
 const qwen = path.join(moduleRoot, 'ios', 'MainaQwenAsr.swift');
 const continuedProcessing = path.join(moduleRoot, 'ios', 'MainaIOSContinuedProcessing.swift');
 const continuedProcessingPolicy = path.join(moduleRoot, 'ios', 'MainaIOSContinuedProcessingRetentionPolicy.swift');
@@ -24,7 +25,7 @@ const config = JSON.parse(readFileSync(path.join(moduleRoot, 'expo-module.config
 const appConfig = JSON.parse(readFileSync(path.join(project, 'app.json'), 'utf8'));
 const captureSource = readFileSync(capture, 'utf8');
 
-for (const file of [capture, module, qwen, continuedProcessing, continuedProcessingPolicy, continuedProcessingPolicyTests, callRecoveryPolicy, callRecoveryPolicyTests, pipelineWake, pipelineWakePolicy, pipelineWakePolicyTests, continuedProcessingPlugin]) {
+for (const file of [capture, module, podspec, qwen, continuedProcessing, continuedProcessingPolicy, continuedProcessingPolicyTests, callRecoveryPolicy, callRecoveryPolicyTests, pipelineWake, pipelineWakePolicy, pipelineWakePolicyTests, continuedProcessingPlugin]) {
   if (!existsSync(file) || readFileSync(file, 'utf8').trim().length === 0) {
     throw new Error(`Required iOS recorder source is missing: ${file}`);
   }
@@ -46,6 +47,9 @@ if (!appConfig.expo.ios?.infoPlist?.BGTaskSchedulerPermittedIdentifiers?.include
 }
 if (!appConfig.expo.plugins?.includes('./plugins/withMainaIOSContinuedProcessing')) {
   throw new Error('Maina iOS must install its continued-processing AppDelegate registration plugin.');
+}
+if (!readFileSync(podspec, 'utf8').includes("'CallKit'")) {
+  throw new Error('Maina iOS recorder must link CallKit for typed call-state veto signals.');
 }
 for (const token of [
   'AVAudioSession.routeChangeNotification',
@@ -131,6 +135,9 @@ for (const token of [
   'schedulePipelineWake',
   'claimPendingPipelineWake',
   'pipelineWake.hasActiveExecution()',
+  'bindIOSContinuedProcessingRun',
+  'acknowledgeIOSContinuedProcessingDeferral',
+  'onIOSPostProcessingDeferralRequested',
 ]) {
   if (!readFileSync(module, 'utf8').includes(token)) {
     throw new Error(`iOS module API missing: ${token}`);
