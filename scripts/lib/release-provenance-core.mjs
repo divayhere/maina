@@ -40,6 +40,20 @@ function exactArray(actual, expected, field) {
   }
 }
 
+function canonical(value) {
+  if (Array.isArray(value)) return value.map(canonical);
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(Object.keys(value).sort().map((key) => [key, canonical(value[key])]));
+  }
+  return value;
+}
+
+function exactJson(actual, expected, field) {
+  if (JSON.stringify(canonical(actual)) !== JSON.stringify(canonical(expected))) {
+    fail(field, `expected ${JSON.stringify(expected)}, found ${JSON.stringify(actual)}`);
+  }
+}
+
 function sourcePin(actual, planned, field) {
   actual = object(actual, field);
   exact(actual.repository, planned.repository, `${field}.repository`);
@@ -124,14 +138,14 @@ function androidAudit(actual, plan) {
   exact(audit.versionName, plan.release.version, 'artifacts.android.audit.versionName');
   exact(audit.versionCode, plan.release.androidVersionCode, 'artifacts.android.audit.versionCode');
   exact(audit.releaseSigned, true, 'artifacts.android.audit.releaseSigned');
-  match(audit.signerCertificateSha256, SHA256, 'artifacts.android.audit.signerCertificateSha256');
+  exact(audit.signerCertificateSha256, plan.artifactPolicy.android.signerCertificateSha256, 'artifacts.android.audit.signerCertificateSha256');
   exact(audit.debuggable, false, 'artifacts.android.audit.debuggable');
   exact(audit.profileable, false, 'artifacts.android.audit.profileable');
   exact(audit.permissionsExact, true, 'artifacts.android.audit.permissionsExact');
   exact(audit.componentsExact, true, 'artifacts.android.audit.componentsExact');
   exact(audit.exportedBoundariesExact, true, 'artifacts.android.audit.exportedBoundariesExact');
-  if (!Array.isArray(audit.permissions) || audit.permissions.length === 0) fail('artifacts.android.audit.permissions', 'exact non-empty permission list is required');
-  if (!Array.isArray(audit.components) || audit.components.length === 0) fail('artifacts.android.audit.components', 'exact non-empty component list is required');
+  exactArray(audit.permissions, plan.artifactPolicy.android.permissions, 'artifacts.android.audit.permissions');
+  exactJson(audit.components, plan.artifactPolicy.android.components, 'artifacts.android.audit.components');
   exactArray(audit.abis, [plan.toolchains.android.abi], 'artifacts.android.audit.abis');
   const jni = object(audit.jniLibraries, 'artifacts.android.audit.jniLibraries');
   for (const library of ['libonnxruntime.so', 'libsherpa-onnx-jni.so']) {
@@ -152,12 +166,14 @@ function iosAudit(actual, plan) {
   exactArray(audit.architectures, ['arm64'], 'artifacts.ios.audit.architectures');
   exact(audit.signatureValid, true, 'artifacts.ios.audit.signatureValid');
   exact(audit.teamId, plan.identity.iosTeamId, 'artifacts.ios.audit.teamId');
-  string(audit.designatedRequirement, 'artifacts.ios.audit.designatedRequirement');
+  exact(audit.designatedRequirement, plan.artifactPolicy.ios.designatedRequirement, 'artifacts.ios.audit.designatedRequirement');
   exact(audit.entitlementsExact, true, 'artifacts.ios.audit.entitlementsExact');
+  exactJson(audit.entitlements, plan.artifactPolicy.ios.appEntitlements, 'artifacts.ios.audit.entitlements');
+  exactJson(audit.profileEntitlements, plan.artifactPolicy.ios.profileEntitlements, 'artifacts.ios.audit.profileEntitlements');
   match(audit.entitlementsSha256, SHA256, 'artifacts.ios.audit.entitlementsSha256');
   const profile = object(audit.profile, 'artifacts.ios.audit.profile');
   match(profile.uuid, UUID, 'artifacts.ios.audit.profile.uuid');
-  string(profile.name, 'artifacts.ios.audit.profile.name');
+  exact(profile.name, plan.artifactPolicy.ios.profileName, 'artifacts.ios.audit.profile.name');
   exact(profile.teamId, plan.identity.iosTeamId, 'artifacts.ios.audit.profile.teamId');
   if (Number.isNaN(Date.parse(profile.expiresAt))) fail('artifacts.ios.audit.profile.expiresAt', 'ISO-8601 expiry is required');
   exact(profile.sufficientWindow, true, 'artifacts.ios.audit.profile.sufficientWindow');

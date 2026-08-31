@@ -28,6 +28,7 @@
   },
   "artifactPolicy": {
     "android": {
+      "signerCertificateSha256": "fac61745dc0903786fb9ede62a962b399f7348f0bb6f899b8332667591033b9c",
       "permissions": [
         "android.permission.ACCESS_NETWORK_STATE",
         "android.permission.ACCESS_WIFI_STATE",
@@ -78,6 +79,8 @@
       ]
     },
     "ios": {
+      "designatedRequirement": "identifier \"com.divay.maina.staging\" and anchor apple generic and certificate leaf[subject.CN] = \"Apple Development: divayk@gmail.com (P58B74W27N)\" and certificate 1[field.1.2.840.113635.100.6.2.1] /* exists */",
+      "profileName": "iOS Team Provisioning Profile: com.divay.maina.staging",
       "appEntitlements": {
         "application-identifier": "9X4X3R4KCN.com.divay.maina.staging",
         "com.apple.developer.team-identifier": "9X4X3R4KCN",
