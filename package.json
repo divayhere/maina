@@ -72,7 +72,7 @@
     "verify:artifact": "node scripts/release-provenance-cli.mjs",
     "verify:build-source": "node scripts/verify-build-source-state.mjs",
     "verify:release-build-scripts": "node scripts/verify-release-build-scripts.mjs",
-    "verify:release-plan-candidate": "node scripts/verify-release-plan-0.10.43.mjs",
+    "verify:release-plan-candidate": "node scripts/verify-release-plan-0.10.43.mjs && node scripts/verify-generated-native-release-metadata.synthetic.mjs",
     "ios:runtime": "bash scripts/prepare-ios-sherpa-runtime.sh",
     "ios:model:stage": "bash scripts/stage-ios-qwen-model.sh",
     "ios:ui-tests:configure": "ruby scripts/configure-ios-ui-tests.rb",
