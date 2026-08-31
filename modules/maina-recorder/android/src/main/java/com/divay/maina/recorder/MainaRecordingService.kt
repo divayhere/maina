@@ -23,6 +23,7 @@ import android.os.VibrationEffect
 import android.os.Vibrator
 import java.util.UUID
 import java.util.concurrent.Executors
+import java.util.concurrent.RejectedExecutionException
 import java.util.concurrent.atomic.AtomicLong
 
 /**
@@ -41,6 +42,10 @@ class MainaRecordingService : Service() {
     }
     private val captureOperationSequence = AtomicLong(0L)
     @Volatile private var latestCaptureOperation = 0L
+    @Volatile private var acceptingNativeWork = true
+    @Volatile private var destroyed = false
+    private var destroyStopQueued = false
+    private var activeCaptureOperation: MainaCaptureOperationToken? = null
     private lateinit var nativeCapture: MainaNativeAudioCapture
     private lateinit var captureControlStore: MainaCaptureControlStore
     @Volatile private var durableControl: MainaDurableCaptureControl? = null
@@ -59,6 +64,14 @@ class MainaRecordingService : Service() {
             if (!isRunning) return
             if (captureState != "idle") emitServiceHeartbeat()
             heartbeatHandler.postDelayed(this, 60_000)
+        }
+    }
+    private val communicationWatchRunnable = object : Runnable {
+        override fun run() {
+            if (!isRunning || destroyed) return
+            if (!MainaCallInterruptionPolicy.shouldWatchCommunication(controlState)) return
+            reconcileCommunicationInterruption()
+            updateCommunicationWatch()
         }
     }
     private val modeChangedListener = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
@@ -125,6 +138,7 @@ class MainaRecordingService : Service() {
         const val EXTRA_CHUNK_DURATION_MS = "chunkDurationMs"
         const val EXTRA_MEETING_STARTED_AT = "meetingStartedAt"
         private val COMMUNICATION_RESUME_TOKEN = Any()
+        private const val COMMUNICATION_WATCH_INTERVAL_MS = 500L
 
         @Volatile
         var isRunning: Boolean = false
@@ -160,7 +174,7 @@ class MainaRecordingService : Service() {
                     // post-processing exactly once; never leave a silent recorder
                     // shown as live just because a physical input disappeared.
                     nativeCaptureStatus = payload + mapOf("state" to "error")
-                    heartbeatHandler.post {
+                    postMainOutcome {
                         if (captureState == "recording") {
                             setCaptureState("finalizing")
                             refreshForegroundUi()
@@ -248,6 +262,7 @@ class MainaRecordingService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        if (destroyed || !acceptingNativeWork) return START_NOT_STICKY
         MainaHardwareTrigger.commandForAction(intent?.action)?.let { command ->
             MainaHardwareTrigger.emit(this, command, "notification")
         }
@@ -274,6 +289,25 @@ class MainaRecordingService : Service() {
         }
         when (intent?.action) {
             ACTION_START_NATIVE_CAPTURE -> {
+                if (!MainaCaptureOperationPolicy.startAdmissionAllowed(
+                        controlState,
+                        captureState,
+                        operationActive = activeCaptureOperation != null,
+                    )
+                ) {
+                    recordNativeEvent(
+                        level = "warn",
+                        category = "native-capture",
+                        eventName = "capture-start-rejected-active-session",
+                        message = "A new native capture was rejected while the current session is active",
+                        payload = mapOf(
+                            "phase" to controlState.phase.name.lowercase(),
+                            "captureState" to captureState,
+                        ),
+                    )
+                    refreshForegroundUi()
+                    return START_STICKY
+                }
                 // Recording always wins the phone's CPU/memory budget. Stopping
                 // the private ASR service interrupts its executor; the worker
                 // checkpoints/defer at the next native decode boundary and the
@@ -297,7 +331,6 @@ class MainaRecordingService : Service() {
                     ?: intent.getLongExtra(EXTRA_CHUNK_DURATION_MS, 5 * 60_000L)
                 val meetingStartedAt = intent.getStringExtra(EXTRA_MEETING_STARTED_AT)?.toLongOrNull()
                     ?: intent.getLongExtra(EXTRA_MEETING_STARTED_AT, System.currentTimeMillis())
-                val operationId = captureOperationSequence.incrementAndGet().also { latestCaptureOperation = it }
                 lastCaptureMeetingId = meetingId
                 lastCaptureDirectory = directory
                 lastCaptureStartedAt = meetingStartedAt
@@ -306,94 +339,60 @@ class MainaRecordingService : Service() {
                     phase = MainaCaptureControlPhase.PAUSE_PENDING,
                     pauseOwner = MainaCapturePauseOwner.SYSTEM,
                     generation = controlState.generation + 1L,
-                    communicationActive = MainaCallInterruptionPolicy.communicationActive(
-                        audioManager.mode,
-                        clientSilenced,
-                    ),
+                    communicationActive = observedCommunicationActive(),
                 )
-                check(captureControlStore.begin(
-                    meetingId = meetingId,
-                    directory = directory,
-                    sourceMode = sourceMode,
-                    chunkDurationMs = chunkDurationMs,
-                    meetingStartedAt = meetingStartedAt,
-                    state = startIntentState,
-                )) { "Could not persist capture start intent" }
-                durableControl = captureControlStore.read()
-                controlState = startIntentState
-                nativeCaptureStatus = mapOf(
-                    "state" to "starting",
-                    "meetingId" to meetingId,
-                    "sourceMode" to sourceMode,
-                    "operationId" to operationId,
-                )
-                captureExecutor.execute {
-                    runCatching {
+                val startPersisted = runCatching {
+                    captureControlStore.begin(
+                        meetingId = meetingId,
+                        directory = directory,
+                        sourceMode = sourceMode,
+                        chunkDurationMs = chunkDurationMs,
+                        meetingStartedAt = meetingStartedAt,
+                        state = startIntentState,
+                    )
+                }.getOrDefault(false)
+                if (!startPersisted) {
+                    controlState = MainaCaptureControlState()
+                    nativeCaptureStatus = mapOf(
+                        "state" to "error",
+                        "meetingId" to meetingId,
+                        "lastError" to "Could not persist capture start intent",
+                    )
+                    recordControlPersistenceFailure(
+                        "capture-start-intent",
+                        IllegalStateException("Could not persist capture start intent"),
+                    )
+                    setCaptureState("idle")
+                } else {
+                    durableControl = captureControlStore.read()
+                    applyControlState(startIntentState)
+                    val operation = issueCaptureOperation(
+                        kind = MainaCaptureOperationKind.START,
+                        owner = MainaCapturePauseOwner.SYSTEM,
+                        expectedPhase = MainaCaptureControlPhase.PAUSE_PENDING,
+                    )
+                    nativeCaptureStatus = mapOf(
+                        "state" to "starting",
+                        "meetingId" to meetingId,
+                        "sourceMode" to sourceMode,
+                        "operationId" to operation.operationId,
+                    )
+                    dispatchPreparedCapture(
+                        operation = operation,
+                        pendingState = "starting",
+                        committedEvent = "recording-owned",
+                        publicationEvent = "capture-start-published",
+                    ) {
                         nativeCapture.start(
-                        MainaNativeAudioCapture.Options(
-                            meetingId = meetingId,
-                            directory = directory,
-                            sourceMode = sourceMode,
-                            chunkDurationMs = chunkDurationMs,
-                        ),
+                            MainaNativeAudioCapture.Options(
+                                meetingId = meetingId,
+                                directory = directory,
+                                sourceMode = sourceMode,
+                                chunkDurationMs = chunkDurationMs,
+                            ),
+                            operation.expectedPrivacyLatchGeneration
+                                ?: error("Start privacy authority is unavailable"),
                         )
-                    }.mapCatching { snapshot ->
-                        if (latestCaptureOperation == operationId) {
-                            updateControlState(
-                                controlState.copy(
-                                    phase = MainaCaptureControlPhase.RECORDING,
-                                    pauseOwner = MainaCapturePauseOwner.NONE,
-                                    communicationActive = MainaCallInterruptionPolicy.communicationActive(
-                                        audioManager.mode,
-                                        clientSilenced,
-                                    ),
-                                ),
-                                "recording-owned",
-                            )
-                            val published = nativeCapture.publishRecordingOwnership("capture-start-published")
-                            published
-                        } else snapshot
-                    }.onSuccess { published ->
-                        if (latestCaptureOperation == operationId) {
-                            nativeCaptureStatus = published.asMap() + mapOf("operationId" to operationId)
-                            heartbeatHandler.post {
-                                if (latestCaptureOperation == operationId) {
-                                    setCaptureState("recording")
-                                    refreshForegroundUi()
-                                    reconcileCommunicationInterruption()
-                                }
-                            }
-                        }
-                    }.onFailure { cause ->
-                        runCatching { nativeCapture.stop() }
-                        val message = cause.message ?: cause.javaClass.simpleName
-                        if (latestCaptureOperation == operationId) {
-                            nativeCaptureStatus = mapOf(
-                                "state" to "error",
-                                "meetingId" to meetingId,
-                                "lastError" to message,
-                                "operationId" to operationId,
-                            )
-                        }
-                        recordNativeEvent(
-                            level = "error",
-                            category = "native-capture",
-                            eventName = "native-capture-start-failed",
-                            message = "Native capture could not start",
-                            payload = mapOf("error" to message, "operationId" to operationId),
-                        )
-                        heartbeatHandler.post {
-                            if (latestCaptureOperation == operationId) {
-                                updateControlState(
-                                    MainaCallInterruptionPolicy.terminal(controlState),
-                                    "capture-start-failed",
-                                )
-                                setCaptureState("idle")
-                                captureControlStore.clear()
-                                durableControl = null
-                                refreshForegroundUi()
-                            }
-                        }
                     }
                 }
             }
@@ -401,22 +400,32 @@ class MainaRecordingService : Service() {
                 cancelCommunicationRetryTimer()
                 val decision = MainaCallInterruptionPolicy.onManualPause(controlState)
                 if (decision is MainaCaptureControlDecision.Pause) {
-                    val expectedGeneration = decision.state.generation
-                    updateControlState(decision.state, "manual-pause-pending")
-                    submitCaptureCommand(
-                        pendingState = "pausing",
-                        successfulCaptureState = "paused",
-                        operation = { nativeCapture.pause() },
-                        onSuccess = {
-                            if (controlState.generation != expectedGeneration) return@submitCaptureCommand
-                            updateControlState(
-                                MainaCallInterruptionPolicy.pauseSucceeded(controlState),
-                                "manual-paused",
+                    var operation: MainaCaptureOperationToken? = null
+                    val persistenceFailure = MainaCaptureSafetySequencer.latchApplyPersistThenQueue(
+                        latch = nativeCapture::latchReadsOffNow,
+                        apply = {
+                            applyControlState(decision.state)
+                            operation = issueCaptureOperation(
+                                kind = MainaCaptureOperationKind.PAUSE,
+                                owner = MainaCapturePauseOwner.MANUAL,
+                                expectedPhase = MainaCaptureControlPhase.PAUSE_PENDING,
                             )
                         },
+                        persist = { persistControlStateOrThrow(decision.state, "manual-pause-pending") },
+                        queue = {
+                            operation?.let {
+                                dispatchNativePause(
+                                    operation = it,
+                                    pendingState = "pausing",
+                                    completedEvent = "manual-paused",
+                                    failedEvent = "manual-pause-checkpoint-timeout",
+                                )
+                            }
+                        },
                     )
-                } else if (decision is MainaCaptureControlDecision.StateOnly
-                    && decision.state != controlState
+                    persistenceFailure?.let { recordControlPersistenceFailure("manual-pause-pending", it) }
+                } else if (decision is MainaCaptureControlDecision.StateOnly &&
+                    decision.state != controlState
                 ) {
                     updateControlState(decision.state, "manual-pause-owned")
                 }
@@ -433,132 +442,43 @@ class MainaRecordingService : Service() {
                         refreshForegroundUi()
                     }
                     is MainaCaptureControlDecision.Resume -> {
-                        val expectedGeneration = decision.state.generation
-                        updateControlState(decision.state, "manual-resume-pending")
-                        submitCaptureCommand(
-                            pendingState = "resuming",
-                            successfulCaptureState = "recording",
-                            operation = { nativeCapture.resume() },
-                            onSuccess = {
-                                if (controlState.generation != expectedGeneration) return@submitCaptureCommand
-                                updateControlState(
-                                    MainaCallInterruptionPolicy.resumeSucceeded(controlState),
-                                    "manual-resumed",
+                        if (updateControlState(decision.state, "manual-resume-pending")) {
+                            val operation = issueCaptureOperation(
+                                kind = MainaCaptureOperationKind.RESUME,
+                                owner = MainaCapturePauseOwner.MANUAL,
+                                expectedPhase = MainaCaptureControlPhase.RESUME_PENDING,
+                            )
+                            dispatchPreparedCapture(
+                                operation = operation,
+                                pendingState = "resuming",
+                                committedEvent = "manual-resumed",
+                                publicationEvent = "manual-resume-published",
+                                failureEvent = "manual-resume-failed",
+                            ) {
+                                nativeCapture.resume(
+                                    operation.expectedPrivacyLatchGeneration
+                                        ?: error("Resume privacy authority is unavailable"),
                                 )
-                                nativeCapture.publishRecordingOwnership("manual-resume-published")
-                            },
-                            onFailure = {
-                                if (controlState.generation == expectedGeneration) {
-                                    runCatching { nativeCapture.pause() }
-                                    updateControlState(
-                                        MainaCallInterruptionPolicy.resumeFailed(controlState),
-                                        "manual-resume-failed",
-                                    )
-                                }
-                            },
-                        )
+                            }
+                        } else {
+                            failClosedResumeDurability(MainaCapturePauseOwner.MANUAL)
+                        }
                     }
                     else -> Unit
                 }
             }
             ACTION_STOP_NATIVE_CAPTURE -> {
-                invalidateCaptureControl("stop-requested")
-                setCaptureState("finalizing")
-                submitCaptureCommand(
-                    pendingState = "finalizing",
-                    successfulCaptureState = "idle",
-                    operation = { nativeCapture.stop() },
-                    onSuccess = { snapshot ->
-                        val meetingId = snapshot.meetingId ?: lastCaptureMeetingId ?: return@submitCaptureCommand
-                        val directory = lastCaptureDirectory ?: return@submitCaptureCommand
-                        // Stop commands can arrive more than once (notification,
-                        // clicker, JS cleanup). A meeting must enter native ASR
-                        // only once or a late duplicate would erase and rebuild
-                        // an already completed transcript.
-                        if (postProcessingHandledMeetingId == meetingId) return@submitCaptureCommand
-                        postProcessingHandledMeetingId = meetingId
-                        val intent = Intent(this, MainaPostProcessingService::class.java).apply {
-                            action = MainaPostProcessingService.ACTION_START
-                            putExtra(MainaPostProcessingService.EXTRA_MEETING_ID, meetingId)
-                            putExtra(MainaPostProcessingService.EXTRA_DIRECTORY, directory)
-                            putExtra(MainaPostProcessingService.EXTRA_CAPTURE_ENDED_AT, System.currentTimeMillis())
-                            putExtra(MainaPostProcessingService.EXTRA_MEETING_STARTED_AT, lastCaptureStartedAt)
-                            putExtra(
-                                MainaPostProcessingService.EXTRA_ROUTE_RESTART_COUNT,
-                                snapshot.routeRestartCount,
-                            )
-                            putExtra(
-                                MainaPostProcessingService.EXTRA_CAPTURE_GAP_MS,
-                                snapshot.captureGapMs,
-                            )
-                        }
-                        val launch = runCatching {
-                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                                startForegroundService(intent)
-                            } else {
-                                startService(intent)
-                            }
-                        }
-                        var fallbackDurable = false
-                        launch.onFailure { cause ->
-                            val message = cause.message ?: cause.javaClass.simpleName
-                            runCatching {
-                                MainaPostProcessingOutbox.shared(applicationContext).begin(
-                                    meetingId,
-                                    directory,
-                                    lastCaptureStartedAt,
-                                    System.currentTimeMillis(),
-                                    0L,
-                                    0L,
-                                    0,
-                                    0,
-                                    snapshot.routeRestartCount,
-                                    snapshot.captureGapMs,
-                                )
-                                MainaPostProcessingOutbox.shared(applicationContext).defer(
-                                    meetingId,
-                                    "Saved audio is waiting for local transcription: $message",
-                                )
-                                MainaPostProcessingRecoveryScheduler.enqueue(applicationContext, meetingId)
-                            }.onSuccess { fallbackDurable = true }
-                            recordNativeEvent(
-                                level = "warn",
-                                category = "native-post-processing",
-                                eventName = "post-processing-start-deferred",
-                                message = "Saved audio will resume transcription when Maina is foregrounded",
-                                payload = mapOf("meetingId" to meetingId, "error" to message),
-                            )
-                        }
-                        if (launch.isSuccess || fallbackDurable) {
-                            captureControlStore.clear()
-                            durableControl = null
-                        } else {
-                            // Keep the terminal capture pointer repairable if
-                            // neither service launch nor outbox handoff became
-                            // durable. A later service start can retry safely.
-                            postProcessingHandledMeetingId = null
-                        }
-                    },
+                requestTerminalNativeStop(
+                    MainaCaptureOperationKind.STOP,
+                    "stop-requested",
+                    abort = false,
                 )
             }
             ACTION_ABORT_NATIVE_CAPTURE -> {
-                invalidateCaptureControl("abort-requested")
-                setCaptureState("finalizing")
-                submitCaptureCommand(
-                    pendingState = "finalizing",
-                    successfulCaptureState = "idle",
-                    operation = { nativeCapture.stop() },
-                    onSuccess = { snapshot ->
-                        // Discard is intentionally terminal and must never
-                        // enqueue ASR. Mark the meeting handled before React
-                        // deletes its row/audio so unmount cleanup is idempotent.
-                        postProcessingHandledMeetingId = snapshot.meetingId ?: lastCaptureMeetingId
-                        lastCaptureMeetingId = null
-                        lastCaptureDirectory = null
-                        lastCaptureStartedAt = 0L
-                        captureControlStore.clear()
-                        durableControl = null
-                    },
+                requestTerminalNativeStop(
+                    MainaCaptureOperationKind.ABORT,
+                    "abort-requested",
+                    abort = true,
                 )
             }
         }
@@ -573,6 +493,7 @@ class MainaRecordingService : Service() {
             startForeground(NOTIFICATION_ID, notification)
         }
         isRunning = true
+        updateCommunicationWatch()
         updateMediaState()
         getSystemService(NotificationManager::class.java).notify(NOTIFICATION_ID, notification)
         if (captureState != "idle") emitServiceHeartbeat()
@@ -580,13 +501,29 @@ class MainaRecordingService : Service() {
     }
 
     override fun onDestroy() {
+        if (destroyed) {
+            super.onDestroy()
+            return
+        }
         isRunning = false
+        nativeCapture.latchReadsOffNow()
         invalidateCaptureControl("service-destroyed")
-        captureExecutor.execute {
-            runCatching { nativeCaptureStatus = nativeCapture.stop().asMap() }
+        acceptingNativeWork = false
+        if (MainaCaptureLifecyclePolicy.shouldQueueDestroyStop(destroyStopQueued)) {
+            destroyStopQueued = true
+            try {
+                captureExecutor.execute {
+                    runCatching { nativeCaptureStatus = nativeCapture.stop().asMap() }
+                }
+            } catch (_: RejectedExecutionException) {
+                // The immediate read latch already owns privacy. A duplicate or
+                // late lifecycle callback must never enqueue after shutdown.
+            }
         }
         captureExecutor.shutdown()
+        destroyed = true
         heartbeatHandler.removeCallbacks(heartbeatRunnable)
+        heartbeatHandler.removeCallbacks(communicationWatchRunnable)
         runCatching { audioManager.unregisterAudioRecordingCallback(recordingCallback) }
         runCatching { audioManager.unregisterAudioDeviceCallback(deviceCallback) }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
@@ -632,64 +569,724 @@ class MainaRecordingService : Service() {
         )
     }
 
-    private fun submitCaptureCommand(
-        pendingState: String,
-        successfulCaptureState: String,
-        operation: () -> MainaNativeAudioCapture.Snapshot,
-        onSuccess: (MainaNativeAudioCapture.Snapshot) -> Unit = {},
-        onFailure: (Throwable) -> Unit = {},
+    private data class NativeOutcome(
+        val operation: MainaCaptureOperationToken,
+        val snapshot: MainaNativeAudioCapture.Snapshot,
+        val error: String? = null,
+        val published: Boolean = false,
+        val safeAfterPublication: Boolean = false,
+    )
+
+    private fun requireMainReducer() {
+        check(Looper.myLooper() == Looper.getMainLooper()) {
+            "Capture reducer/token authority is main-looper only"
+        }
+    }
+
+    private fun enqueueNativeWork(work: () -> Unit): Boolean {
+        if (!MainaCaptureLifecyclePolicy.acceptsNativeWork(acceptingNativeWork, destroyed)) return false
+        return try {
+            captureExecutor.execute {
+                if (MainaCaptureLifecyclePolicy.acceptsNativeWork(acceptingNativeWork, destroyed)) work()
+            }
+            true
+        } catch (_: RejectedExecutionException) {
+            false
+        }
+    }
+
+    private fun postMainOutcome(work: () -> Unit) {
+        if (!MainaCaptureLifecyclePolicy.acceptsNativeWork(acceptingNativeWork, destroyed)) return
+        heartbeatHandler.post {
+            if (MainaCaptureLifecyclePolicy.acceptsNativeWork(acceptingNativeWork, destroyed)) work()
+        }
+    }
+
+    private fun issueCaptureOperation(
+        kind: MainaCaptureOperationKind,
+        owner: MainaCapturePauseOwner,
+        expectedPhase: MainaCaptureControlPhase,
+    ): MainaCaptureOperationToken {
+        requireMainReducer()
+        val operationId = captureOperationSequence.incrementAndGet()
+        val operation = MainaCaptureOperationToken(
+            operationId = operationId,
+            generation = controlState.generation,
+            owner = owner,
+            kind = kind,
+            expectedPhase = expectedPhase,
+            captureSessionId = lastCaptureMeetingId,
+            expectedPrivacyLatchGeneration = if (kind in setOf(
+                    MainaCaptureOperationKind.START,
+                    MainaCaptureOperationKind.RESUME,
+                )
+            ) {
+                nativeCapture.privacyGenerationSnapshot()
+            } else {
+                null
+            },
+        )
+        latestCaptureOperation = operationId
+        activeCaptureOperation = operation
+        return operation
+    }
+
+    private fun invalidateActiveOperation() {
+        requireMainReducer()
+        latestCaptureOperation = captureOperationSequence.incrementAndGet()
+        activeCaptureOperation = null
+    }
+
+    private fun beginTerminalOperation(
+        kind: MainaCaptureOperationKind,
+        terminalState: MainaCaptureControlState,
+    ): MainaCaptureOperationToken {
+        require(kind == MainaCaptureOperationKind.STOP || kind == MainaCaptureOperationKind.ABORT)
+        cancelCommunicationRetryTimer()
+        invalidateActiveOperation()
+        applyControlState(terminalState)
+        return issueCaptureOperation(
+            kind = kind,
+            owner = MainaCapturePauseOwner.NONE,
+            expectedPhase = MainaCaptureControlPhase.TERMINAL,
+        )
+    }
+
+    private fun requestTerminalNativeStop(
+        kind: MainaCaptureOperationKind,
+        event: String,
+        abort: Boolean,
+        requestedTerminalState: MainaCaptureControlState? = null,
     ) {
-        val operationId = captureOperationSequence.incrementAndGet().also { latestCaptureOperation = it }
+        var operation: MainaCaptureOperationToken? = null
+        var terminalState: MainaCaptureControlState? = null
+        val persistenceFailure = MainaCaptureSafetySequencer.latchApplyPersistThenQueue(
+            latch = nativeCapture::latchReadsOffNow,
+            apply = {
+                operation = beginTerminalOperation(
+                    kind,
+                    requestedTerminalState ?: MainaCallInterruptionPolicy.terminal(controlState),
+                )
+                terminalState = controlState
+            },
+            persist = {
+                persistControlStateOrThrow(
+                    terminalState ?: error("Terminal reducer state was not applied"),
+                    event,
+                )
+            },
+            queue = {
+                operation?.let { dispatchNativeStop(it, abort) }
+            },
+        )
+        persistenceFailure?.let { recordControlPersistenceFailure(event, it) }
+        runCatching { setCaptureState("finalizing") }
+    }
+
+    private fun accepts(operation: MainaCaptureOperationToken): Boolean {
+        requireMainReducer()
+        return MainaCaptureOperationPolicy.accepts(
+            activeCaptureOperation,
+            operation,
+            controlState,
+            acceptingWork = MainaCaptureLifecyclePolicy.acceptsNativeWork(acceptingNativeWork, destroyed),
+        )
+    }
+
+    private fun dispatchPreparedCapture(
+        operation: MainaCaptureOperationToken,
+        pendingState: String,
+        committedEvent: String,
+        publicationEvent: String,
+        failureEvent: String = "capture-start-failed",
+        nativeOperation: () -> MainaNativeAudioCapture.Snapshot,
+    ) {
         nativeCaptureStatus = nativeCapture.snapshot().asMap() + mapOf(
             "state" to pendingState,
-            "operationId" to operationId,
+            "operationId" to operation.operationId,
         )
-        captureExecutor.execute {
-            runCatching(operation)
-                .mapCatching { snapshot ->
-                    if (latestCaptureOperation == operationId) onSuccess(snapshot)
-                    nativeCapture.snapshot()
-                }
-                .onSuccess { snapshot ->
-                    if (latestCaptureOperation == operationId) {
-                        nativeCaptureStatus = snapshot.asMap() + mapOf("operationId" to operationId)
-                        heartbeatHandler.post {
-                            if (latestCaptureOperation == operationId) {
-                                setCaptureState(successfulCaptureState)
-                                refreshForegroundUi()
-                            }
-                        }
-                    }
-                }
-                .onFailure { cause ->
-                    val message = cause.message ?: cause.javaClass.simpleName
-                    if (latestCaptureOperation == operationId) {
-                        nativeCaptureStatus = nativeCapture.snapshot().asMap() + mapOf(
-                            "state" to "error",
-                            "lastError" to message,
-                            "operationId" to operationId,
-                        )
-                    }
-                    recordNativeEvent(
-                        level = "error",
-                        category = "native-capture",
-                        eventName = "native-capture-command-failed",
-                        message = "Native capture command failed",
-                        payload = mapOf(
-                            "pendingState" to pendingState,
-                            "error" to message,
-                            "operationId" to operationId,
-                        ),
-                    )
-                    runCatching { onFailure(cause) }
-                    heartbeatHandler.post {
-                        if (latestCaptureOperation == operationId) {
-                            setCaptureState(if (nativeCapture.snapshot().state == "idle") "idle" else captureState)
-                            refreshForegroundUi()
-                        }
-                    }
-                }
+        val enqueued = enqueueNativeWork {
+            val preparationAllowed = MainaCaptureOperationPolicy.nativePreparationAllowed(
+                latestOperationId = latestCaptureOperation,
+                operation = operation,
+                currentPrivacyLatchGeneration = nativeCapture.privacyGenerationSnapshot(),
+                communicationActive = observedCommunicationActive(),
+                acceptingWork = MainaCaptureLifecyclePolicy.acceptsNativeWork(
+                    acceptingNativeWork,
+                    destroyed,
+                ),
+            )
+            val result = if (preparationAllowed) {
+                runCatching(nativeOperation)
+            } else {
+                Result.failure(IllegalStateException("Native preparation authority changed"))
+            }
+            if (result.isFailure && operation.kind == MainaCaptureOperationKind.START) {
+                runCatching { nativeCapture.stop() }
+            }
+            val outcome = NativeOutcome(
+                operation = operation,
+                snapshot = result.getOrElse { nativeCapture.snapshot() },
+                error = result.exceptionOrNull()?.let { it.message ?: it.javaClass.simpleName },
+            )
+            postMainOutcome {
+                handlePreparedCaptureOutcome(outcome, committedEvent, publicationEvent, failureEvent)
+            }
         }
+        if (!enqueued && acceptingNativeWork && !destroyed) {
+            handlePreparedCaptureOutcome(
+                NativeOutcome(
+                    operation = operation,
+                    snapshot = nativeCapture.snapshot(),
+                    error = "Native capture executor is unavailable",
+                ),
+                committedEvent,
+                publicationEvent,
+                failureEvent,
+            )
+        }
+    }
+
+    private fun handlePreparedCaptureOutcome(
+        outcome: NativeOutcome,
+        committedEvent: String,
+        publicationEvent: String,
+        failureEvent: String,
+    ) {
+        requireMainReducer()
+        if (outcome.error != null) {
+            nativeCaptureStatus = outcome.snapshot.asMap() + mapOf(
+                "state" to "error",
+                "lastError" to outcome.error,
+                "operationId" to outcome.operation.operationId,
+            )
+            recordNativeEvent(
+                level = "error",
+                category = "native-capture",
+                eventName = failureEvent,
+                message = "Native capture could not acquire publication ownership",
+                payload = mapOf(
+                    "error" to outcome.error,
+                    "operationId" to outcome.operation.operationId,
+                ),
+            )
+            if (outcome.operation.kind == MainaCaptureOperationKind.START) {
+                // START failure is authoritative even if a manual/system PAUSE
+                // superseded its token while native acquisition was running. A
+                // capture that never started cannot be exposed as PAUSED.
+                if (MainaCaptureOperationPolicy.startFailureMustTerminalize(
+                        outcome.operation.kind,
+                        controlState,
+                        MainaCaptureLifecyclePolicy.acceptsNativeWork(acceptingNativeWork, destroyed),
+                        completionSessionId = outcome.operation.captureSessionId,
+                        currentSessionId = lastCaptureMeetingId,
+                    )
+                ) {
+                    invalidateActiveOperation()
+                    updateControlState(MainaCallInterruptionPolicy.terminal(controlState), failureEvent)
+                    captureControlStore.clear()
+                    durableControl = null
+                    setCaptureState("idle")
+                }
+            } else if (!accepts(outcome.operation)) {
+                nativeCapture.latchReadsOffNow()
+                queueNativePauseWithoutReducer("$failureEvent-stale-cleanup-timeout")
+            } else if (MainaCaptureOperationPolicy.preparationFailureNeedsPause(outcome.operation.kind)) {
+                // resume() can fail after acquiring AudioRecord. Do not expose a
+                // PAUSED reducer or schedule recovery until the serialized native
+                // checkpoint has actually succeeded; its failure terminalizes.
+                pausePreparedCapture(
+                    outcome.operation,
+                    controlState.communicationActive,
+                    "$failureEvent-cleanup",
+                )
+            } else {
+                rollbackPreparedCapture(outcome.operation, failureEvent, communicationActive = controlState.communicationActive)
+            }
+            refreshForegroundUi()
+            return
+        }
+
+        val communicationActive = observedCommunicationActive()
+        if (!MainaCaptureOperationPolicy.publicationAllowed(
+                activeCaptureOperation,
+                outcome.operation,
+                controlState,
+                communicationActive,
+            )
+        ) {
+            if (accepts(outcome.operation)) {
+                pausePreparedCapture(outcome.operation, communicationActive, "$committedEvent-blocked")
+            } else {
+                nativeCapture.latchReadsOffNow()
+                queueNativePauseWithoutReducer("$committedEvent-stale-cleanup-timeout")
+            }
+            return
+        }
+        dispatchNativePublication(outcome.operation, committedEvent, publicationEvent)
+    }
+
+    private fun dispatchNativePublication(
+        operation: MainaCaptureOperationToken,
+        committedEvent: String,
+        publicationEvent: String,
+    ) {
+        val enqueued = enqueueNativeWork {
+            val safeBefore = latestCaptureOperation == operation.operationId && !observedCommunicationActive()
+            val result = if (safeBefore) {
+                runCatching { nativeCapture.prepareRecordingOwnershipPublication(publicationEvent) }
+            } else {
+                Result.failure(IllegalStateException("Publication precondition changed"))
+            }
+            val published = result.isSuccess
+            val safeAfter = published && latestCaptureOperation == operation.operationId && !observedCommunicationActive()
+            if (!safeAfter) {
+                // This is the immediate privacy latch only. The main reducer
+                // issues the serialized, outcome-bearing pause after it decides
+                // whether this token is still authoritative.
+                nativeCapture.latchReadsOffNow()
+            }
+            val outcome = NativeOutcome(
+                operation = operation,
+                snapshot = nativeCapture.snapshot(),
+                error = result.exceptionOrNull()?.let { it.message ?: it.javaClass.simpleName },
+                published = published,
+                safeAfterPublication = safeAfter,
+            )
+            postMainOutcome { handlePublicationOutcome(outcome, committedEvent) }
+        }
+        if (!enqueued && acceptingNativeWork && !destroyed) {
+            handlePublicationOutcome(
+                NativeOutcome(
+                    operation = operation,
+                    snapshot = nativeCapture.snapshot(),
+                    error = "Native capture executor is unavailable",
+                ),
+                committedEvent,
+            )
+        }
+    }
+
+    private fun handlePublicationOutcome(outcome: NativeOutcome, committedEvent: String) {
+        requireMainReducer()
+        val operationAccepted = accepts(outcome.operation)
+        val communicationActive = observedCommunicationActive()
+        if (!operationAccepted || outcome.error != null || !outcome.safeAfterPublication || communicationActive) {
+            nativeCapture.latchReadsOffNow()
+            val event = if (outcome.error == null) {
+                "$committedEvent-publication-blocked"
+            } else {
+                "$committedEvent-publication-failed"
+            }
+            if (!operationAccepted) {
+                queueNativePauseWithoutReducer("$event-stale-cleanup-timeout")
+                return
+            }
+            // A prepared recorder is not rolled back to PAUSED until its real
+            // native checkpoint succeeds. That prevents a SYSTEM retry from
+            // queuing behind a timed-out cleanup and reopening an unsafe chunk.
+            pausePreparedCapture(outcome.operation, communicationActive, event)
+            return
+        }
+
+        val recordingState = MainaCallInterruptionPolicy.resumeSucceeded(
+            controlState.copy(communicationActive = false),
+        )
+        val durableCommit = runCatching {
+            persistControlStateOrThrow(recordingState, committedEvent)
+        }
+        if (durableCommit.isFailure) {
+            nativeCapture.latchReadsOffNow()
+            recordControlPersistenceFailure(committedEvent, durableCommit.exceptionOrNull()!!)
+            pausePreparedCapture(
+                outcome.operation,
+                communicationActive = false,
+                event = "$committedEvent-durability-failed",
+            )
+            return
+        }
+
+        applyControlState(recordingState)
+        nativeCaptureStatus = outcome.snapshot.asMap() + mapOf(
+            "state" to "recording",
+            "operationId" to outcome.operation.operationId,
+        )
+        communicationResumeStartedAtMs = 0L
+        communicationResumeAttempts = 0
+        nativeCaptureStatus = nativeCaptureStatus + mapOf("pauseReason" to null)
+        val preEnableUi = runCatching {
+            setCaptureState("recording")
+            if (outcome.operation.kind == MainaCaptureOperationKind.RESUME &&
+                outcome.operation.owner == MainaCapturePauseOwner.SYSTEM
+            ) {
+                recordNativeEvent(
+                    level = "info",
+                    category = "native-capture",
+                    eventName = "native-capture-auto-resumed-after-communication",
+                    message = "Capture resumed after the communication session ended",
+                    payload = mapOf("audioMode" to audioManager.mode),
+                )
+            }
+            refreshForegroundUi()
+        }
+        if (preEnableUi.isFailure) {
+            nativeCapture.latchReadsOffNow()
+            rollbackCommittedPublication(outcome.operation, "$committedEvent-ui-preparation-failed")
+            return
+        }
+
+        // Main is the sole token/reducer authority, so no stop/call transition
+        // can interleave between this final fresh check and the nonthrowing native
+        // read latch. All durability and callbacks above completed with reads off.
+        val communicationReacquired = observedCommunicationActive()
+        if (!MainaCaptureOperationPolicy.enableAllowed(
+                activeCaptureOperation,
+                outcome.operation,
+                controlState,
+                communicationReacquired,
+                acceptingWork = MainaCaptureLifecyclePolicy.acceptsNativeWork(acceptingNativeWork, destroyed),
+            )
+        ) {
+            nativeCapture.latchReadsOffNow()
+            rollbackCommittedPublication(outcome.operation, "$committedEvent-communication-reacquired")
+            return
+        }
+        activeCaptureOperation = null
+        if (nativeCapture.enablePreparedReads()) return
+        rollbackCommittedPublication(outcome.operation, "$committedEvent-enable-failed")
+    }
+
+    private fun rollbackCommittedPublication(
+        operation: MainaCaptureOperationToken,
+        event: String,
+    ) {
+        nativeCapture.latchReadsOffNow()
+        nativeCaptureStatus = nativeCapture.snapshot().asMap() + mapOf(
+            "state" to "pausing",
+            "pauseReason" to operation.owner.name.lowercase(),
+            "operationId" to operation.operationId,
+            "lastError" to "Capture publication was revoked before reads were enabled",
+        )
+        pausePreparedCapture(operation, observedCommunicationActive(), event)
+    }
+
+    private fun pausePreparedCapture(
+        operation: MainaCaptureOperationToken,
+        communicationActive: Boolean,
+        event: String,
+    ) {
+        val changed = communicationActive != controlState.communicationActive
+        val pending = controlState.copy(
+            phase = MainaCaptureControlPhase.PAUSE_PENDING,
+            pauseOwner = operation.owner,
+            generation = controlState.generation + if (changed) 1L else 0L,
+            communicationActive = communicationActive,
+        )
+        var pause: MainaCaptureOperationToken? = null
+        val persistenceFailure = MainaCaptureSafetySequencer.latchApplyPersistThenQueue(
+            latch = nativeCapture::latchReadsOffNow,
+            apply = {
+                applyControlState(pending)
+                pause = issueCaptureOperation(
+                    kind = MainaCaptureOperationKind.PAUSE,
+                    owner = operation.owner,
+                    expectedPhase = MainaCaptureControlPhase.PAUSE_PENDING,
+                )
+            },
+            persist = { persistControlStateOrThrow(pending, event) },
+            queue = {
+                pause?.let {
+                    dispatchNativePause(it, "pausing", "$event-paused", "$event-checkpoint-timeout")
+                }
+            },
+        )
+        persistenceFailure?.let { recordControlPersistenceFailure(event, it) }
+    }
+
+    private fun rollbackPreparedCapture(
+        operation: MainaCaptureOperationToken,
+        event: String,
+        communicationActive: Boolean,
+    ) {
+        if (!accepts(operation)) return
+        val rollbackPersisted = updateControlState(
+            controlState.copy(
+                phase = MainaCaptureControlPhase.PAUSED,
+                pauseOwner = operation.owner,
+                communicationActive = communicationActive,
+            ),
+            event,
+        )
+        activeCaptureOperation = null
+        clientSilenced = false
+        nativeCaptureStatus = nativeCapture.snapshot().asMap() + mapOf(
+            "state" to "paused",
+            "pauseReason" to operation.owner.name.lowercase(),
+            "operationId" to operation.operationId,
+        )
+        setCaptureState("paused")
+        refreshForegroundUi()
+        if (rollbackPersisted && operation.owner == MainaCapturePauseOwner.SYSTEM && !communicationActive) {
+            scheduleCommunicationResume()
+        }
+    }
+
+    private fun failClosedResumeDurability(owner: MainaCapturePauseOwner) {
+        nativeCapture.latchReadsOffNow()
+        activeCaptureOperation = null
+        applyControlState(
+            controlState.copy(
+                phase = MainaCaptureControlPhase.PAUSED,
+                pauseOwner = owner,
+            ),
+        )
+        nativeCaptureStatus = nativeCapture.snapshot().asMap() + mapOf(
+            "state" to "paused",
+            "pauseReason" to owner.name.lowercase(),
+            "lastError" to "Recording stays paused because control durability is unavailable",
+        )
+        runCatching {
+            setCaptureState("paused")
+            refreshForegroundUi()
+        }
+    }
+
+    private fun dispatchNativePause(
+        operation: MainaCaptureOperationToken,
+        pendingState: String,
+        completedEvent: String,
+        failedEvent: String,
+    ) {
+        nativeCaptureStatus = nativeCapture.snapshot().asMap() + mapOf(
+            "state" to pendingState,
+            "operationId" to operation.operationId,
+        )
+        val enqueued = enqueueNativeWork {
+            val result = runCatching { nativeCapture.pause() }
+            val outcome = NativeOutcome(
+                operation = operation,
+                snapshot = result.getOrElse { nativeCapture.snapshot() },
+                error = result.exceptionOrNull()?.let { it.message ?: it.javaClass.simpleName },
+            )
+            postMainOutcome { handlePauseOutcome(outcome, completedEvent, failedEvent) }
+        }
+        if (!enqueued && acceptingNativeWork && !destroyed) {
+            handlePauseOutcome(
+                NativeOutcome(
+                    operation = operation,
+                    snapshot = nativeCapture.snapshot(),
+                    error = "Native capture executor is unavailable",
+                ),
+                completedEvent,
+                failedEvent,
+            )
+        }
+    }
+
+    private fun handlePauseOutcome(outcome: NativeOutcome, completedEvent: String, failedEvent: String) {
+        requireMainReducer()
+        if (outcome.error != null) {
+            // Native pause has already latched reads off and released recorder
+            // ownership. Failure cannot be hidden by a newer pause token: unless
+            // Stop/Abort already owns terminal authority, finish this same capture.
+            // A failed checkpoint never flows through onPauseCompleted
+            // and therefore cannot auto-resume. Finish the meeting as a partial
+            // save under terminal authority instead of reopening an uncertain
+            // active chunk.
+            if (MainaCaptureOperationPolicy.pauseFailureMustTerminalize(
+                    controlState,
+                    acceptingWork = MainaCaptureLifecyclePolicy.acceptsNativeWork(
+                        acceptingNativeWork,
+                        destroyed,
+                    ),
+                )
+            ) {
+                requestTerminalNativeStop(
+                    kind = MainaCaptureOperationKind.STOP,
+                    event = failedEvent,
+                    abort = false,
+                    requestedTerminalState = MainaCallInterruptionPolicy.pauseFailed(controlState),
+                )
+                nativeCaptureStatus = nativeCaptureStatus + mapOf(
+                    "lastError" to outcome.error,
+                )
+            }
+            return
+        }
+        if (!accepts(outcome.operation)) return
+        clientSilenced = false
+        val event = completedEvent
+        when (val decision = MainaCallInterruptionPolicy.onPauseCompleted(controlState)) {
+            is MainaCaptureControlDecision.Resume -> {
+                val persisted = updateControlState(decision.state, event)
+                activeCaptureOperation = null
+                setCaptureState("paused")
+                if (persisted) scheduleCommunicationResume() else failClosedResumeDurability(outcome.operation.owner)
+            }
+            is MainaCaptureControlDecision.StateOnly -> {
+                updateControlState(decision.state, event)
+                activeCaptureOperation = null
+                setCaptureState("paused")
+            }
+            else -> return
+        }
+        nativeCaptureStatus = outcome.snapshot.asMap() + mapOf(
+            "state" to "paused",
+            "pauseReason" to outcome.operation.owner.name.lowercase(),
+            "operationId" to outcome.operation.operationId,
+            "lastError" to outcome.error,
+        )
+        refreshForegroundUi()
+    }
+
+    private fun queueNativePauseWithoutReducer(failedEvent: String) {
+        val enqueued = enqueueNativeWork {
+            val result = runCatching {
+                nativeCapture.latchReadsOffNow()
+                nativeCapture.pause()
+            }
+            val error = result.exceptionOrNull()?.let { it.message ?: it.javaClass.simpleName }
+            if (error != null) {
+                postMainOutcome { handleDetachedPauseFailure(error, failedEvent) }
+            }
+        }
+        if (!enqueued && MainaCaptureLifecyclePolicy.acceptsNativeWork(acceptingNativeWork, destroyed)) {
+            handleDetachedPauseFailure("Native capture executor is unavailable", failedEvent)
+        }
+    }
+
+    private fun handleDetachedPauseFailure(error: String, failedEvent: String) {
+        requireMainReducer()
+        // Even a stale/no-reducer cleanup owns a real native checkpoint. Its
+        // failure is safety-critical and cannot be hidden by a newer PAUSE or
+        // RESUME token; only an existing terminal/destroy winner may suppress it.
+        if (!MainaCaptureOperationPolicy.pauseFailureMustTerminalize(
+                controlState,
+                acceptingWork = MainaCaptureLifecyclePolicy.acceptsNativeWork(
+                    acceptingNativeWork,
+                    destroyed,
+                ),
+            )
+        ) return
+        requestTerminalNativeStop(
+            kind = MainaCaptureOperationKind.STOP,
+            event = failedEvent,
+            abort = false,
+            requestedTerminalState = MainaCallInterruptionPolicy.pauseFailed(controlState),
+        )
+        nativeCaptureStatus = nativeCaptureStatus + mapOf("lastError" to error)
+    }
+
+    private fun dispatchNativeStop(operation: MainaCaptureOperationToken, abort: Boolean) {
+        nativeCaptureStatus = nativeCapture.snapshot().asMap() + mapOf(
+            "state" to "finalizing",
+            "operationId" to operation.operationId,
+        )
+        val enqueued = enqueueNativeWork {
+            val result = runCatching { nativeCapture.stop() }
+            val outcome = NativeOutcome(
+                operation = operation,
+                snapshot = result.getOrElse { nativeCapture.snapshot() },
+                error = result.exceptionOrNull()?.let { it.message ?: it.javaClass.simpleName },
+            )
+            postMainOutcome { handleStopOutcome(outcome, abort) }
+        }
+        if (!enqueued && acceptingNativeWork && !destroyed) {
+            handleStopOutcome(
+                NativeOutcome(
+                    operation = operation,
+                    snapshot = nativeCapture.snapshot(),
+                    error = "Native capture executor is unavailable",
+                ),
+                abort,
+            )
+        }
+    }
+
+    private fun handleStopOutcome(outcome: NativeOutcome, abort: Boolean) {
+        requireMainReducer()
+        if (!accepts(outcome.operation)) return
+        if (outcome.error != null) {
+            nativeCaptureStatus = outcome.snapshot.asMap() + mapOf(
+                "state" to "error",
+                "lastError" to outcome.error,
+                "operationId" to outcome.operation.operationId,
+            )
+            refreshForegroundUi()
+            return
+        }
+        activeCaptureOperation = null
+        nativeCaptureStatus = outcome.snapshot.asMap() + mapOf("operationId" to outcome.operation.operationId)
+        if (abort) handleAbortCompletion(outcome.snapshot) else handleStopCompletion(outcome.snapshot)
+        setCaptureState("idle")
+        refreshForegroundUi()
+    }
+
+    private fun handleStopCompletion(snapshot: MainaNativeAudioCapture.Snapshot) {
+        val meetingId = snapshot.meetingId ?: lastCaptureMeetingId ?: return
+        val directory = lastCaptureDirectory ?: return
+        // Stop can arrive more than once. Only the accepted terminal operation
+        // may hand this meeting to post-processing.
+        if (postProcessingHandledMeetingId == meetingId) return
+        postProcessingHandledMeetingId = meetingId
+        val intent = Intent(this, MainaPostProcessingService::class.java).apply {
+            action = MainaPostProcessingService.ACTION_START
+            putExtra(MainaPostProcessingService.EXTRA_MEETING_ID, meetingId)
+            putExtra(MainaPostProcessingService.EXTRA_DIRECTORY, directory)
+            putExtra(MainaPostProcessingService.EXTRA_CAPTURE_ENDED_AT, System.currentTimeMillis())
+            putExtra(MainaPostProcessingService.EXTRA_MEETING_STARTED_AT, lastCaptureStartedAt)
+            putExtra(MainaPostProcessingService.EXTRA_ROUTE_RESTART_COUNT, snapshot.routeRestartCount)
+            putExtra(MainaPostProcessingService.EXTRA_CAPTURE_GAP_MS, snapshot.captureGapMs)
+        }
+        val launch = runCatching {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) startForegroundService(intent) else startService(intent)
+        }
+        var fallbackDurable = false
+        launch.onFailure { cause ->
+            val message = cause.message ?: cause.javaClass.simpleName
+            runCatching {
+                MainaPostProcessingOutbox.shared(applicationContext).begin(
+                    meetingId,
+                    directory,
+                    lastCaptureStartedAt,
+                    System.currentTimeMillis(),
+                    0L,
+                    0L,
+                    0,
+                    0,
+                    snapshot.routeRestartCount,
+                    snapshot.captureGapMs,
+                )
+                MainaPostProcessingOutbox.shared(applicationContext).defer(
+                    meetingId,
+                    "Saved audio is waiting for local transcription: $message",
+                )
+                MainaPostProcessingRecoveryScheduler.enqueue(applicationContext, meetingId)
+            }.onSuccess { fallbackDurable = true }
+            recordNativeEvent(
+                level = "warn",
+                category = "native-post-processing",
+                eventName = "post-processing-start-deferred",
+                message = "Saved audio will resume transcription when Maina is foregrounded",
+                payload = mapOf("meetingId" to meetingId, "error" to message),
+            )
+        }
+        if (launch.isSuccess || fallbackDurable) {
+            captureControlStore.clear()
+            durableControl = null
+        } else {
+            postProcessingHandledMeetingId = null
+        }
+    }
+
+    private fun handleAbortCompletion(snapshot: MainaNativeAudioCapture.Snapshot) {
+        // Discard is terminal and never enqueues post-processing.
+        postProcessingHandledMeetingId = snapshot.meetingId ?: lastCaptureMeetingId
+        lastCaptureMeetingId = null
+        lastCaptureDirectory = null
+        lastCaptureStartedAt = 0L
+        captureControlStore.clear()
+        durableControl = null
     }
 
     private fun refreshForegroundUi() {
@@ -807,7 +1404,7 @@ class MainaRecordingService : Service() {
 
     private fun reportDeviceChange(change: String, device: AudioDeviceInfo) {
         if (::nativeCapture.isInitialized && captureState == "recording") {
-            captureExecutor.execute {
+            enqueueNativeWork {
                 nativeCapture.requestRouteRefresh(change, device)
                 nativeCaptureStatus = nativeCaptureStatus + nativeCapture.snapshot().asMap() + mapOf(
                     "state" to nativeCaptureStatus["state"],
@@ -851,67 +1448,105 @@ class MainaRecordingService : Service() {
         )
     }
 
-    private fun reconcileCommunicationInterruption() {
-        if (!::nativeCapture.isInitialized) return
-        val nextCommunicationActive = MainaCallInterruptionPolicy.communicationActive(
+    private fun updateCommunicationWatch() {
+        requireMainReducer()
+        heartbeatHandler.removeCallbacks(communicationWatchRunnable)
+        if (isRunning && MainaCallInterruptionPolicy.shouldWatchCommunication(controlState)) {
+            heartbeatHandler.postDelayed(communicationWatchRunnable, COMMUNICATION_WATCH_INTERVAL_MS)
+        }
+    }
+
+    private fun refreshedClientSilenced(): Boolean {
+        val resolvedAudioSource = nativeCapture.snapshot().resolvedAudioSource
+        val observed = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            resolvedAudioSource?.let { source -> runCatching {
+                audioManager.activeRecordingConfigurations
+                    .filter { it.clientAudioSource == source }
+                    .any(AudioRecordingConfiguration::isClientSilenced)
+            }.getOrNull() }
+        } else {
+            false
+        }
+        return MainaCallInterruptionPolicy.refreshedClientSilenced(clientSilenced, observed).also {
+            clientSilenced = it
+        }
+    }
+
+    private fun observedCommunicationActive(): Boolean {
+        return MainaCallInterruptionPolicy.communicationActive(
             audioMode = audioManager.mode,
-            clientSilenced = clientSilenced,
+            clientSilenced = refreshedClientSilenced(),
         )
+    }
+
+    private fun reconcileCommunicationInterruption() {
+        if (!::nativeCapture.isInitialized ||
+            !MainaCaptureLifecyclePolicy.acceptsNativeWork(acceptingNativeWork, destroyed)
+        ) return
+        val nextCommunicationActive = observedCommunicationActive()
         val previousState = controlState
         when (val decision = MainaCallInterruptionPolicy.onCommunicationChanged(previousState, nextCommunicationActive)) {
             is MainaCaptureControlDecision.Pause -> {
                 cancelCommunicationRetryTimer()
                 communicationResumeStartedAtMs = 0L
                 communicationResumeAttempts = 0
-                val expectedGeneration = decision.state.generation
-                updateControlState(decision.state, "system-pause-pending")
-                recordNativeEvent(
-                    level = "info",
-                    category = "native-capture",
-                    eventName = "native-capture-auto-paused-for-communication",
-                    message = "Capture paused while another communication session owns the microphone",
-                    payload = mapOf("audioMode" to audioManager.mode, "clientSilenced" to clientSilenced),
-                )
-                submitCaptureCommand(
-                    pendingState = "pausing",
-                    successfulCaptureState = "paused",
-                    operation = { nativeCapture.pause() },
-                    onSuccess = {
-                        if (controlState.generation != expectedGeneration) return@submitCaptureCommand
-                        updateControlState(
-                            MainaCallInterruptionPolicy.pauseSucceeded(controlState),
-                            "system-paused",
-                        )
-                        nativeCaptureStatus = nativeCaptureStatus + mapOf(
-                            "pauseReason" to "communication",
-                            "interruption" to "communication",
+                var operation: MainaCaptureOperationToken? = null
+                val persistenceFailure = MainaCaptureSafetySequencer.latchApplyPersistThenQueue(
+                    latch = nativeCapture::latchReadsOffNow,
+                    apply = {
+                        applyControlState(decision.state)
+                        operation = issueCaptureOperation(
+                            kind = MainaCaptureOperationKind.PAUSE,
+                            owner = MainaCapturePauseOwner.SYSTEM,
+                            expectedPhase = MainaCaptureControlPhase.PAUSE_PENDING,
                         )
                     },
-                    onFailure = {
-                        // pause() sets the native paused flag and stops AudioRecord
-                        // before awaiting the fsynced chunk checkpoint. A checkpoint
-                        // timeout therefore remains fail-closed: never resume reads
-                        // while a call may own the microphone.
-                        if (controlState.generation == expectedGeneration) {
-                            updateControlState(
-                                MainaCallInterruptionPolicy.pauseSucceeded(controlState),
-                                "system-pause-checkpoint-timeout",
+                    persist = { persistControlStateOrThrow(decision.state, "system-pause-pending") },
+                    queue = {
+                        operation?.let {
+                            dispatchNativePause(
+                                operation = it,
+                                pendingState = "pausing",
+                                completedEvent = "system-paused",
+                                failedEvent = "system-pause-checkpoint-timeout",
                             )
                         }
                     },
                 )
+                persistenceFailure?.let { recordControlPersistenceFailure("system-pause-pending", it) }
+                runCatching {
+                    recordNativeEvent(
+                        level = "info",
+                        category = "native-capture",
+                        eventName = "native-capture-auto-paused-for-communication",
+                        message = "Capture paused while another communication session owns the microphone",
+                        payload = mapOf("audioMode" to audioManager.mode, "clientSilenced" to clientSilenced),
+                    )
+                }
             }
             is MainaCaptureControlDecision.Resume -> {
-                updateControlState(decision.state, "system-resume-pending")
-                scheduleCommunicationResume()
+                if (updateControlState(decision.state, "system-resume-pending")) {
+                    scheduleCommunicationResume()
+                } else {
+                    failClosedResumeDurability(MainaCapturePauseOwner.SYSTEM)
+                }
             }
             is MainaCaptureControlDecision.StateOnly -> {
                 if (decision.state != previousState) {
+                    val resumeWasInterrupted = nextCommunicationActive &&
+                        previousState.phase == MainaCaptureControlPhase.RESUME_PENDING
+                    if (resumeWasInterrupted) nativeCapture.latchReadsOffNow()
                     updateControlState(decision.state, "communication-observed")
                     cancelCommunicationRetryTimer()
                     if (nextCommunicationActive) {
                         communicationResumeStartedAtMs = 0L
                         communicationResumeAttempts = 0
+                        if (resumeWasInterrupted) {
+                            // A communication session reacquired the microphone
+                            // while resume was preparing a read-disabled recorder.
+                            invalidateActiveOperation()
+                            queueNativePauseWithoutReducer("communication-resume-cleanup-timeout")
+                        }
                     }
                 }
             }
@@ -926,7 +1561,10 @@ class MainaRecordingService : Service() {
         ) {
             val decision = MainaCallInterruptionPolicy.onCommunicationChanged(controlState, active = false)
             if (decision is MainaCaptureControlDecision.Resume) {
-                updateControlState(decision.state, "system-resume-retry-pending")
+                if (!updateControlState(decision.state, "system-resume-retry-pending")) {
+                    failClosedResumeDurability(MainaCapturePauseOwner.SYSTEM)
+                    return
+                }
             }
         }
         if (controlState.phase != MainaCaptureControlPhase.RESUME_PENDING ||
@@ -955,7 +1593,7 @@ class MainaRecordingService : Service() {
             refreshForegroundUi()
             // The durable chunks are complete and safe. Finish this meeting as
             // partial instead of leaving a pocket recording silently stuck.
-            heartbeatHandler.post {
+            postMainOutcome {
                 onStartCommand(
                     Intent(this, MainaRecordingService::class.java).setAction(ACTION_STOP_NATIVE_CAPTURE),
                     0,
@@ -969,47 +1607,30 @@ class MainaRecordingService : Service() {
         val delayMs = MainaCallInterruptionPolicy.resumeRetryDelayMs(communicationResumeAttempts)
         heartbeatHandler.postDelayed({
             communicationResumeScheduled = false
+            if (!acceptingNativeWork || destroyed) return@postDelayed
             if (expectedGeneration != controlState.generation ||
                 controlState.communicationActive ||
                 controlState.phase != MainaCaptureControlPhase.RESUME_PENDING ||
                 controlState.pauseOwner != MainaCapturePauseOwner.SYSTEM
             ) return@postDelayed
             communicationResumeAttempts += 1
-            submitCaptureCommand(
-                pendingState = "resuming",
-                successfulCaptureState = "recording",
-                operation = { nativeCapture.resume() },
-                onSuccess = {
-                    if (controlState.generation != expectedGeneration || controlState.communicationActive) {
-                        return@submitCaptureCommand
-                    }
-                    updateControlState(
-                        MainaCallInterruptionPolicy.resumeSucceeded(controlState),
-                        "system-resumed",
-                    )
-                    nativeCapture.publishRecordingOwnership("system-resume-published")
-                    communicationResumeStartedAtMs = 0L
-                    communicationResumeAttempts = 0
-                    nativeCaptureStatus = nativeCaptureStatus + mapOf("pauseReason" to null)
-                    recordNativeEvent(
-                        level = "info",
-                        category = "native-capture",
-                        eventName = "native-capture-auto-resumed-after-communication",
-                        message = "Capture resumed after the communication session ended",
-                        payload = mapOf("audioMode" to audioManager.mode),
-                    )
-                },
-                onFailure = {
-                    if (controlState.generation == expectedGeneration) {
-                        runCatching { nativeCapture.pause() }
-                        updateControlState(
-                            MainaCallInterruptionPolicy.resumeFailed(controlState),
-                            "system-resume-attempt-failed",
-                        )
-                        scheduleCommunicationResume()
-                    }
-                },
+            val operation = issueCaptureOperation(
+                kind = MainaCaptureOperationKind.RESUME,
+                owner = MainaCapturePauseOwner.SYSTEM,
+                expectedPhase = MainaCaptureControlPhase.RESUME_PENDING,
             )
+            dispatchPreparedCapture(
+                operation = operation,
+                pendingState = "resuming",
+                committedEvent = "system-resumed",
+                publicationEvent = "system-resume-published",
+                failureEvent = "system-resume-attempt-failed",
+            ) {
+                nativeCapture.resume(
+                    operation.expectedPrivacyLatchGeneration
+                        ?: error("Resume privacy authority is unavailable"),
+                )
+            }
         }, COMMUNICATION_RESUME_TOKEN, SystemClock.uptimeMillis() + delayMs)
     }
 
@@ -1020,15 +1641,27 @@ class MainaRecordingService : Service() {
         heartbeatHandler.removeCallbacksAndMessages(COMMUNICATION_RESUME_TOKEN)
     }
 
-    private fun updateControlState(nextState: MainaCaptureControlState, event: String) {
+    private fun applyControlState(nextState: MainaCaptureControlState) {
+        requireMainReducer()
+        controlState = nextState
+        updateCommunicationWatch()
+    }
+
+    private fun persistControlStateOrThrow(nextState: MainaCaptureControlState, event: String) {
+        requireMainReducer()
         val currentDurable = durableControl
-        if (currentDurable != null && nextState.phase != MainaCaptureControlPhase.TERMINAL) {
+        val snapshot = nativeCapture.snapshot()
+        if (currentDurable != null) {
             check(captureControlStore.update(currentDurable, nextState, nativeCapture.snapshot())) {
                 "Could not persist native capture control state"
             }
-            durableControl = captureControlStore.read()
+            durableControl = if (nextState.phase == MainaCaptureControlPhase.TERMINAL) {
+                null
+            } else {
+                captureControlStore.read()
+                    ?: error("Persisted capture control state could not be re-read")
+            }
         }
-        controlState = nextState
         if (::nativeCapture.isInitialized) {
             nativeCapture.persistControlTransition(
                 event,
@@ -1038,27 +1671,44 @@ class MainaRecordingService : Service() {
                     "pauseOwner" to nextState.pauseOwner.name.lowercase(),
                     "generation" to nextState.generation,
                     "communicationActive" to nextState.communicationActive,
-                    "chunkIndex" to nativeCapture.snapshot().chunkIndex,
+                    "chunkIndex" to snapshot.chunkIndex,
                 ),
             )
         }
     }
 
+    private fun recordControlPersistenceFailure(event: String, cause: Throwable) {
+        val message = cause.message ?: cause.javaClass.simpleName
+        nativeCaptureStatus = nativeCaptureStatus + mapOf(
+            "lastError" to "Capture control durability failed: $message",
+        )
+        runCatching {
+            recordNativeEvent(
+                level = "error",
+                category = "native-capture",
+                eventName = "$event-durability-failed",
+                message = "Capture control transition could not be made durable",
+                payload = mapOf("error" to message),
+            )
+        }
+    }
+
+    private fun updateControlState(nextState: MainaCaptureControlState, event: String): Boolean {
+        applyControlState(nextState)
+        return runCatching { persistControlStateOrThrow(nextState, event) }
+            .onFailure { recordControlPersistenceFailure(event, it) }
+            .isSuccess
+    }
+
     private fun invalidateCaptureControl(event: String) {
         cancelCommunicationRetryTimer()
+        invalidateActiveOperation()
         updateControlState(MainaCallInterruptionPolicy.terminal(controlState), event)
     }
 
     private fun restoreDurableCaptureControl() {
         val restored = captureControlStore.read() ?: return
-        val communicationActive = MainaCallInterruptionPolicy.communicationActive(
-            audioManager.mode,
-            clientSilenced,
-        )
-        val restoredState = MainaCallInterruptionPolicy.restoreAfterProcessDeath(
-            restored.reducerState(),
-            communicationActive,
-        )
+        if (!MainaCallInterruptionPolicy.shouldRestoreAfterProcessDeath(restored.reducerState())) return
         val processGapMs = (System.currentTimeMillis() - restored.updatedAtEpochMs).coerceAtLeast(0L)
         val snapshot = nativeCapture.restorePausedSession(
             MainaNativeAudioCapture.Options(
@@ -1069,16 +1719,28 @@ class MainaRecordingService : Service() {
             ),
             restored.captureGapMs + processGapMs,
         )
+        // The paused native shell exposes the exact resolved source without
+        // enabling reads, so silencing refresh is source-specific even here.
+        val communicationActive = observedCommunicationActive()
+        val restoredState = MainaCallInterruptionPolicy.restoreAfterProcessDeath(
+            restored.reducerState(),
+            communicationActive,
+        )
         lastCaptureMeetingId = restored.meetingId
         lastCaptureDirectory = restored.directory
         lastCaptureStartedAt = restored.meetingStartedAt
         postProcessingHandledMeetingId = null
         durableControl = restored
         controlState = restoredState
-        check(captureControlStore.update(restored, restoredState, snapshot)) {
-            "Could not persist fail-closed capture restoration"
-        }
-        durableControl = captureControlStore.read()
+        val restorationPersisted = runCatching {
+            check(captureControlStore.update(restored, restoredState, snapshot)) {
+                "Could not persist fail-closed capture restoration"
+            }
+            durableControl = captureControlStore.read()
+                ?: error("Persisted fail-closed restoration could not be re-read")
+        }.onFailure {
+            recordControlPersistenceFailure("process-restored-fail-closed", it)
+        }.isSuccess
         captureState = "paused"
         nativeCaptureStatus = snapshot.asMap() + mapOf(
             "state" to "paused",
@@ -1097,11 +1759,14 @@ class MainaRecordingService : Service() {
                 "generation" to restoredState.generation,
             ),
         )
-        if (restoredState.pauseOwner == MainaCapturePauseOwner.SYSTEM && !communicationActive) {
+        if (restorationPersisted && restoredState.pauseOwner == MainaCapturePauseOwner.SYSTEM && !communicationActive) {
             val decision = MainaCallInterruptionPolicy.onCommunicationChanged(restoredState, active = false)
             if (decision is MainaCaptureControlDecision.Resume) {
-                updateControlState(decision.state, "process-restored-resume-pending")
-                scheduleCommunicationResume()
+                if (updateControlState(decision.state, "process-restored-resume-pending")) {
+                    scheduleCommunicationResume()
+                } else {
+                    failClosedResumeDurability(MainaCapturePauseOwner.SYSTEM)
+                }
             }
         }
     }

@@ -20,6 +20,7 @@ import java.util.UUID
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
 import kotlin.concurrent.thread
 import kotlin.math.abs
 import kotlin.math.log10
@@ -107,10 +108,12 @@ internal class MainaNativeAudioCapture(
     private val paused = AtomicBoolean(false)
     private val readEnabled = AtomicBoolean(false)
     private val routeRefreshRequested = AtomicBoolean(false)
+    private val privacyLatchGeneration = AtomicLong(0L)
     private val lock = Any()
     private val recorderLock = Any()
     private val journalLock = Any()
     private val chunkTransferLock = Any()
+    private val readCommitBarrier = MainaReadCommitBarrier()
     private val audioManager = context.getSystemService(AudioManager::class.java)
     @Volatile private var recorder: AudioRecord? = null
     @Volatile private var worker: Thread? = null
@@ -169,7 +172,9 @@ internal class MainaNativeAudioCapture(
         peakDbfs = peakDbfs,
     )
 
-    fun start(options: Options): Snapshot = synchronized(lock) {
+    fun privacyGenerationSnapshot(): Long = privacyLatchGeneration.get()
+
+    fun start(options: Options, expectedLatchGeneration: Long): Snapshot = synchronized(lock) {
         check(!running.get()) { "Native capture is already active" }
         require(options.meetingId.isNotBlank()) { "meetingId is required" }
         require(options.chunkDurationMs in 30_000L..10 * 60_000L) { "chunkDurationMs must be 30 seconds to 10 minutes" }
@@ -205,7 +210,27 @@ internal class MainaNativeAudioCapture(
         ))
         val firstChunk = openChunk(directory)
         ownershipPhase = MainaAudioOwnershipPolicy.afterChunkPrepared(ownershipPhase)
-        val created = runCatching { createAndStartRecorder() }
+        val created = runCatching {
+            val candidate = createAndStartRecorder(expectedLatchGeneration)
+            val activated = readCommitBarrier.commitIf(
+                allowed = {
+                    MainaNativeRecorderOwnershipPolicy.latchGenerationMatches(
+                        expectedLatchGeneration,
+                        privacyLatchGeneration.get(),
+                    )
+                },
+                commit = {
+                    running.set(true)
+                    paused.set(false)
+                    readEnabled.set(false)
+                },
+            )
+            if (!activated) {
+                releaseRecorder()
+                error("Native AudioRecord ownership was revoked before capture activation")
+            }
+            candidate
+        }
             .onFailure {
                 closeChunk(firstChunk, directory, "start-failed")
                 ownershipPhase = MainaAudioOwnershipPolicy.afterStartFailure(ownershipPhase)
@@ -215,9 +240,6 @@ internal class MainaNativeAudioCapture(
         ownershipPhase = MainaAudioOwnershipPolicy.afterAudioOwned(ownershipPhase)
         ownershipPublicationPending = ownershipPhase
         synchronized(chunkTransferLock) { preparedChunk = firstChunk }
-        running.set(true)
-        paused.set(false)
-        readEnabled.set(false)
         pauseCheckpointLatch = null
         pauseStartedElapsedMs = null
         updateRoutedDevice(created)
@@ -285,26 +307,55 @@ internal class MainaNativeAudioCapture(
         synchronized(recorderLock) { runCatching { recorder?.stop() } }
     }
 
+    /**
+     * Immediate privacy latch for service control transitions. This performs no
+     * filesystem work and invokes no application callback. The later serialized
+     * pause/stop command remains responsible for checkpointing and cleanup.
+     */
+    fun latchReadsOffNow() {
+        val active = synchronized(recorderLock) {
+            readCommitBarrier.latch {
+                readEnabled.set(false)
+                paused.set(true)
+                ownershipPublicationPending = null
+                privacyLatchGeneration.incrementAndGet()
+            }
+            recorder
+        }
+        // Recorder creation checks the bound generation and starts while holding
+        // recorderLock. Therefore either it linearizes before this latch and is
+        // stopped here, or it observes the revoked generation and cannot start.
+        runCatching { active?.stop() }
+    }
+
     fun pause(): Snapshot {
         if (!running.get()) return snapshot()
-        if (paused.get()) return snapshot()
+        val hasPreparedChunk = synchronized(chunkTransferLock) { preparedChunk != null }
+        if (!MainaNativePauseCheckpointPolicy.requiresCheckpoint(
+                workerPresent = worker != null,
+                recorderPresent = recorder != null,
+                preparedChunkPresent = hasPreparedChunk,
+            )
+        ) return snapshot()
         val checkpoint = CountDownLatch(1)
         pauseCheckpointLatch = checkpoint
         pauseStartedElapsedMs = SystemClock.elapsedRealtime()
-        paused.set(true)
-        readEnabled.set(false)
-        runCatching { recorder?.stop() }
-        check(checkpoint.await(PAUSE_CHECKPOINT_TIMEOUT_MS, TimeUnit.MILLISECONDS)) {
+        latchReadsOffNow()
+        val checkpointReached = checkpoint.await(PAUSE_CHECKPOINT_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+        if (pauseCheckpointLatch === checkpoint) pauseCheckpointLatch = null
+        // Recorder ownership is released even when the worker did not acknowledge
+        // its checkpoint in time. A later recovery can never read from this owner.
+        releaseRecorder()
+        check(checkpointReached) {
             "Native capture did not finalize its active chunk before pause"
         }
-        releaseRecorder()
         currentOptions?.let { appendJournal(directoryFrom(it.directory), "paused", emptyMap()) }
         onEvent("info", "native-capture-paused", snapshot().asMap())
         publishStatus()
         return snapshot()
     }
 
-    fun resume(): Snapshot = synchronized(lock) {
+    fun resume(expectedLatchGeneration: Long): Snapshot = synchronized(lock) {
         if (!running.get() || !paused.get()) return snapshot()
         val options = currentOptions ?: return snapshot()
         val directory = directoryFrom(options.directory)
@@ -312,7 +363,26 @@ internal class MainaNativeAudioCapture(
         appendJournal(directory, "resume-intent", mapOf("chunkIndex" to currentChunkIndex))
         val nextChunk = openChunk(directory)
         ownershipPhase = MainaAudioOwnershipPolicy.afterChunkPrepared(ownershipPhase)
-        val created = runCatching { createAndStartRecorder() }
+        val created = runCatching {
+            val candidate = createAndStartRecorder(expectedLatchGeneration)
+            val activated = readCommitBarrier.commitIf(
+                allowed = {
+                    MainaNativeRecorderOwnershipPolicy.latchGenerationMatches(
+                        expectedLatchGeneration,
+                        privacyLatchGeneration.get(),
+                    )
+                },
+                commit = {
+                    paused.set(false)
+                    readEnabled.set(false)
+                },
+            )
+            if (!activated) {
+                releaseRecorder()
+                error("Native AudioRecord ownership was revoked before resume activation")
+            }
+            candidate
+        }
             .onFailure {
                 closeChunk(nextChunk, directory, "resume-start-failed")
                 ownershipPhase = MainaAudioOwnershipPolicy.afterStartFailure(ownershipPhase)
@@ -327,8 +397,6 @@ internal class MainaNativeAudioCapture(
         }
         pauseStartedElapsedMs = null
         pauseCheckpointLatch = null
-        paused.set(false)
-        readEnabled.set(false)
         updateRoutedDevice(created)
         appendJournal(directory, "resume-audio-owned", mapOf(
             "chunkIndex" to nextChunk.index,
@@ -342,17 +410,20 @@ internal class MainaNativeAudioCapture(
         return snapshot()
     }
 
-    /** The service calls this only after its durable reducer publishes Recording. */
-    fun publishRecordingOwnership(event: String): Snapshot = synchronized(lock) {
+    /**
+     * Completes every throwable publication action while microphone reads remain
+     * disabled. The service durably commits reducer authority before calling the
+     * separate nonthrowing enable step.
+     */
+    fun prepareRecordingOwnershipPublication(event: String): Snapshot = synchronized(lock) {
         check(running.get() && !paused.get()) { "Capture ownership is not ready to publish" }
+        check(!readEnabled.get()) { "Capture reads were enabled before publication preparation" }
         check(recorder?.recordingState == AudioRecord.RECORDSTATE_RECORDING) {
             "AudioRecord ownership was lost before publication"
         }
         val ownership = ownershipPublicationPending
             ?: error("No capture ownership is pending publication")
-        MainaAudioOwnershipPolicy.afterPublished(ownership)
-        ownershipPublicationPending = null
-        readEnabled.set(true)
+        val publishedOwnership = MainaAudioOwnershipPolicy.afterPublished(ownership)
         val options = currentOptions ?: error("Capture options are unavailable")
         val directory = directoryFrom(options.directory)
         appendJournal(directory, event, mapOf(
@@ -362,16 +433,25 @@ internal class MainaNativeAudioCapture(
         ))
         onEvent("info", event, snapshot().asMap())
         publishStatus()
+        ownershipPublicationPending = publishedOwnership
         snapshot()
     }
 
+    /** Final nonthrowing ownership handoff. No I/O or callback follows the latch. */
+    fun enablePreparedReads(): Boolean = synchronized(lock) {
+        if (!running.get() || paused.get() || readEnabled.get()) return false
+        if (ownershipPublicationPending != MainaAudioOwnershipPhase.RECORDING_PUBLISHED) return false
+        if (recorder?.recordingState != AudioRecord.RECORDSTATE_RECORDING) return false
+        ownershipPublicationPending = null
+        readEnabled.set(true)
+        true
+    }
+
     fun stop(): Snapshot = synchronized(lock) {
+        latchReadsOffNow()
         val wasRunning = running.getAndSet(false)
         if (!wasRunning && worker == null) return snapshot()
         paused.set(false)
-        readEnabled.set(false)
-        ownershipPublicationPending = null
-        runCatching { recorder?.stop() }
         val activeWorker = worker
         activeWorker?.join(STOP_JOIN_TIMEOUT_MS)
         check(activeWorker?.isAlive != true) {
@@ -446,9 +526,23 @@ internal class MainaNativeAudioCapture(
                 val read = recorder?.read(buffer, 0, buffer.size, AudioRecord.READ_BLOCKING) ?: AudioRecord.ERROR_INVALID_OPERATION
                 when {
                     read > 0 -> {
-                        activeChunk.output.write(buffer, 0, read)
-                        activeChunk.bytes += read
-                        currentBytesWritten = activeChunk.bytes
+                        val chunkForCommit = requireNotNull(activeChunk)
+                        val committed = readCommitBarrier.commitIf(
+                            allowed = {
+                                MainaNativeReadSafetyPolicy.shouldPersistRead(
+                                    readBytes = read,
+                                    running = running.get(),
+                                    paused = paused.get(),
+                                    readEnabled = readEnabled.get(),
+                                )
+                            },
+                            commit = {
+                                chunkForCommit.output.write(buffer, 0, read)
+                                chunkForCommit.bytes += read
+                                currentBytesWritten = chunkForCommit.bytes
+                            },
+                        )
+                        if (!committed) continue
                         updateLevels(buffer, read)
                         lastProgressAtMs = System.currentTimeMillis()
                         val now = SystemClock.elapsedRealtime()
@@ -521,17 +615,39 @@ internal class MainaNativeAudioCapture(
         appendJournal(directory, "route-recovery-started", mapOf("reason" to reason))
         onEvent("warn", "native-capture-route-recovery-started", snapshot().asMap() + mapOf("reason" to reason))
         var attempt = 0
-        while (running.get() && !paused.get()) {
+        while (MainaNativeRecorderOwnershipPolicy.recoveryMayProceed(running.get(), paused.get())) {
             val elapsed = SystemClock.elapsedRealtime() - recoveryStarted
             if (!MainaAudioCaptureRecoveryPolicy.isWithinRecoveryBudget(elapsed)) break
             if (attempt > 0) Thread.sleep(MainaAudioCaptureRecoveryPolicy.delayMs(attempt - 1))
+            if (!MainaNativeRecorderOwnershipPolicy.recoveryMayProceed(running.get(), paused.get())) break
+            // Capture the privacy generation before the final state check. If a
+            // latch lands before this read, the following paused check rejects
+            // recovery. If it lands after this read, recorder creation rejects
+            // the stale generation under recorderLock.
+            val expectedLatchGeneration = privacyLatchGeneration.get()
             val candidate = openChunk(directory)
+            if (!MainaNativeRecorderOwnershipPolicy.recoveryMayProceed(running.get(), paused.get())) {
+                closeChunk(candidate, directory, "route-recovery-paused-before-recorder")
+                break
+            }
             val recovered = runCatching {
                 createAndStartRecorder(
+                    expectedLatchGeneration = expectedLatchGeneration,
                     preferExternalInput = MainaAudioCaptureRecoveryPolicy.shouldPreferExternalInput(attempt),
                 )
             }
             if (recovered.isSuccess) {
+                if (!MainaNativeRecorderOwnershipPolicy.ownershipMayBeReturned(
+                        expectedLatchGeneration = expectedLatchGeneration,
+                        currentLatchGeneration = privacyLatchGeneration.get(),
+                        running = running.get(),
+                        paused = paused.get(),
+                    )
+                ) {
+                    releaseRecorder()
+                    closeChunk(candidate, directory, "route-recovery-revoked")
+                    break
+                }
                 routeRestartCount += 1
                 routeRecoveryActive = false
                 val gap = SystemClock.elapsedRealtime() - recoveryStarted
@@ -603,7 +719,10 @@ internal class MainaNativeAudioCapture(
         onStatus(snapshot().asMap())
     }
 
-    private fun createAndStartRecorder(preferExternalInput: Boolean = true): AudioRecord {
+    private fun createAndStartRecorder(
+        expectedLatchGeneration: Long,
+        preferExternalInput: Boolean = true,
+    ): AudioRecord {
         val created = AudioRecord.Builder()
             .setAudioSource(currentSource ?: MediaRecorder.AudioSource.VOICE_RECOGNITION)
             .setAudioFormat(
@@ -626,11 +745,16 @@ internal class MainaNativeAudioCapture(
                 ))
             }
         }
-        synchronized(recorderLock) { recorder = created }
         try {
-            created.startRecording()
-            check(created.recordingState == AudioRecord.RECORDSTATE_RECORDING) {
-                "Native AudioRecord did not enter recording state"
+            synchronized(recorderLock) {
+                check(privacyLatchGeneration.get() == expectedLatchGeneration) {
+                    "Native AudioRecord ownership was revoked before start"
+                }
+                recorder = created
+                created.startRecording()
+                check(created.recordingState == AudioRecord.RECORDSTATE_RECORDING) {
+                    "Native AudioRecord did not enter recording state"
+                }
             }
             return created
         } catch (cause: Throwable) {
