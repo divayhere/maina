@@ -73,8 +73,8 @@ case "\${1:-}:\${2:-}:\${3:-}" in
     : > "$state/install-started"
     while [[ ! -f "$state/release-install" ]]; do sleep 0.02; done
     cp "$3" "$state/installed.apk"
-    printf '68' > "$state/version-code"
-    printf '0.10.42' > "$state/version-name"
+    printf '69' > "$state/version-code"
+    printf '0.10.43' > "$state/version-name"
     printf 'Performing Streamed Install\\nSuccess\\n'
     ;;
   *)
@@ -93,7 +93,7 @@ chmodSync(apksigner, 0o755);
 
 const aapt = join(tools, 'aapt');
 writeFileSync(aapt, `#!/usr/bin/env bash
-printf "package: name='com.divay.maina' versionCode='68' versionName='0.10.42' platformBuildVersionName=''\\n"
+printf "package: name='com.divay.maina' versionCode='69' versionName='0.10.43' platformBuildVersionName=''\\n"
 `);
 chmodSync(aapt, 0o755);
 
@@ -118,8 +118,8 @@ function resetInstalled({ identical = false } = {}) {
   }
   if (identical) {
     copyFileSync(candidate, join(state, 'installed.apk'));
-    writeFileSync(join(state, 'version-code'), '68');
-    writeFileSync(join(state, 'version-name'), '0.10.42');
+    writeFileSync(join(state, 'version-code'), '69');
+    writeFileSync(join(state, 'version-name'), '0.10.43');
   } else {
     writeFileSync(join(state, 'installed.apk'), 'previous-installed-apk');
     writeFileSync(join(state, 'version-code'), '67');
@@ -128,11 +128,14 @@ function resetInstalled({ identical = false } = {}) {
 }
 
 function spawnInstaller() {
-  return spawn('bash', [installer, candidate], {
+  const child = spawn('bash', [installer, candidate], {
     cwd: repoRoot,
     env,
     stdio: ['ignore', 'pipe', 'pipe'],
   });
+  child.sanitizedStderr = '';
+  child.stderr.on('data', (chunk) => { child.sanitizedStderr += chunk; });
+  return child;
 }
 
 function waitFor(path, timeoutMs = 3_000) {
@@ -155,7 +158,10 @@ try {
   resetInstalled();
   const first = spawnInstaller();
   const firstExit = waitForExit(first);
-  await waitFor(join(state, 'install-started'));
+  await waitFor(join(state, 'install-started')).catch((error) => {
+    first.kill('SIGTERM');
+    throw new Error(`${error.message}; installer stderr: ${first.sanitizedStderr}`);
+  });
   const activeState = readFileSync(join(lockDirectory, 'state'), 'utf8');
   assert.match(activeState, /candidate_sha256=[a-f0-9]{64}/);
   assert.match(activeState, /outcome=running/);
@@ -171,7 +177,10 @@ try {
   resetInstalled();
   const interrupted = spawnInstaller();
   const interruptedExit = waitForExit(interrupted);
-  await waitFor(join(state, 'install-started'));
+  await waitFor(join(state, 'install-started')).catch((error) => {
+    interrupted.kill('SIGTERM');
+    throw new Error(`${error.message}; installer stderr: ${interrupted.sanitizedStderr}`);
+  });
   interrupted.kill('SIGTERM');
   writeFileSync(join(state, 'release-install'), 'release');
   const interruptedResult = await interruptedExit;

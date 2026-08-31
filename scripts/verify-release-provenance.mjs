@@ -13,7 +13,7 @@ import {
 } from './lib/release-provenance-core.mjs';
 
 const root = path.resolve(import.meta.dirname, '..');
-const plan = JSON.parse(readFileSync(path.join(root, 'release/m3-m4-candidate-plan.json'), 'utf8'));
+const plan = JSON.parse(readFileSync(path.join(root, 'release/m3-m4-0.10.43-candidate-plan.json'), 'utf8'));
 const temporary = mkdtempSync(path.join(tmpdir(), 'maina-release-provenance-'));
 const hash = 'a'.repeat(64);
 const uuid = 'AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE';
@@ -66,7 +66,7 @@ function artifactRecord(platform, audit) {
 }
 
 const androidAudit = {
-  packageName: 'com.divay.maina', versionName: '0.10.42', versionCode: 68,
+  packageName: plan.identity.androidPackage, versionName: plan.release.version, versionCode: plan.release.androidVersionCode,
   releaseSigned: true, signerCertificateSha256: plan.artifactPolicy.android.signerCertificateSha256, debuggable: false, profileable: false,
   permissionsExact: true, componentsExact: true, exportedBoundariesExact: true,
   permissions: structuredClone(plan.artifactPolicy.android.permissions),
@@ -77,7 +77,7 @@ const androidAudit = {
   modelChecksums: { 'assets/silero_vad.int8.onnx': hash }, contentsManifestSha256: hash,
 };
 const iosAudit = {
-  bundleIdentifier: 'com.divay.maina.staging', version: '0.10.42', buildNumber: '24',
+  bundleIdentifier: plan.identity.iosBundleIdentifier, version: plan.release.version, buildNumber: plan.release.iosBuildNumber,
   architectures: ['arm64'], signatureValid: true, teamId: '9X4X3R4KCN',
   designatedRequirement: plan.artifactPolicy.ios.designatedRequirement,
   entitlementsExact: true, entitlementsSha256: hash,
@@ -116,8 +116,8 @@ try {
   assert.equal(validateApprovedRelease(valid, plan), true);
   assert.equal(authorizeExactArtifact({ provenance: valid, plan, platform: 'android', artifactPath: valid.artifacts.android.path }), true);
   assert.deepEqual(replayConfig(valid, plan), {
-    androidPackage: 'com.divay.maina', androidVersion: '0.10.42', androidVersionCode: '68',
-    iosBundleIdentifier: 'com.divay.maina.staging', iosVersion: '0.10.42', iosBuildNumber: '24',
+    androidPackage: plan.identity.androidPackage, androidVersion: plan.release.version, androidVersionCode: String(plan.release.androidVersionCode),
+    iosBundleIdentifier: plan.identity.iosBundleIdentifier, iosVersion: plan.release.version, iosBuildNumber: plan.release.iosBuildNumber,
   });
 
   const candidate = provenance();
@@ -134,7 +134,7 @@ try {
   sourceDrift.sources.ios.upstreamCommit = '3'.repeat(40);
   assert.throws(() => validateApprovedRelease(sourceDrift, plan), /finalCommit/);
   const releaseDrift = provenance();
-  releaseDrift.release.androidVersionCode = 69;
+  releaseDrift.release.androidVersionCode = plan.release.androidVersionCode + 1;
   assert.throws(() => validateApprovedRelease(releaseDrift, plan), /androidVersionCode/);
   const noActor = provenance();
   noActor.approval.approvedBy = null;
