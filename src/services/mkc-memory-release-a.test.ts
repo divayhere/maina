@@ -23,7 +23,7 @@ import {
 } from './mkc-memory-release-a';
 
 const mocks = vi.hoisted(() => ({
-  getSession: vi.fn(),
+  requireScope: vi.fn(),
   fetch: vi.fn(),
   getCache: vi.fn(),
   putCache: vi.fn(),
@@ -38,7 +38,8 @@ vi.mock('./mainaCloudSession', () => {
   }
   return {
     MainaCloudApiError,
-    getMainaCloudSession: mocks.getSession,
+    MainaCloudScopeError: class MainaCloudScopeError extends Error {},
+    requireMainaCloudScope: mocks.requireScope,
     mainaCloudRequestJson: mocks.fetch,
   };
 });
@@ -50,12 +51,14 @@ vi.mock('./mkc-memory-cache', () => ({
 
 describe('MKC Release A Meetings client', () => {
   beforeEach(() => {
-    mocks.getSession.mockReset();
+    mocks.requireScope.mockReset();
     mocks.fetch.mockReset();
     mocks.getCache.mockReset();
     mocks.putCache.mockReset();
-    mocks.getSession.mockResolvedValue({
+    mocks.requireScope.mockResolvedValue({
       accessToken: 'redacted-test-token',
+      scopes: ['recall:read'],
+      scopesVerifiedAt: 1,
       user: { userId: 'owner-a', email: 'owner-a@example.test' },
     });
   });
@@ -64,12 +67,12 @@ describe('MKC Release A Meetings client', () => {
     await expect(listCloudMeetings({ enabled: false })).rejects.toEqual(
       expect.objectContaining({ kind: 'invalid', retryable: false } satisfies Partial<MkcMemoryReadError>),
     );
-    expect(mocks.getSession).not.toHaveBeenCalled();
+    expect(mocks.requireScope).not.toHaveBeenCalled();
     expect(mocks.fetch).not.toHaveBeenCalled();
     await expect(openFrozenRecall({ searchId: 'search-disabled', enabled: false })).rejects.toEqual(
       expect.objectContaining({ kind: 'invalid', retryable: false } satisfies Partial<MkcMemoryReadError>),
     );
-    expect(mocks.getSession).not.toHaveBeenCalled();
+    expect(mocks.requireScope).not.toHaveBeenCalled();
   });
 
   it('strictly decodes and owner-scopes a successful network result before caching', async () => {

@@ -15,7 +15,7 @@ import { getQwenAsrStatus, getRemoteControlStatus, openRemoteAccessibilitySettin
 import { describeRemoteHealth } from '@/hardware/trigger/remoteHealth';
 import type { QwenAsrStatus, RemoteControlStatus } from '../../modules/maina-recorder/src';
 import { DEFAULT_CONFIG, getAppConfig, saveAppConfig, type AppConfig } from '@/services/config';
-import { createMainaCloudPairing, exchangeMainaCloudPairing, formatMainaCloudPairingCode, getMainaCloudConnection, signOutMainaCloud, type MainaCloudPairingRequest, type MainaCloudSession } from '@/services/mainaCloudSession';
+import { createMainaCloudPairing, exchangeMainaCloudPairing, formatMainaCloudPairingCode, getMainaCloudConnection, mainaCloudSessionHasScope, signOutMainaCloud, type MainaCloudPairingRequest, type MainaCloudSession } from '@/services/mainaCloudSession';
 import { queueEligibleMainaKnowledgeCloudSyncs } from '@/services/mainaKnowledgeCloud';
 import { queueEligibleMainaKnowledgeCloudCorrections } from '@/services/mainaKnowledgeCloudCorrections';
 import { queueEligibleMeetingPackets } from '@/services/meetingPacket';
@@ -46,6 +46,8 @@ export default function SettingsScreen() {
   const [cloudBusy, setCloudBusy] = useState(false);
   const [cloudMessage, setCloudMessage] = useState<string | null>(null);
   const remoteHealth = useMemo(() => describeRemoteHealth(remote), [remote]);
+  const memoryReady = !!cloudSession?.scopesVerifiedAt && mainaCloudSessionHasScope(cloudSession, 'recall:read');
+  const memoryScopeVerified = !!cloudSession?.scopesVerifiedAt;
 
   const load = useCallback(async () => {
     const [nextConfig, nextSession] = await Promise.all([getAppConfig(), getMainaCloudConnection()]);
@@ -84,7 +86,8 @@ export default function SettingsScreen() {
     setCloudBusy(true); setCloudMessage(null);
     try {
       const session = await exchangeMainaCloudPairing(pairing);
-      setCloudSession(session); setPairing(null);
+      const verifiedSession = await getMainaCloudConnection();
+      setCloudSession(verifiedSession ?? session); setPairing(null);
       const [notes, sources, corrections] = await Promise.all([
         queueEligibleMeetingPackets({ forceRetry: true }).catch(() => 0),
         queueEligibleMainaKnowledgeCloudSyncs({
@@ -127,7 +130,15 @@ export default function SettingsScreen() {
           {cloudSession ? (
             <View style={{ gap: space.md }}>
               <SettingsRow label="Account" value={cloudSession.user.email} />
-              <SettingsRow label="Notes & memory" value="Automatic" helper="Maina sends a finalized transcript; it never sends your provider key." />
+              <SettingsRow
+                label="Notes & memory"
+                value={memoryReady ? 'Automatic' : memoryScopeVerified ? 'Re-pair for Memory' : 'Access not verified'}
+                helper={memoryReady
+                  ? 'Maina sends a finalized transcript; it never sends your provider key.'
+                  : memoryScopeVerified
+                    ? 'This older phone session still handles meeting sync, but Memory stays disabled until you re-pair.'
+                    : 'Check your internet and refresh before re-pairing; local meetings remain available.'}
+              />
               <Pressable onPress={() => void disconnectCloud()} disabled={cloudBusy} hitSlop={8}><AppText variant="bodyStrong" color={theme.warn}>{cloudBusy ? 'Disconnecting…' : 'Disconnect this phone'}</AppText></Pressable>
             </View>
           ) : pairing ? (
