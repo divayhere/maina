@@ -17,7 +17,7 @@
       "branch": "codex/ios-mobile-memory-m3-m4",
       "productCommit": "5bb0223364ce135c662f8fad507f82138844e1b2"
     },
-    "coordinationCommit": "febe5da858b3196bccde3683e7ba4c21fa500289",
+    "coordinationCommit": "6048d12ae2a6ffb80f97a9873f450e927b04ca4c",
     "backendSourceCommit": "b879876506aaf7a18f4c2d26b9c5442629f68190",
     "backendProductionDeployment": "c6b5f0ce-5631-48bf-a83b-c76a2f6c99d0"
   },

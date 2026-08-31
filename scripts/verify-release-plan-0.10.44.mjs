@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
@@ -25,7 +26,12 @@ assert.equal(plan.releaseId, 'maina-m3-m4-0.10.44');
 assert.deepEqual(plan.release, { version: '0.10.44', androidVersionCode: 70, iosBuildNumber: '26' });
 assert.equal(plan.sources.android.productCommit, '557adde0fd88109c62ef556eba4c1c41845c5d7e');
 assert.equal(plan.sources.ios.productCommit, '5bb0223364ce135c662f8fad507f82138844e1b2');
-assert.equal(plan.sources.coordinationCommit, historicalPlan.sources.coordinationCommit);
+assert.equal(historicalPlan.sources.coordinationCommit, 'febe5da858b3196bccde3683e7ba4c21fa500289');
+assert.equal(plan.sources.coordinationCommit, '6048d12ae2a6ffb80f97a9873f450e927b04ca4c');
+assert.equal(
+  execFileSync('git', ['-C', path.join(root, 'coordination'), 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim(),
+  plan.sources.coordinationCommit,
+);
 assert.equal(plan.sources.backendSourceCommit, historicalPlan.sources.backendSourceCommit);
 assert.equal(plan.sources.backendProductionDeployment, historicalPlan.sources.backendProductionDeployment);
 assert.equal(plan.identity.androidPackage, 'com.divay.maina');
