@@ -14,7 +14,7 @@ import {
   getMainaKnowledgeCloudSettings,
 } from '@/services/config';
 import { log } from '@/services/logger';
-import { clearMainaCloudSession, mainaCloudRequestJson } from '@/services/mainaCloudSession';
+import { clearMainaCloudSession, mainaCloudRequestJson, shouldClearMainaCloudSession } from '@/services/mainaCloudSession';
 import { notifyMeetingPipelineChanged } from '@/services/meetingPipelineSignals';
 import {
   buildMainaKnowledgeCloudSourcePackage,
@@ -219,7 +219,7 @@ async function syncMeetingToMainaKnowledgeCloud(meetingId: string): Promise<void
       // The settings façade derives this credential only from the paired
       // SecureStore session. Clear an invalid session, never local meeting
       // evidence, so Settings can truthfully offer a reconnect.
-      await clearMainaCloudSession();
+      if (response.status === 401) await clearMainaCloudSession();
       await setCloudSyncState(meetingId, {
         knowledgeCloudSyncStatus: 'sync_failed_auth',
         knowledgeCloudError: safeCloudFailureMessage('auth'),
@@ -288,7 +288,7 @@ async function syncMeetingToMainaKnowledgeCloud(meetingId: string): Promise<void
         nextRetryAt: retry.nextRetryAt,
       });
     } else {
-      if (failureClass === 'auth') await clearMainaCloudSession();
+      if (shouldClearMainaCloudSession(cause)) await clearMainaCloudSession();
       await setCloudSyncState(meetingId, {
         knowledgeCloudSyncStatus: failureClass === 'auth' ? 'sync_failed_auth' : 'sync_failed_validation',
         knowledgeCloudError: safeCloudFailureMessage(failureClass),

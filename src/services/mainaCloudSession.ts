@@ -28,8 +28,20 @@ export type MainaCloudUser = {
 export type MainaCloudSession = {
   accessToken: string;
   expiresAt?: string | null;
+  scopes: string[];
+  scopesVerifiedAt?: number | null;
   user: MainaCloudUser;
 };
+
+export class MainaCloudScopeError extends Error {
+  constructor(
+    readonly code: 'cloud_scope_unverified' | 'cloud_scope_repair_required',
+    message: string,
+  ) {
+    super(message);
+    this.name = 'MainaCloudScopeError';
+  }
+}
 
 export type MainaCloudPairingRequest = {
   pairingId: string;
@@ -59,6 +71,10 @@ function parseStoredSession(value: string | null): MainaCloudSession | null {
     return {
       accessToken: parsed.accessToken,
       expiresAt: parsed.expiresAt ?? null,
+      scopes: Array.isArray(parsed.scopes)
+        ? parsed.scopes.filter((scope): scope is string => typeof scope === 'string')
+        : [],
+      scopesVerifiedAt: typeof parsed.scopesVerifiedAt === 'number' ? parsed.scopesVerifiedAt : null,
       user: {
         userId: parsed.user.userId,
         email: parsed.user.email,
@@ -149,7 +165,7 @@ export async function mainaCloudRequestJson(
   });
   if (!response.ok && options?.acceptHttpErrors !== true) {
     const failure = rejectedMainaCloudResponse(response);
-    if (response.status === 401 || response.status === 403) {
+    if (response.status === 401) {
       // Preserve nothing but an opaque expired token; no local meeting state
       // is mutated here. The caller maps this to an auth-blocked cloud job.
       await clearMainaCloudSession();
@@ -213,6 +229,8 @@ export async function exchangeMainaCloudPairing(input: MainaCloudPairingRequest)
   const session: MainaCloudSession = {
     accessToken: body.access_token,
     expiresAt: typeof body.expires_at === 'string' ? body.expires_at : null,
+    scopes: [],
+    scopesVerifiedAt: null,
     user: {
       userId,
       email: body.user.email,
@@ -246,12 +264,17 @@ export async function getMainaCloudConnection(): Promise<MainaCloudSession | nul
     const response = await mainaCloudRequestJson('/v1/auth/me');
     const body = response.data as {
       expires_at?: unknown;
-      user?: { user_id?: unknown; email?: unknown; display_name?: unknown; role?: unknown };
+      user?: { user_id?: unknown; email?: unknown; display_name?: unknown; role?: unknown; scopes?: unknown };
     };
     if (typeof body.user?.user_id === 'string' && typeof body.user.email === 'string') {
+      const scopes = Array.isArray(body.user.scopes)
+        ? body.user.scopes.filter((scope): scope is string => typeof scope === 'string')
+        : null;
       const refreshed: MainaCloudSession = {
         ...session,
         expiresAt: typeof body.expires_at === 'string' ? body.expires_at : session.expiresAt,
+        scopes: scopes ?? [],
+        scopesVerifiedAt: scopes ? Date.now() : null,
         user: {
           userId: body.user.user_id,
           email: body.user.email,
@@ -264,8 +287,42 @@ export async function getMainaCloudConnection(): Promise<MainaCloudSession | nul
     }
     return session;
   } catch (cause) {
-    if (cause instanceof MainaCloudApiError && (cause.status === 401 || cause.status === 403)) return null;
+    if (cause instanceof MainaCloudApiError && cause.status === 401) return null;
     // A temporary offline state must not log the user out or block local work.
     return session;
   }
+}
+
+export function mainaCloudSessionHasScope(session: MainaCloudSession, scope: string): boolean {
+  return session.scopes.includes('*') || session.scopes.includes(scope);
+}
+
+export async function requireMainaCloudScope(scope: string): Promise<MainaCloudSession> {
+  const stored = await getMainaCloudSession();
+  if (!stored) {
+    throw new MainaCloudScopeError('cloud_scope_unverified', 'Connect Maina Cloud to use Memory.');
+  }
+  if (stored.scopesVerifiedAt && mainaCloudSessionHasScope(stored, scope)) return stored;
+
+  const refreshed = await getMainaCloudConnection();
+  if (!refreshed) {
+    throw new MainaCloudScopeError('cloud_scope_unverified', 'Connect Maina Cloud to use Memory.');
+  }
+  if (!refreshed.scopesVerifiedAt) {
+    throw new MainaCloudScopeError(
+      'cloud_scope_unverified',
+      'Maina could not verify Cloud access. Check your internet and refresh.',
+    );
+  }
+  if (!mainaCloudSessionHasScope(refreshed, scope)) {
+    throw new MainaCloudScopeError(
+      'cloud_scope_repair_required',
+      'Re-pair this phone in Settings to enable Memory. Your local meetings are safe.',
+    );
+  }
+  return refreshed;
+}
+
+export function shouldClearMainaCloudSession(cause: unknown): boolean {
+  return cause instanceof MainaCloudApiError && cause.status === 401;
 }

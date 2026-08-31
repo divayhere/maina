@@ -9,7 +9,13 @@ vi.mock('./mainaCloudSession', () => ({
       super(message);
     }
   },
+  MainaCloudScopeError: class MainaCloudScopeError extends Error {},
+  requireMainaCloudScope: vi.fn(),
   mainaCloudRequestJson: mocks.mainaCloudRequestJson,
+}));
+vi.mock('./mkc-memory-cache', () => ({
+  getMkcMemoryCacheEntry: vi.fn(),
+  putMkcMemoryCacheEntry: vi.fn(),
 }));
 
 import { MkcMemoryReadError, readMkcMemory } from './mkc-memory-client';

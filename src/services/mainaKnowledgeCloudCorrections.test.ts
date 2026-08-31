@@ -40,6 +40,7 @@ vi.mock('@/services/logger', () => ({
 vi.mock('@/services/mainaCloudSession', () => ({
   clearMainaCloudSession: mocks.clearSession,
   mainaCloudRequestJson: mocks.cloudRequest,
+  shouldClearMainaCloudSession: (cause: { status?: number } | null) => cause?.status === 401,
 }));
 vi.mock('@/services/pipelineWakeScheduler', () => ({
   armPipelineNetworkRecovery: vi.fn().mockResolvedValue({ armed: true, generation: 1 }),

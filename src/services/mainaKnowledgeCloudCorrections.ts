@@ -13,7 +13,7 @@ import {
 } from '@/data/meetings';
 import { getMainaKnowledgeCloudSettings } from '@/services/config';
 import { log } from '@/services/logger';
-import { clearMainaCloudSession, mainaCloudRequestJson } from '@/services/mainaCloudSession';
+import { clearMainaCloudSession, mainaCloudRequestJson, shouldClearMainaCloudSession } from '@/services/mainaCloudSession';
 import { classifyTransportCause, safeCloudFailureMessage } from '@/core/pipeline/cloudFailure';
 import { armPipelineNetworkRecovery } from '@/services/pipelineWakeScheduler';
 import { isRetryableCloudFailure, nextCloudRetry } from '@/services/cloudRetryPolicy';
@@ -95,7 +95,7 @@ async function syncCorrection(correctionKey: string): Promise<void> {
           : result.outcome === 'blocked_budget'
             ? 'sync_blocked_budget'
             : 'sync_failed_retryable';
-    if (syncStatus === 'sync_failed_auth') await clearMainaCloudSession();
+    if (syncStatus === 'sync_failed_auth' && response.status === 401) await clearMainaCloudSession();
     const safeError = syncStatus === 'sync_failed_auth'
       ? safeCloudFailureMessage('auth')
       : syncStatus === 'sync_failed_retryable' || syncStatus === 'sync_blocked_budget'
@@ -137,7 +137,7 @@ async function syncCorrection(correctionKey: string): Promise<void> {
         visibleError: safeCloudFailureMessage(failureClass),
       });
     } else {
-      if (failureClass === 'auth') await clearMainaCloudSession();
+      if (shouldClearMainaCloudSession(cause)) await clearMainaCloudSession();
       await updateKnowledgeCloudCorrection(correctionKey, {
         syncStatus: failureClass === 'auth' ? 'sync_failed_auth' : 'sync_failed_validation',
         error: safeCloudFailureMessage(failureClass),

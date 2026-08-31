@@ -24,14 +24,18 @@ import {
   createMainaCloudPairing,
   exchangeMainaCloudPairing,
   formatMainaCloudPairingCode,
+  getMainaCloudConnection,
   getMainaCloudSession,
   mainaCloudRequestJson,
+  requireMainaCloudScope,
   saveMainaCloudSession,
 } from './mainaCloudSession';
 
 const validSession = {
   accessToken: 'opaque-scoped-token',
   expiresAt: '2030-01-01T00:00:00.000Z',
+  scopes: ['notes:write'],
+  scopesVerifiedAt: 1_788_000_000_000,
   user: { userId: 'user-1', email: 'owner@maina.local', displayName: 'Divay', role: 'owner' },
 };
 
@@ -127,6 +131,50 @@ describe('mainaCloudSession', () => {
       message: 'Reconnect Maina Cloud. Your recording and transcript are safe.',
     } satisfies Partial<MainaCloudApiError>));
     expect(await getMainaCloudSession()).toBeNull();
+  });
+
+  it('preserves a valid session after an ordinary forbidden reply', async () => {
+    await saveMainaCloudSession(validSession);
+    mocks.fetch.mockResolvedValue(new Response(JSON.stringify({
+      error: { code: 'auth_forbidden', message: 'scope not granted' },
+    }), { status: 403 }));
+
+    await expect(mainaCloudRequestJson('/v1/memory-pulse')).rejects.toEqual(expect.objectContaining({
+      name: 'MainaCloudApiError', status: 403, code: 'auth_forbidden', failureClass: 'auth',
+    } satisfies Partial<MainaCloudApiError>));
+    expect(await getMainaCloudSession()).toEqual(validSession);
+  });
+
+  it('uses auth/me as the authority for recall read access and reports legacy sessions truthfully', async () => {
+    await saveMainaCloudSession({ ...validSession, scopes: [], scopesVerifiedAt: null });
+    mocks.fetch.mockResolvedValueOnce(new Response(JSON.stringify({
+      expires_at: validSession.expiresAt,
+      user: { user_id: 'user-1', email: 'owner@maina.local', display_name: 'Divay', role: 'owner', scopes: ['notes:write'] },
+    }), { status: 200 }));
+
+    await expect(requireMainaCloudScope('recall:read')).rejects.toEqual(expect.objectContaining({
+      name: 'MainaCloudScopeError', code: 'cloud_scope_repair_required',
+      message: expect.stringContaining('Re-pair'),
+    }));
+    expect((await getMainaCloudSession())?.scopes).toEqual(['notes:write']);
+
+    mocks.fetch.mockResolvedValueOnce(new Response(JSON.stringify({
+      expires_at: validSession.expiresAt,
+      user: { user_id: 'user-1', email: 'owner@maina.local', display_name: 'Divay', role: 'owner', scopes: ['notes:write', 'recall:read'] },
+    }), { status: 200 }));
+    await saveMainaCloudSession({ ...validSession, scopes: [], scopesVerifiedAt: null });
+    await expect(requireMainaCloudScope('recall:read')).resolves.toEqual(expect.objectContaining({
+      scopes: expect.arrayContaining(['recall:read']),
+    }));
+  });
+
+  it('keeps an unverified legacy session when auth/me is temporarily offline', async () => {
+    await saveMainaCloudSession({ ...validSession, scopes: [], scopesVerifiedAt: null });
+    mocks.fetch.mockRejectedValue(new TypeError('network unavailable'));
+    await expect(getMainaCloudConnection()).resolves.toEqual(expect.objectContaining({ scopes: [] }));
+    await expect(requireMainaCloudScope('recall:read')).rejects.toEqual(expect.objectContaining({
+      code: 'cloud_scope_unverified',
+    }));
   });
 
   it('keeps malformed gateway bodies classified by their retryable HTTP status', async () => {

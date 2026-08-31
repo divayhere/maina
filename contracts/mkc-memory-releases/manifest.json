@@ -1,0 +1,28 @@
+{
+  "schema_version": "maina.mobile-memory-contract-pin.v1",
+  "backend_commit": "b879876506aaf7a18f4c2d26b9c5442629f68190",
+  "deployment": "c6b5f0ce-5631-48bf-a83b-c76a2f6c99d0",
+  "rollback": "f2a16cdf-902d-4ae8-99a3-135385a6a15c",
+  "coordination": "dea5f017065c0717e05c4b459c1c29b994d20995",
+  "source_files": {
+    "openapi": {
+      "path": "contracts/openapi.v0.1.json",
+      "sha256": "9b413bc44317f657dfc358927c53320a7be3b64cc7517a6e55fb89d5f38c8697"
+    },
+    "mobile_session_scopes": {
+      "path": "src/auth/identity.ts",
+      "sha256": "22290021bb398e59770eed6952e3f37ba8954afd3d455e99c6189c2d9339681a"
+    }
+  },
+  "selected_schemas_sha256": "490ebf30df12a611ab697de361afbcf1f3c656fd7bda820df47331fb427d307c",
+  "generated_types": {
+    "path": "src/contracts/mkc-memory-releases.generated.ts",
+    "sha256": "7053244125c053c905cca88dbc74613be1e5b380842c9e5220d55bd12da3983c"
+  },
+  "activation": {
+    "memory_surface": "default-off",
+    "memory_pulse": "contract-complete-deployed-default-off",
+    "saved_smart_recalls": "contract-complete-deployed-default-off",
+    "mobile_scope": "new-sessions-recall-read-existing-sessions-repair-required"
+  }
+}
