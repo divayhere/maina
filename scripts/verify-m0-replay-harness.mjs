@@ -22,6 +22,9 @@ const requiredFragments = [
   'test -s "$log_file"',
   'ConnectionType !== "USB"',
   'ProductType !== "iPhone15,4"',
+  'release-provenance-cli.mjs" replay-config',
+  'PROVENANCE_ANDROID_VERSION',
+  'PROVENANCE_IOS_VERSION',
   'health)',
 ];
 
@@ -33,6 +36,9 @@ for (const fragment of requiredFragments) {
 
 if (source.includes('--terminate-existing')) {
   throw new Error('M0 replay harness must never terminate an active installed app or test.');
+}
+if (/0\.10\.34|CFBundleVersion\s*!==\s*"16"/.test(source)) {
+  throw new Error('M0 replay harness contains a stale historical app version literal.');
 }
 
 console.log('M0 replay harness static safety verification passed.');

@@ -35,12 +35,12 @@ assert.throws(() => validateAndroidUpdate({ ...valid, installedSigner: '' }), /c
 const installed = {
   candidateSha256: 'hash', installedSha256: 'hash',
   candidateSigner: 'signer', installedSigner: 'signer',
-  candidateVersionCode: '65', installedVersionCode: '65',
-  candidateVersionName: '0.10.39', installedVersionName: '0.10.39',
+  candidateVersionCode: '68', installedVersionCode: '68',
+  candidateVersionName: '0.10.42', installedVersionName: '0.10.42',
 };
 assert.equal(validateInstalledAndroidArtifact(installed), true);
 assert.throws(() => validateInstalledAndroidArtifact({ ...installed, installedSha256: 'different' }), /hash/);
 assert.throws(() => validateInstalledAndroidArtifact({ ...installed, installedSigner: 'different' }), /certificate/);
-assert.throws(() => validateInstalledAndroidArtifact({ ...installed, installedVersionCode: '64' }), /version code/);
-assert.throws(() => validateInstalledAndroidArtifact({ ...installed, installedVersionName: '0.10.38' }), /version name/);
+assert.throws(() => validateInstalledAndroidArtifact({ ...installed, installedVersionCode: '67' }), /version code/);
+assert.throws(() => validateInstalledAndroidArtifact({ ...installed, installedVersionName: '0.10.41' }), /version name/);
 console.log('Android renewal safety policy verified.');
