@@ -101,6 +101,7 @@ assert.match(source('scripts/build-android-release-candidate.sh'), /Maina-0\.10\
 assert.match(source('scripts/build-ios-release-candidate.sh'), /Maina-0\.10\.43-25\.app\.zip/);
 assert.equal((source('scripts/build-android-release-candidate.sh').match(/verify-generated-native-release-metadata\.mjs android/g) ?? []).length, 2);
 assert.equal((source('scripts/build-ios-release-candidate.sh').match(/verify-generated-native-release-metadata\.mjs ios/g) ?? []).length, 2);
+assert.match(manifest.scripts['verify:release-plan-candidate'], /verify-generated-native-release-metadata\.synthetic\.mjs/);
 assert.match(source('scripts/build-install-ios-staging.sh'), /Refusing combined candidate build\/install/);
 assert.match(source('scripts/renew-ios-personal.sh'), /Refusing build-and-install renewal for the active candidate/);
 console.log('0.10.43 release candidate identity, frozen 0.10.42 evidence plan, defaults, and drawer qualification policy verified.');
