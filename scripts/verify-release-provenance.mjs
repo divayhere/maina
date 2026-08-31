@@ -67,10 +67,10 @@ function artifactRecord(platform, audit) {
 
 const androidAudit = {
   packageName: 'com.divay.maina', versionName: '0.10.42', versionCode: 68,
-  releaseSigned: true, signerCertificateSha256: hash, debuggable: false, profileable: false,
+  releaseSigned: true, signerCertificateSha256: plan.artifactPolicy.android.signerCertificateSha256, debuggable: false, profileable: false,
   permissionsExact: true, componentsExact: true, exportedBoundariesExact: true,
-  permissions: ['android.permission.RECORD_AUDIO'],
-  components: [{ type: 'service', name: 'MainaRecordingService', exported: 'false', permission: null, process: null }],
+  permissions: structuredClone(plan.artifactPolicy.android.permissions),
+  components: structuredClone(plan.artifactPolicy.android.components),
   abis: ['arm64-v8a'],
   jniLibraries: { 'libonnxruntime.so': hash, 'libsherpa-onnx-jni.so': hash },
   vadModelSha256: 'c36d490aff5ab924ca6c7aeec4d8f6bd3d22db6fa17611b9c5b17eae58ac3a20',
@@ -79,9 +79,11 @@ const androidAudit = {
 const iosAudit = {
   bundleIdentifier: 'com.divay.maina.staging', version: '0.10.42', buildNumber: '24',
   architectures: ['arm64'], signatureValid: true, teamId: '9X4X3R4KCN',
-  designatedRequirement: 'identifier "com.divay.maina.staging" and anchor apple generic',
+  designatedRequirement: plan.artifactPolicy.ios.designatedRequirement,
   entitlementsExact: true, entitlementsSha256: hash,
-  profile: { uuid, name: 'Maina Profile', teamId: '9X4X3R4KCN', expiresAt: '2026-09-07T00:00:00Z', sufficientWindow: true },
+  entitlements: structuredClone(plan.artifactPolicy.ios.appEntitlements),
+  profileEntitlements: structuredClone(plan.artifactPolicy.ios.profileEntitlements),
+  profile: { uuid, name: plan.artifactPolicy.ios.profileName, teamId: '9X4X3R4KCN', expiresAt: '2026-09-07T00:00:00Z', sufficientWindow: true },
   appUuid: uuid, dsymUuid: uuid, appContentsManifestSha256: hash, appBundleSha256: hash,
 };
 
@@ -156,14 +158,14 @@ try {
   assert.throws(() => validateApprovedRelease(inspectionTamper, plan), /must equal the audit derived/);
 
   const unexpectedPermission = provenance();
-  unexpectedPermission.artifacts.android.audit.permissionsExact = false;
-  assert.throws(() => validateApprovedRelease(unexpectedPermission, plan), /permissionsExact/);
+  unexpectedPermission.artifacts.android.audit.permissions.push('android.permission.READ_CONTACTS');
+  assert.throws(() => validateApprovedRelease(unexpectedPermission, plan), /artifacts\.android\.audit\.permissions/);
   const unexpectedComponent = provenance();
-  unexpectedComponent.artifacts.android.audit.componentsExact = false;
-  assert.throws(() => validateApprovedRelease(unexpectedComponent, plan), /componentsExact/);
+  unexpectedComponent.artifacts.android.audit.components.push({ type: 'receiver', name: 'UnexpectedReceiver', exported: 'true', permission: null, process: null });
+  assert.throws(() => validateApprovedRelease(unexpectedComponent, plan), /artifacts\.android\.audit\.components/);
   const unexpectedEntitlement = provenance();
-  unexpectedEntitlement.artifacts.ios.audit.entitlementsExact = false;
-  assert.throws(() => validateApprovedRelease(unexpectedEntitlement, plan), /entitlementsExact/);
+  unexpectedEntitlement.artifacts.ios.audit.entitlements['com.apple.developer.healthkit'] = true;
+  assert.throws(() => validateApprovedRelease(unexpectedEntitlement, plan), /artifacts\.ios\.audit\.entitlements/);
   const dsymTamper = provenance();
   writeFileSync(dsymTamper.artifacts.ios.debugSymbols.path, 'replaced-dsym');
   assert.throws(() => replayConfig(dsymTamper, plan), /artifacts\.ios\.debugSymbols\.(bytes|sha256)/);
