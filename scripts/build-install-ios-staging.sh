@@ -1,9 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+if [[ "$(/Users/divay/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node -p "require('$PROJECT_DIR/app.json').expo.version")" == "0.10.42" ]]; then
+  echo "Refusing combined 0.10.42 build/install. Use ios:build-candidate, Admin artifact audit, then ios:install-preserving." >&2
+  exit 2
+fi
+
 # Deterministic local staging release for the one qualified USB iPhone 15.
 # Override the identifiers explicitly when the physical staging phone changes.
-PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 NODE_BIN="/Users/divay/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin"
 DEVICE_ID="${MAINA_IOS_DEVICE_ID:-945E396B-87B0-5CB7-9A3D-A5E75CF9B4CD}"
 DEVICE_UDID="${MAINA_IOS_DEVICE_UDID:-00008120-001E146611E2601E}"

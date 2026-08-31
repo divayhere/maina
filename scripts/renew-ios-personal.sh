@@ -19,6 +19,10 @@ umask 077
 
 cd "$PROJECT_DIR"
 [[ "$(node --version)" == v24.* ]] || { echo "Node 24 is required." >&2; exit 1; }
+if [[ "$(node -p "require('./app.json').expo.version")" == "0.10.42" ]]; then
+  echo "Refusing build-and-install renewal on audited 0.10.42. Use the separate candidate build, Admin audit, and provenance-authorized installer." >&2
+  exit 2
+fi
 mkdir -p "$BACKUP_ROOT/Backups" "$BACKUP_ROOT/Crash Reports" "$BACKUP_ROOT/Artifacts"
 RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)"
 RUN_ROOT="$BACKUP_ROOT/Backups/$RUN_ID"

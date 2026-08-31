@@ -23,10 +23,11 @@ if [[ "$(pod --version)" != "1.17.0" ]]; then
   exit 1
 fi
 cd "$PROJECT_DIR"
+node scripts/verify-build-source-state.mjs ios "${MAINA_EXPECTED_FINAL_COMMIT:?Set MAINA_EXPECTED_FINAL_COMMIT to the Admin-reviewed iOS pin}"
 NODE_ENV=development npm ci
 export NODE_ENV=production
 npm run ios:runtime
 npm run verify:ios-native
-npx expo prebuild --platform ios --no-install
+npx expo prebuild --platform ios --no-install --clean
 (cd ios && pod install)
 ruby scripts/configure-ios-ui-tests.rb

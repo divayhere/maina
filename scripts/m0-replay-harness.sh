@@ -23,6 +23,19 @@ CURRENT_FILE="$ROOT/current"
 
 android() { adb -s "$ANDROID_SERIAL" "$@"; }
 
+active_run_exists() {
+  test -s "$CURRENT_FILE" || return 1
+  local previous_dir
+  previous_dir="$(cat "$CURRENT_FILE")"
+  test -d "$previous_dir" || return 1
+  grep -q '^stopped_at=' "$previous_dir/metadata.txt" 2>/dev/null && return 1
+  for pid_file in "$previous_dir"/*.pid; do
+    test -s "$pid_file" || continue
+    kill -0 "$(cat "$pid_file")" 2>/dev/null && return 0
+  done
+  return 1
+}
+
 monitor_healthy() {
   local pid_file="$1" log_file="$2" label="$3"
   test -s "$pid_file" || { echo "$label PID file is missing" >&2; return 1; }
@@ -54,10 +67,19 @@ preflight() {
   command -v adb >/dev/null
   test -x "$PMD"
 
+  [[ "$ANDROID_SERIAL" == *"._adb-tls-connect._tcp" ]] || {
+    echo "M0 replay requires the pinned Wi-Fi ADB endpoint, not USB or an emulator." >&2
+    return 1
+  }
+  local matching_targets
+  matching_targets="$(adb devices | awk -v serial="$ANDROID_SERIAL" 'NR > 1 && $1 == serial && $2 == "device" { count += 1 } END { print count + 0 }')"
+  test "$matching_targets" = "1"
   android get-state >/dev/null
-  local android_hardware android_version android_code ios_devices ios_apps
+  local android_hardware android_model android_version android_code ios_devices ios_apps
   android_hardware="$(android shell getprop ro.serialno | tr -d '\r')"
   test "$android_hardware" = "47011FDAP000VE"
+  android_model="$(android shell getprop ro.product.model | tr -d '\r')"
+  test "$android_model" = "Pixel 9 Pro"
   android_version="$(android shell dumpsys package "$ANDROID_PACKAGE" | awk -F= '/versionName=/{print $2; exit}' | tr -d '\r')"
   android_code="$(android shell dumpsys package "$ANDROID_PACKAGE" | awk '/versionCode=/{sub(/^.*versionCode=/, ""); sub(/ .*/, ""); print; exit}' | tr -d '\r')"
   [[ "$android_version" == "$PROVENANCE_ANDROID_VERSION" && "$android_code" == "$PROVENANCE_ANDROID_CODE" ]] || {
@@ -85,7 +107,7 @@ preflight() {
   '
 
   printf 'M0 replay preflight passed\n'
-  printf 'Android: Pixel serial %s, Maina %s (%s)\n' "$android_hardware" "$android_version" "$android_code"
+  printf 'Android: Wi-Fi Pixel %s (%s), Maina %s (%s)\n' "$android_hardware" "$ANDROID_SERIAL" "$android_version" "$android_code"
   printf 'iOS: iPhone 15 serial %s, bundle %s\n' "$IOS_SERIAL" "$IOS_BUNDLE_ID"
 }
 
@@ -112,6 +134,10 @@ case "$MODE" in
       test3-call-interruption|test5-offline-recovery) ;;
       *) echo "Unknown replay: $TEST_NAME" >&2; exit 2 ;;
     esac
+    if active_run_exists; then
+      echo "Refusing to arm over an active replay. Stop the current replay explicitly first." >&2
+      exit 1
+    fi
     preflight
     run_id="$(date '+%Y%m%d-%H%M%S')-$TEST_NAME"
     output_dir="$ROOT/$run_id"

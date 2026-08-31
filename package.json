@@ -75,6 +75,8 @@
     "ios:model:stage": "bash scripts/stage-ios-qwen-model.sh",
     "ios:ui-tests:configure": "ruby scripts/configure-ios-ui-tests.rb",
     "ios:prepare": "bash scripts/prepare-ios-local.sh",
+    "ios:build-candidate": "bash scripts/build-ios-release-candidate.sh",
+    "ios:install-preserving": "bash scripts/install-ios-preserving-data.sh",
     "ios:renew-personal": "bash scripts/renew-ios-personal.sh",
     "android:prepare": "bash scripts/prebuild-android.sh",
     "android:build-candidate": "bash scripts/build-android-release-candidate.sh",

@@ -112,6 +112,8 @@ assert.throws(() => validateInstalledAndroidArtifact({ ...installedAndroid, inst
 assert.throws(() => validateInstalledAndroidArtifact({ ...installedAndroid, installedVersionName: '0.10.41' }), /version name/);
 
 const iosRenewalScript = readFileSync(new URL('./renew-ios-personal.sh', import.meta.url), 'utf8');
+const iosInstaller = readFileSync(new URL('./install-ios-preserving-data.sh', import.meta.url), 'utf8');
+const combinedIosBuilder = readFileSync(new URL('./build-install-ios-staging.sh', import.meta.url), 'utf8');
 const backupInspector = readFileSync(new URL('./inspect-mobile-backup.mjs', import.meta.url), 'utf8');
 assert.match(
   iosRenewalScript,
@@ -138,5 +140,17 @@ assert.doesNotMatch(
 );
 assert.match(backupInspector, /status = 'recording'/);
 assert.match(backupInspector, /recoverableProcessingMeetings/);
+assert.match(combinedIosBuilder, /Refusing combined 0\.10\.42 build\/install/);
+assert.match(iosRenewalScript, /Refusing build-and-install renewal on audited 0\.10\.42/);
+assert.match(iosInstaller, /release-provenance-cli\.mjs authorize ios/);
+assert.match(iosInstaller, /BUNDLE_ID" == "\$EXPECTED_BUNDLE_ID/);
+assert.ok(
+  iosInstaller.indexOf('release-provenance-cli.mjs authorize ios') < iosInstaller.indexOf('xcrun devicectl'),
+  'Dual-platform provenance authorization must run before any iOS device access.',
+);
+assert.equal((iosInstaller.match(/device install app/g) ?? []).length, 1, 'iOS installer must have one install call.');
+for (const forbidden of ['uninstall', 'erase', 'simctl', 'rm -rf']) {
+  assert.doesNotMatch(iosInstaller, new RegExp(forbidden), `iOS installer contains forbidden ${forbidden}.`);
+}
 
 console.log('Renewal safety policy verified.');
