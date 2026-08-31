@@ -31,7 +31,7 @@ const app = findInstalledIosApp({ result: { apps: [{
   bundleIdentifier: 'com.divay.maina.staging', version: '0.10.28', bundleVersion: 11,
 }] } }, 'com.divay.maina.staging');
 assert.deepEqual(app, { bundleId: 'com.divay.maina.staging', version: '0.10.28', build: '11' });
-const approvedIos = { bundleId: 'com.divay.maina.staging', version: '0.10.43', build: '25' };
+const approvedIos = { bundleId: 'com.divay.maina.staging', version: '0.10.44', build: '26' };
 assert.equal(validateInstalledIosArtifact(approvedIos, approvedIos), true);
 assert.throws(
   () => validateInstalledIosArtifact({ ...approvedIos, bundleId: 'com.divay.maina.other' }, approvedIos),
@@ -117,8 +117,8 @@ assert.throws(() => validateAndroidUpdate({ ...validAndroid, installedSigner: ''
 const installedAndroid = {
   candidateSha256: 'hash', installedSha256: 'hash',
   candidateSigner: 'signer', installedSigner: 'signer',
-  candidateVersionCode: '69', installedVersionCode: '69',
-  candidateVersionName: '0.10.43', installedVersionName: '0.10.43',
+  candidateVersionCode: '70', installedVersionCode: '70',
+  candidateVersionName: '0.10.44', installedVersionName: '0.10.44',
 };
 assert.equal(validateInstalledAndroidArtifact(installedAndroid), true);
 assert.throws(() => validateInstalledAndroidArtifact({ ...installedAndroid, installedSha256: 'different' }), /hash/);

@@ -15,7 +15,7 @@ import path from 'node:path';
 import { validateGeneratedNativeReleaseMetadata } from './verify-generated-native-release-metadata.mjs';
 
 const root = path.resolve(import.meta.dirname, '..');
-const plan = JSON.parse(readFileSync(path.join(root, 'release/m3-m4-0.10.43-candidate-plan.json'), 'utf8'));
+const plan = JSON.parse(readFileSync(path.join(root, 'release/m3-m4-0.10.44-candidate-plan.json'), 'utf8'));
 const generatedPaths = [
   path.join(root, 'android/app/build.gradle'),
   path.join(root, 'ios/Maina/Info.plist'),
@@ -84,9 +84,9 @@ try {
   });
   failsClosed('android', 'android.applicationId', { android: { applicationId: 'com.divay.maina.other' } });
   failsClosed('android', 'android.versionCode', { android: { versionCode: plan.release.androidVersionCode + 1 } });
-  failsClosed('android', 'android.versionName', { android: { versionName: '0.10.42' } });
-  failsClosed('ios', 'ios.CFBundleShortVersionString', { ios: { version: '0.10.42' } });
-  failsClosed('ios', 'ios.CFBundleVersion', { ios: { build: '24' } });
+  failsClosed('android', 'android.versionName', { android: { versionName: '0.10.43' } });
+  failsClosed('ios', 'ios.CFBundleShortVersionString', { ios: { version: '0.10.43' } });
+  failsClosed('ios', 'ios.CFBundleVersion', { ios: { build: '25' } });
   failsClosed('ios', 'ios.PRODUCT_BUNDLE_IDENTIFIER', { project: { omit: true } });
   failsClosed('ios', 'ios.PRODUCT_BUNDLE_IDENTIFIER', { project: { bundleIdentifier: 'com.divay.maina.other' } });
 
