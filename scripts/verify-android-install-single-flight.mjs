@@ -22,6 +22,7 @@ const tools = join(androidHome, 'build-tools', '99.0.0');
 const state = join(root, 'state');
 const locks = join(root, 'locks');
 const fakeJdk = join(root, 'jdk');
+const fakeNodeBin = join(root, 'node-bin');
 const candidate = join(root, 'candidate.apk');
 const endpoint = 'adb-47011FDAP000VE-test._adb-tls-connect._tcp';
 const deviceSerial = '47011FDAP000VE';
@@ -32,8 +33,16 @@ mkdirSync(join(androidHome, 'platform-tools'), { recursive: true });
 mkdirSync(tools, { recursive: true });
 mkdirSync(state, { recursive: true });
 mkdirSync(join(fakeJdk, 'bin'), { recursive: true });
+mkdirSync(fakeNodeBin, { recursive: true });
 writeFileSync(join(fakeJdk, 'bin', 'java'), '#!/usr/bin/env bash\nexit 0\n');
 chmodSync(join(fakeJdk, 'bin', 'java'), 0o755);
+writeFileSync(join(fakeNodeBin, 'node'), `#!/usr/bin/env bash
+if [[ "\${1:-}" == *"/scripts/release-provenance-cli.mjs" && "\${2:-}" == "authorize" ]]; then
+  exit 0
+fi
+exec "${process.execPath}" "$@"
+`);
+chmodSync(join(fakeNodeBin, 'node'), 0o755);
 writeFileSync(candidate, 'approved-candidate-apk');
 
 const adb = join(androidHome, 'platform-tools', 'adb');
@@ -64,8 +73,8 @@ case "\${1:-}:\${2:-}:\${3:-}" in
     : > "$state/install-started"
     while [[ ! -f "$state/release-install" ]]; do sleep 0.02; done
     cp "$3" "$state/installed.apk"
-    printf '65' > "$state/version-code"
-    printf '0.10.39' > "$state/version-name"
+    printf '68' > "$state/version-code"
+    printf '0.10.42' > "$state/version-name"
     printf 'Performing Streamed Install\\nSuccess\\n'
     ;;
   *)
@@ -84,7 +93,7 @@ chmodSync(apksigner, 0o755);
 
 const aapt = join(tools, 'aapt');
 writeFileSync(aapt, `#!/usr/bin/env bash
-printf "package: name='com.divay.maina' versionCode='65' versionName='0.10.39' platformBuildVersionName=''\\n"
+printf "package: name='com.divay.maina' versionCode='68' versionName='0.10.42' platformBuildVersionName=''\\n"
 `);
 chmodSync(aapt, 0o755);
 
@@ -92,12 +101,13 @@ const env = {
   ...process.env,
   MAINA_ANDROID_HOME: androidHome,
   ANDROID_HOME: androidHome,
-  MAINA_NODE_BIN: dirname(process.execPath),
+  MAINA_NODE_BIN: fakeNodeBin,
   MAINA_JAVA_HOME: fakeJdk,
   MAINA_ADB_SERIAL: endpoint,
   MAINA_DEVICE_SERIAL: deviceSerial,
   MAINA_ANDROID_PACKAGE: packageName,
   MAINA_INSTALL_LOCK_ROOT: locks,
+  MAINA_RELEASE_PROVENANCE: join(root, 'approved-provenance.json'),
   FAKE_INSTALL_STATE: state,
 };
 
@@ -108,12 +118,12 @@ function resetInstalled({ identical = false } = {}) {
   }
   if (identical) {
     copyFileSync(candidate, join(state, 'installed.apk'));
-    writeFileSync(join(state, 'version-code'), '65');
-    writeFileSync(join(state, 'version-name'), '0.10.39');
+    writeFileSync(join(state, 'version-code'), '68');
+    writeFileSync(join(state, 'version-name'), '0.10.42');
   } else {
     writeFileSync(join(state, 'installed.apk'), 'previous-installed-apk');
-    writeFileSync(join(state, 'version-code'), '64');
-    writeFileSync(join(state, 'version-name'), '0.10.38');
+    writeFileSync(join(state, 'version-code'), '67');
+    writeFileSync(join(state, 'version-name'), '0.10.41');
   }
 }
 

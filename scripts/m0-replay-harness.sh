@@ -8,8 +8,15 @@ ANDROID_SERIAL="${MAINA_ANDROID_SERIAL:-adb-47011FDAP000VE-9s0wNO._adb-tls-conne
 IOS_COREDEVICE_ID="${MAINA_IOS_COREDEVICE_ID:-945E396B-87B0-5CB7-9A3D-A5E75CF9B4CD}"
 IOS_UDID="${MAINA_IOS_UDID:-00008120-001E146611E2601E}"
 IOS_SERIAL="${MAINA_IOS_SERIAL:-MQLF6GV3XM}"
-ANDROID_PACKAGE="${MAINA_ANDROID_PACKAGE:-com.divay.maina}"
-IOS_BUNDLE_ID="${MAINA_IOS_BUNDLE_ID:-com.divay.maina.staging}"
+PROVENANCE="${MAINA_RELEASE_PROVENANCE:?Set MAINA_RELEASE_PROVENANCE to the Admin-approved dual-platform provenance}"
+PLAN="$PROJECT_DIR/release/m3-m4-candidate-plan.json"
+IFS=$'\t' read -r PROVENANCE_ANDROID_PACKAGE PROVENANCE_ANDROID_VERSION PROVENANCE_ANDROID_CODE \
+  PROVENANCE_IOS_BUNDLE_ID PROVENANCE_IOS_VERSION PROVENANCE_IOS_BUILD \
+  <<< "$(node "$PROJECT_DIR/scripts/release-provenance-cli.mjs" replay-config "$PLAN" "$PROVENANCE")"
+ANDROID_PACKAGE="${MAINA_ANDROID_PACKAGE:-$PROVENANCE_ANDROID_PACKAGE}"
+IOS_BUNDLE_ID="${MAINA_IOS_BUNDLE_ID:-$PROVENANCE_IOS_BUNDLE_ID}"
+[[ "$ANDROID_PACKAGE" == "$PROVENANCE_ANDROID_PACKAGE" ]] || { echo "Android package override conflicts with approved provenance." >&2; exit 1; }
+[[ "$IOS_BUNDLE_ID" == "$PROVENANCE_IOS_BUNDLE_ID" ]] || { echo "iOS bundle override conflicts with approved provenance." >&2; exit 1; }
 PMD="${MAINA_PMD:-/Users/divay/Developer/.tools/maina-pymobiledevice3/bin/pymobiledevice3}"
 ROOT="${MAINA_M0_EVIDENCE_ROOT:-$PROJECT_DIR/.artifacts/m0-replay}"
 CURRENT_FILE="$ROOT/current"
@@ -53,7 +60,10 @@ preflight() {
   test "$android_hardware" = "47011FDAP000VE"
   android_version="$(android shell dumpsys package "$ANDROID_PACKAGE" | awk -F= '/versionName=/{print $2; exit}' | tr -d '\r')"
   android_code="$(android shell dumpsys package "$ANDROID_PACKAGE" | awk '/versionCode=/{sub(/^.*versionCode=/, ""); sub(/ .*/, ""); print; exit}' | tr -d '\r')"
-  test -n "$android_version"
+  [[ "$android_version" == "$PROVENANCE_ANDROID_VERSION" && "$android_code" == "$PROVENANCE_ANDROID_CODE" ]] || {
+    echo "Installed Android release does not match approved provenance: $android_version ($android_code)." >&2
+    return 1
+  }
 
   # CoreDevice can remain in a stale "connecting" state even while usbmux and
   # DeveloperTools services are healthy. Verify the exact physical USB device
@@ -65,10 +75,13 @@ preflight() {
     if (!expected || expected.ConnectionType !== "USB" || expected.ProductType !== "iPhone15,4") process.exit(1);
   '
   ios_apps="$("$PMD" apps query "$IOS_BUNDLE_ID" --udid "$IOS_UDID")"
-  IOS_APPS="$ios_apps" IOS_BUNDLE_ID="$IOS_BUNDLE_ID" node -e '
+  IOS_APPS="$ios_apps" IOS_BUNDLE_ID="$IOS_BUNDLE_ID" \
+    PROVENANCE_IOS_VERSION="$PROVENANCE_IOS_VERSION" PROVENANCE_IOS_BUILD="$PROVENANCE_IOS_BUILD" node -e '
     const apps = JSON.parse(process.env.IOS_APPS);
     const app = apps[process.env.IOS_BUNDLE_ID];
-    if (!app || app.CFBundleShortVersionString !== "0.10.34" || app.CFBundleVersion !== "16") process.exit(1);
+    if (!app
+      || app.CFBundleShortVersionString !== process.env.PROVENANCE_IOS_VERSION
+      || app.CFBundleVersion !== process.env.PROVENANCE_IOS_BUILD) process.exit(1);
   '
 
   printf 'M0 replay preflight passed\n'

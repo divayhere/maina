@@ -14,6 +14,10 @@ MODE="${2:-}"
 [[ -f "$APK" ]] || { echo "Usage: npm run android:install-preserving -- /absolute/path.apk [--dry-run]" >&2; exit 1; }
 [[ -z "$MODE" || "$MODE" == "--dry-run" ]] || { echo "Unknown installer option: $MODE" >&2; exit 1; }
 
+PROVENANCE="${MAINA_RELEASE_PROVENANCE:?Set MAINA_RELEASE_PROVENANCE to the Admin-approved dual-platform provenance}"
+node "$PROJECT_DIR/scripts/release-provenance-cli.mjs" authorize android \
+  "$PROJECT_DIR/release/m3-m4-candidate-plan.json" "$PROVENANCE" "$APK"
+
 candidate_sha256="$(shasum -a 256 "$APK" | awk '{print $1}')"
 safe_device="$(printf '%s' "$MAINA_DEVICE_SERIAL" | tr -cd 'A-Za-z0-9._-')"
 safe_package="$(printf '%s' "$PACKAGE_NAME" | tr -cd 'A-Za-z0-9._-')"

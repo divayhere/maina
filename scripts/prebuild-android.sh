@@ -6,5 +6,6 @@ PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 source "$PROJECT_DIR/scripts/maina-env.sh"
 
 cd "$PROJECT_DIR"
-npx expo prebuild --platform android --no-install
+node scripts/verify-build-source-state.mjs android "${MAINA_EXPECTED_FINAL_COMMIT:?Set MAINA_EXPECTED_FINAL_COMMIT to the Admin-reviewed Android pin}"
+npx expo prebuild --platform android --no-install --clean
 node scripts/verify-android-config.mjs
