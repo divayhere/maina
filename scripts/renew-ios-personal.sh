@@ -19,8 +19,9 @@ umask 077
 
 cd "$PROJECT_DIR"
 [[ "$(node --version)" == v24.* ]] || { echo "Node 24 is required." >&2; exit 1; }
-if [[ "$(node -p "require('./app.json').expo.version")" == "0.10.42" ]]; then
-  echo "Refusing build-and-install renewal on audited 0.10.42. Use the separate candidate build, Admin audit, and provenance-authorized installer." >&2
+ACTIVE_CANDIDATE_VERSION="$(node -p "require('./release/m3-m4-0.10.43-candidate-plan.json').release.version")"
+if [[ "$(node -p "require('./app.json').expo.version")" == "$ACTIVE_CANDIDATE_VERSION" ]]; then
+  echo "Refusing build-and-install renewal for the active candidate. Use the separate candidate build, Admin audit, and provenance-authorized installer." >&2
   exit 2
 fi
 mkdir -p "$BACKUP_ROOT/Backups" "$BACKUP_ROOT/Crash Reports" "$BACKUP_ROOT/Artifacts"

@@ -2,8 +2,10 @@
 set -euo pipefail
 
 PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-if [[ "$(/Users/divay/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node -p "require('$PROJECT_DIR/app.json').expo.version")" == "0.10.42" ]]; then
-  echo "Refusing combined 0.10.42 build/install. Use ios:build-candidate, Admin artifact audit, then ios:install-preserving." >&2
+RELEASE_PLAN="$PROJECT_DIR/release/m3-m4-0.10.43-candidate-plan.json"
+ACTIVE_CANDIDATE_VERSION="$(/Users/divay/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node -p "require('$RELEASE_PLAN').release.version")"
+if [[ "$(/Users/divay/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node -p "require('$PROJECT_DIR/app.json').expo.version")" == "$ACTIVE_CANDIDATE_VERSION" ]]; then
+  echo "Refusing combined candidate build/install. Use ios:build-candidate, Admin artifact audit, then ios:install-preserving." >&2
   exit 2
 fi
 

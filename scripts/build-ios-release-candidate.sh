@@ -39,6 +39,7 @@ export SENTRY_ALLOW_FAILURE=true
 cd "$PROJECT_DIR"
 node scripts/verify-build-source-state.mjs ios "$EXPECTED_FINAL"
 scripts/prepare-ios-local.sh
+node scripts/verify-generated-native-release-metadata.mjs ios
 
 set +e
 xcodebuild -workspace ios/Maina.xcworkspace -scheme Maina -configuration Release \
@@ -59,11 +60,12 @@ fi
 APP="$BUILD_ROOT/Build/Products/Release-iphoneos/Maina.app"
 DSYM="$BUILD_ROOT/Build/Products/Release-iphoneos/Maina.app.dSYM"
 [[ -d "$APP" && -d "$DSYM" ]] || { echo "Signed app or matching dSYM is missing." >&2; exit 1; }
-APP_ZIP="$OUTPUT_DIR/Maina-0.10.42-24.app.zip"
-DSYM_ZIP="$OUTPUT_DIR/Maina-0.10.42-24.app.dSYM.zip"
+APP_ZIP="$OUTPUT_DIR/Maina-0.10.43-25.app.zip"
+DSYM_ZIP="$OUTPUT_DIR/Maina-0.10.43-25.app.dSYM.zip"
 /usr/bin/ditto -c -k --sequesterRsrc --keepParent "$APP" "$APP_ZIP"
 /usr/bin/ditto -c -k --sequesterRsrc --keepParent "$DSYM" "$DSYM_ZIP"
-node scripts/inspect-exact-artifact.mjs ios release/m3-m4-candidate-plan.json "$APP_ZIP" "$DSYM_ZIP" \
+node scripts/inspect-exact-artifact.mjs ios release/m3-m4-0.10.43-candidate-plan.json "$APP_ZIP" "$DSYM_ZIP" \
   > "$OUTPUT_DIR/ios-inspection.json"
+node scripts/verify-generated-native-release-metadata.mjs ios
 node scripts/verify-build-source-state.mjs ios "$EXPECTED_FINAL"
 echo "One iOS candidate build completed. Admin audit is required before any install."

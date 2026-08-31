@@ -31,7 +31,7 @@ const app = findInstalledIosApp({ result: { apps: [{
   bundleIdentifier: 'com.divay.maina.staging', version: '0.10.28', bundleVersion: 11,
 }] } }, 'com.divay.maina.staging');
 assert.deepEqual(app, { bundleId: 'com.divay.maina.staging', version: '0.10.28', build: '11' });
-const approvedIos = { bundleId: 'com.divay.maina.staging', version: '0.10.42', build: '24' };
+const approvedIos = { bundleId: 'com.divay.maina.staging', version: '0.10.43', build: '25' };
 assert.equal(validateInstalledIosArtifact(approvedIos, approvedIos), true);
 assert.throws(
   () => validateInstalledIosArtifact({ ...approvedIos, bundleId: 'com.divay.maina.other' }, approvedIos),
@@ -117,8 +117,8 @@ assert.throws(() => validateAndroidUpdate({ ...validAndroid, installedSigner: ''
 const installedAndroid = {
   candidateSha256: 'hash', installedSha256: 'hash',
   candidateSigner: 'signer', installedSigner: 'signer',
-  candidateVersionCode: '68', installedVersionCode: '68',
-  candidateVersionName: '0.10.42', installedVersionName: '0.10.42',
+  candidateVersionCode: '69', installedVersionCode: '69',
+  candidateVersionName: '0.10.43', installedVersionName: '0.10.43',
 };
 assert.equal(validateInstalledAndroidArtifact(installedAndroid), true);
 assert.throws(() => validateInstalledAndroidArtifact({ ...installedAndroid, installedSha256: 'different' }), /hash/);
@@ -155,8 +155,8 @@ assert.doesNotMatch(
 );
 assert.match(backupInspector, /status = 'recording'/);
 assert.match(backupInspector, /recoverableProcessingMeetings/);
-assert.match(combinedIosBuilder, /Refusing combined 0\.10\.42 build\/install/);
-assert.match(iosRenewalScript, /Refusing build-and-install renewal on audited 0\.10\.42/);
+assert.match(combinedIosBuilder, /Refusing combined candidate build\/install/);
+assert.match(iosRenewalScript, /Refusing build-and-install renewal for the active candidate/);
 assert.match(iosInstaller, /release-provenance-cli\.mjs authorize ios/);
 assert.match(iosInstaller, /release-provenance-cli\.mjs replay-config/);
 assert.match(iosInstaller, /BUNDLE_ID" == "\$EXPECTED_BUNDLE_ID/);
