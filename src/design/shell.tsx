@@ -138,6 +138,8 @@ export function DrawerMenu() {
               {items.map((item) => (
                 <Pressable
                   key={item.label}
+                  accessibilityRole="button"
+                  accessibilityLabel={item.label}
                   onPress={() => {
                     setOpen(false);
                     router.navigate(item.href as never);
@@ -152,6 +154,8 @@ export function DrawerMenu() {
                 </Pressable>
               ))}
               <Pressable
+                accessibilityRole="button"
+                accessibilityLabel="Send feedback"
                 onPress={() => {
                   setOpen(false);
                   void Linking.openURL('mailto:hello@maina.app?subject=Maina%20feedback');
