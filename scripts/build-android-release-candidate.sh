@@ -16,6 +16,14 @@ OUTPUT_DIR="${MAINA_RELEASE_OUTPUT_DIR:?Set an absolute empty output directory f
   echo "Android build already attempted for this evidence directory; retry is forbidden." >&2
   exit 75
 }
+if [[ -e "$OUTPUT_DIR" && ! -d "$OUTPUT_DIR" ]]; then
+  echo "Android evidence output path exists and is not a directory." >&2
+  exit 2
+fi
+if [[ -d "$OUTPUT_DIR" && -n "$(find "$OUTPUT_DIR" -mindepth 1 -maxdepth 1 -print -quit)" ]]; then
+  echo "Android evidence output directory is not fresh; refusing to mix prior evidence with a new attempt." >&2
+  exit 73
+fi
 mkdir -p "$OUTPUT_DIR"
 : > "$OUTPUT_DIR/build-attempted"
 BUILD_LOG="$OUTPUT_DIR/android-build.log"
