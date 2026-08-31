@@ -57,9 +57,9 @@ fi
 
 APK="$MAINA_BUILD_ROOT/outputs/_app/outputs/apk/release/app-release.apk"
 [[ -n "$APK" && -f "$APK" ]] || { echo "Exact release APK was not produced." >&2; exit 1; }
-HELD_APK="$OUTPUT_DIR/Maina-0.10.43-69.apk"
+HELD_APK="$OUTPUT_DIR/Maina-0.10.44-70.apk"
 cp "$APK" "$HELD_APK"
-node scripts/inspect-exact-artifact.mjs android release/m3-m4-0.10.43-candidate-plan.json "$HELD_APK" \
+node scripts/inspect-exact-artifact.mjs android release/m3-m4-0.10.44-candidate-plan.json "$HELD_APK" \
   > "$OUTPUT_DIR/android-inspection.json"
 node scripts/verify-generated-native-release-metadata.mjs android
 node scripts/verify-build-source-state.mjs android "$EXPECTED_FINAL"
