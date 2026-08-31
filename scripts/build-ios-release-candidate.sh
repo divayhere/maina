@@ -18,6 +18,14 @@ TEAM_ID="${MAINA_IOS_TEAM_ID:-9X4X3R4KCN}"
   echo "iOS build already attempted for this evidence directory; retry is forbidden." >&2
   exit 75
 }
+if [[ -e "$OUTPUT_DIR" && ! -d "$OUTPUT_DIR" ]]; then
+  echo "iOS evidence output path exists and is not a directory." >&2
+  exit 2
+fi
+if [[ -d "$OUTPUT_DIR" && -n "$(find "$OUTPUT_DIR" -mindepth 1 -maxdepth 1 -print -quit)" ]]; then
+  echo "iOS evidence output directory is not fresh; refusing to mix prior evidence with a new attempt." >&2
+  exit 73
+fi
 mkdir -p "$OUTPUT_DIR"
 : > "$OUTPUT_DIR/build-attempted"
 BUILD_LOG="$OUTPUT_DIR/ios-build.log"

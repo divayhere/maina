@@ -14,9 +14,10 @@ umask 077
 
 cd "$PROJECT_DIR"
 node scripts/release-provenance-cli.mjs authorize ios release/m3-m4-candidate-plan.json "$PROVENANCE" "$APP_ZIP"
-EXPECTED_BUNDLE_ID="$(node -p "require('./release/m3-m4-candidate-plan.json').identity.iosBundleIdentifier")"
+IFS=$'\t' read -r _ _ _ EXPECTED_BUNDLE_ID EXPECTED_VERSION EXPECTED_BUILD \
+  <<< "$(node scripts/release-provenance-cli.mjs replay-config release/m3-m4-candidate-plan.json "$PROVENANCE")"
 [[ "$BUNDLE_ID" == "$EXPECTED_BUNDLE_ID" ]] || {
-  echo "iOS bundle override conflicts with the approved release plan." >&2
+  echo "iOS bundle override conflicts with the approved dual provenance." >&2
   exit 2
 }
 
@@ -82,6 +83,15 @@ APP="$(find "$RUN_ROOT/candidate" -maxdepth 2 -type d -name '*.app' | head -n 1)
 # Exactly one in-place install call. No destructive package/data command or
 # pre-install termination is used; ambiguity retains the lock and forbids reinvocation.
 xcrun devicectl device install app --device "$DEVICE_ID" "$APP"
+xcrun devicectl device info apps --device "$DEVICE_ID" --bundle-id "$BUNDLE_ID" --columns '*' \
+  --json-output "$RUN_ROOT/apps-after.json" --quiet
+node --input-type=module - "$RUN_ROOT/apps-after.json" "$EXPECTED_BUNDLE_ID" "$EXPECTED_VERSION" "$EXPECTED_BUILD" <<'NODE'
+import { readFileSync } from 'node:fs';
+import { findInstalledIosApp, validateInstalledIosArtifact } from './scripts/lib/renewal-core.mjs';
+const [, , appsPath, bundleId, version, build] = process.argv;
+const installed = findInstalledIosApp(JSON.parse(readFileSync(appsPath)), bundleId);
+validateInstalledIosArtifact(installed, { bundleId, version, build });
+NODE
 xcrun devicectl device process launch --device "$DEVICE_ID" "$BUNDLE_ID"
 xcrun devicectl device copy from --device "$DEVICE_ID" --domain-type appDataContainer \
   --domain-identifier "$BUNDLE_ID" --source / --destination "$RUN_ROOT/postflight-container" --quiet

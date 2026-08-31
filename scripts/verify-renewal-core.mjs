@@ -8,6 +8,7 @@ import {
   validateCandidateIdentity,
   validateDataSnapshot,
   validateInstalledAndroidArtifact,
+  validateInstalledIosArtifact,
 } from './lib/renewal-core.mjs';
 
 const expectedDevice = { deviceId: 'device', udid: 'udid', marketingName: 'iPhone 15' };
@@ -30,6 +31,20 @@ const app = findInstalledIosApp({ result: { apps: [{
   bundleIdentifier: 'com.divay.maina.staging', version: '0.10.28', bundleVersion: 11,
 }] } }, 'com.divay.maina.staging');
 assert.deepEqual(app, { bundleId: 'com.divay.maina.staging', version: '0.10.28', build: '11' });
+const approvedIos = { bundleId: 'com.divay.maina.staging', version: '0.10.42', build: '24' };
+assert.equal(validateInstalledIosArtifact(approvedIos, approvedIos), true);
+assert.throws(
+  () => validateInstalledIosArtifact({ ...approvedIos, bundleId: 'com.divay.maina.other' }, approvedIos),
+  /bundle does not match/,
+);
+assert.throws(
+  () => validateInstalledIosArtifact({ ...approvedIos, version: '0.10.41' }, approvedIos),
+  /version does not match/,
+);
+assert.throws(
+  () => validateInstalledIosArtifact({ ...approvedIos, build: '23' }, approvedIos),
+  /build does not match/,
+);
 
 assert.equal(validateDataSnapshot(
   { meetings: 2, transcriptBlocks: 10, todos: 1, pipelineStages: 4, hasDurableLog: true, hasQwenModel: true },
@@ -143,12 +158,20 @@ assert.match(backupInspector, /recoverableProcessingMeetings/);
 assert.match(combinedIosBuilder, /Refusing combined 0\.10\.42 build\/install/);
 assert.match(iosRenewalScript, /Refusing build-and-install renewal on audited 0\.10\.42/);
 assert.match(iosInstaller, /release-provenance-cli\.mjs authorize ios/);
+assert.match(iosInstaller, /release-provenance-cli\.mjs replay-config/);
 assert.match(iosInstaller, /BUNDLE_ID" == "\$EXPECTED_BUNDLE_ID/);
 assert.ok(
   iosInstaller.indexOf('release-provenance-cli.mjs authorize ios') < iosInstaller.indexOf('xcrun devicectl'),
   'Dual-platform provenance authorization must run before any iOS device access.',
 );
 assert.equal((iosInstaller.match(/device install app/g) ?? []).length, 1, 'iOS installer must have one install call.');
+const installIndex = iosInstaller.indexOf('device install app');
+const postInstallQueryIndex = iosInstaller.indexOf('apps-after.json');
+const identityReconcileIndex = iosInstaller.indexOf('validateInstalledIosArtifact(installed');
+const unlockIndex = iosInstaller.indexOf('terminal_reconciled=1');
+assert.ok(installIndex < postInstallQueryIndex, 'Installed iOS identity must be queried after the single install.');
+assert.ok(postInstallQueryIndex < identityReconcileIndex, 'Fresh installed identity must be validated.');
+assert.ok(identityReconcileIndex < unlockIndex, 'Installed identity must reconcile before the retained lock is cleared.');
 for (const forbidden of ['uninstall', 'erase', 'simctl', 'rm -rf']) {
   assert.doesNotMatch(iosInstaller, new RegExp(forbidden), `iOS installer contains forbidden ${forbidden}.`);
 }

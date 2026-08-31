@@ -24,6 +24,19 @@ export function findInstalledIosApp(payload, bundleId) {
   };
 }
 
+export function validateInstalledIosArtifact(installed, expected) {
+  if (!installed.bundleId || installed.bundleId !== expected.bundleId) {
+    throw new Error('Installed iOS bundle does not match the approved release.');
+  }
+  if (!installed.version || installed.version !== expected.version) {
+    throw new Error('Installed iOS version does not match the approved release.');
+  }
+  if (!installed.build || installed.build !== expected.build) {
+    throw new Error('Installed iOS build does not match the approved release.');
+  }
+  return true;
+}
+
 export function validateDataSnapshot(before, after) {
   const nonDecreasing = ['meetings', 'transcriptBlocks', 'todos', 'pipelineStages'];
   for (const key of nonDecreasing) {
