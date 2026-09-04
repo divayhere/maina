@@ -24,6 +24,11 @@ const GUARD_SHA256 = 'e8efcaa346ca46ed746970f7739f1346f25442719961f1c8e3d884b3d5
 const GUARD_BYTES = 3387;
 const STORAGE_ROOT = '/Volumes/DivaySSD/MainaBuild';
 const INTERNAL_BUILD_ROOT = '/Users/divay/.cache/maina-build-v2';
+const STORAGE_POLICY_GIT_PATH = 'coordination/docs/storage/MAINA_STORAGE_LAYOUT.md';
+const STORAGE_POLICY_SHA256 = '87b7cf7f677ee6440013656dc1b2c85c8f99df863c5ea764f17a8eb687277bba';
+const INSTALLED_LAYOUT_MIRROR = '/Users/divay/Developer/Maina/qualification/storage-architecture/MAINA_STORAGE_LAYOUT.md';
+const GUARD_GIT_PATH = 'coordination/scripts/storage/require-maina-storage.sh';
+const RETAINED_MANIFEST_RULE = 'A future real-directory cutover is not accepted unless its sanitized source/copy manifest receipt is retained outside both trees and hash-bound in tracked pilot evidence before the rollback is removed.';
 const root = path.resolve(import.meta.dirname, '..');
 const kind = root === '/Users/divay/Developer/MainaV2'
   ? 'android-main'
@@ -67,6 +72,24 @@ assert.equal(guardResult.stderr, '');
 
 const binding = read('scripts/maina-storage.sh');
 const linkRestorer = read('scripts/restore-external-build-links.sh');
+const agents = read('AGENTS.md');
+const pilotReport = read('docs/APPS_EXTERNAL_STORAGE_PILOT_2026-09-04.md');
+for (const [document, label] of [[agents, 'AGENTS'], [pilotReport, 'pilot report']]) {
+  assert.equal(document.includes(STORAGE_POLICY_GIT_PATH), true, `${label} must name the Git-backed storage policy.`);
+  assert.equal(document.includes(STORAGE_POLICY_SHA256), true, `${label} must bind the stable storage-policy hash.`);
+  assert.equal(document.includes('29,047 bytes'), true, `${label} must bind the stable storage-policy byte count.`);
+  assert.equal(document.includes('mode `0644`'), true, `${label} must bind the stable storage-policy mode.`);
+  assert.equal(document.includes(INSTALLED_LAYOUT_MIRROR), true, `${label} must name the installed operational mirror.`);
+  assert.equal(document.includes(GUARD_GIT_PATH), true, `${label} must name the canonical guard Git path.`);
+  assert.equal(document.includes(GUARD), true, `${label} must name the installed canonical guard.`);
+  assert.equal(document.includes(GUARD_SHA256), true, `${label} must bind the canonical guard hash.`);
+  assert.equal(document.includes(RETAINED_MANIFEST_RULE), true, `${label} must require a retained real-directory cutover receipt.`);
+  assert.equal(document.includes('6f9e200c380b8230be2b5b0cfe13d08852f6de8010aaf7cf6f2ab6989dc9826c'), false, `${label} must not pin the intermediate layout hash.`);
+  assert.equal(document.includes('2,960 bytes'), false, `${label} must not pin the intermediate layout byte count.`);
+}
+assert.equal(agents.includes('not the Git source of truth'), true);
+assert.equal(pilotReport.includes('Historical evidence limitation: no independent sanitized cutover receipt was retained.'), true);
+assert.equal(pilotReport.includes('not replayable or independently verifiable now'), true);
 assert.match(binding, new RegExp(GUARD.replaceAll('/', '\\/')));
 assert.match(binding, new RegExp(GUARD_SHA256));
 assert.match(binding, /MAINA_STORAGE_GUARD_BYTES='3387'/);
@@ -98,6 +121,17 @@ assert.equal(
   read('scripts/gradle-output-redirect.init.gradle'),
   'The Gradle output redirect must stay byte-identical across canonical worktrees.',
 );
+for (const sharedPath of [
+  'AGENTS.md',
+  'docs/APPS_EXTERNAL_STORAGE_PILOT_2026-09-04.md',
+  'scripts/verify-external-storage-contract.mjs',
+]) {
+  assert.equal(
+    readFileSync(path.join(counterpartRoot, sharedPath), 'utf8'),
+    read(sharedPath),
+    `${sharedPath} must stay byte-identical across canonical worktrees.`,
+  );
+}
 
 const scratchParent = path.join(STORAGE_ROOT, 'scratch/apps/tests/storage-contract');
 mkdirSync(scratchParent, { recursive: true });
