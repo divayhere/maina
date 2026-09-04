@@ -8,6 +8,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readlinkSync,
   readdirSync,
   realpathSync,
   rmSync,
@@ -65,6 +66,7 @@ assert.equal(guardResult.stdout, `${STORAGE_ROOT}\n`);
 assert.equal(guardResult.stderr, '');
 
 const binding = read('scripts/maina-storage.sh');
+const linkRestorer = read('scripts/restore-external-build-links.sh');
 assert.match(binding, new RegExp(GUARD.replaceAll('/', '\\/')));
 assert.match(binding, new RegExp(GUARD_SHA256));
 assert.match(binding, /MAINA_STORAGE_GUARD_BYTES='3387'/);
@@ -145,6 +147,32 @@ try {
   );
   assert.equal(symlinkEscape.status, 78);
   assert.match(symlinkEscape.stderr, /resolves outside/);
+
+  const functionStart = linkRestorer.indexOf('ensure_external_link() {');
+  const functionEnd = linkRestorer.indexOf('\n}\n\nensure_external_file_link()', functionStart);
+  assert.ok(functionStart >= 0 && functionEnd > functionStart, 'The exact external-link function must be testable.');
+  const ensureExternalLink = linkRestorer.slice(functionStart, functionEnd + 3);
+  const syntheticRealPath = path.join(scratch, 'synthetic-real-directory');
+  const syntheticTarget = path.join(scratch, 'synthetic-external-target');
+  mkdirSync(syntheticRealPath);
+  mkdirSync(syntheticTarget);
+  writeFileSync(path.join(syntheticRealPath, 'sentinel'), 'preserve\n', { mode: 0o600 });
+  const realDirectoryRefusal = runBash(
+    [
+      'set -euo pipefail',
+      'maina_require_storage_path() { return 0; }',
+      'maina_storage_mkdir() { /bin/mkdir -p "$1"; }',
+      'maina_storage_fail() { echo "$1" >&2; return 78; }',
+      ensureExternalLink,
+      'ensure_external_link "$1" "$2" no',
+    ].join('\n'),
+    [syntheticRealPath, syntheticTarget],
+  );
+  assert.equal(realDirectoryRefusal.status, 78);
+  assert.match(realDirectoryRefusal.stderr, /Refusing to replace an existing non-link path/);
+  assert.equal(lstatSync(syntheticRealPath).isDirectory(), true);
+  assert.equal(lstatSync(syntheticRealPath).isSymbolicLink(), false);
+  assert.equal(readFileSync(path.join(syntheticRealPath, 'sentinel'), 'utf8'), 'preserve\n');
 } finally {
   assert.ok(scratch.startsWith(`${scratchParent}/${kind}-`), 'Refusing broad storage-test cleanup.');
   rmSync(scratch, { recursive: true, force: true });
@@ -238,7 +266,6 @@ assert.doesNotMatch(runtimeEnv, /maina-storage\.sh|MAINA_STORAGE_ROOT/);
 const mainaBuildEnv = read('scripts/maina-build-env.sh');
 assertOrder(mainaBuildEnv, ['source "$MAINA_BUILD_ENV_REPO_ROOT/scripts/maina-storage.sh"', "MAINA_BUILD_ROOT=\"\${MAINA_BUILD_ROOT:-/Users/divay/.cache/maina-build-v2}\"", 'source "$MAINA_BUILD_ENV_REPO_ROOT/scripts/maina-env.sh"', 'maina_storage_mkdir "$MAINA_ANDROID_OUTPUT_ROOT"'], 'Android build environment');
 assert.doesNotMatch(mainaBuildEnv, /maina_storage_mkdir "\$MAINA_BUILD_ROOT(?:\/outputs)?"/);
-const linkRestorer = read('scripts/restore-external-build-links.sh');
 assert.equal(lstatSync(path.join(root, 'scripts/restore-external-build-links.sh')).mode & 0o777, 0o755);
 assertOrder(linkRestorer, ['source "$PROJECT_DIR/scripts/maina-storage.sh"', 'maina_require_storage_path "$target_path"', '/bin/ln -s'], 'link restorer');
 assert.doesNotMatch(linkRestorer, /\brm\b/);
@@ -247,6 +274,7 @@ assert.match(linkRestorer, /caches\/android\/gradle-project-cache/);
 assert.match(linkRestorer, /caches\/android\/gradle-user-home\/init\.d/);
 assert.match(linkRestorer, /\/Users\/divay\/Developer\/MainaV2\/scripts\/gradle-output-redirect\.init\.gradle/);
 assertOrder(linkRestorer, ['local link_parent="${link_path%/*}"', 'maina_require_storage_path "$link_parent"', '[[ "$(/usr/bin/readlink "$link_path")" == "$source_path" ]]'], 'Gradle init link validation');
+assertOrder(linkRestorer, ['"$PROJECT_DIR/ios/build"', '"$MAINA_STORAGE_ROOT/builds/apps/$storage_slot/ios/native" yes'], 'iOS generated native link');
 const prebuild = read('scripts/prebuild-android.sh');
 assertOrder(prebuild, ['source "$PROJECT_DIR/scripts/maina-build-env.sh"', 'restore-external-build-links.sh" dependencies', 'expo prebuild --platform android --no-install --clean', 'restore-external-build-links.sh" android', 'verify-android-config.mjs'], 'Android prebuild');
 const gradleRedirect = read('scripts/gradle-output-redirect.init.gradle');
@@ -294,6 +322,13 @@ if (kind === 'android-main') {
   }
   assert.equal(lstatSync(path.join(root, 'ios/Pods')).isSymbolicLink(), true);
   assert.equal(realpathSync(path.join(root, 'ios/Pods')), path.join(STORAGE_ROOT, 'dependencies/apps/ios-feasibility/Pods'));
+  const iosNativeBuildLink = path.join(root, 'ios/build');
+  const iosNativeBuildTarget = path.join(STORAGE_ROOT, 'builds/apps/ios-feasibility/ios/native');
+  assert.equal(lstatSync(iosNativeBuildLink).isSymbolicLink(), true, 'ios/build must be the fail-closed external link.');
+  assert.equal(readlinkSync(iosNativeBuildLink), iosNativeBuildTarget, 'ios/build must use the exact canonical target.');
+  assert.equal(realpathSync(iosNativeBuildLink), iosNativeBuildTarget);
+  assert.equal(statSync(iosNativeBuildTarget).isDirectory(), true);
+  assert.equal(statSync(iosNativeBuildLink).dev, statSync(STORAGE_ROOT).dev, 'ios/build must resolve onto DivaySSD.');
 
   const dependencyInstaller = read('scripts/install-external-node-dependencies.sh');
   assert.equal(lstatSync(path.join(root, 'scripts/install-external-node-dependencies.sh')).mode & 0o777, 0o755);
