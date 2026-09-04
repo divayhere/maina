@@ -4,8 +4,9 @@ Status: the Android representative no-device pilot passed. iOS storage routing a
 
 ## Bound control plane
 
-- Canonical layout: `/Users/divay/Developer/Maina/qualification/storage-architecture/MAINA_STORAGE_LAYOUT.md`, SHA-256 `6f9e200c380b8230be2b5b0cfe13d08852f6de8010aaf7cf6f2ab6989dc9826c`, 2,960 bytes, mode `0644`.
-- Canonical guard: `/Users/divay/Developer/Maina/qualification/storage-architecture/jobs/storage-local-staging-format-20260904/require-maina-storage.sh`, SHA-256 `e8efcaa346ca46ed746970f7739f1346f25442719961f1c8e3d884b3d54c538f`, 3,387 bytes, mode `0755`.
+- Git-backed canonical policy: `coordination/docs/storage/MAINA_STORAGE_LAYOUT.md` (maina-coordination destination `docs/storage/MAINA_STORAGE_LAYOUT.md`), SHA-256 `87b7cf7f677ee6440013656dc1b2c85c8f99df863c5ea764f17a8eb687277bba`, 29,047 bytes, mode `0644`.
+- Installed operational mirror: `/Users/divay/Developer/Maina/qualification/storage-architecture/MAINA_STORAGE_LAYOUT.md`. This mirror is not the Git source of truth, and this report does not pin a mutable intermediate mirror hash.
+- Canonical guard: Git path `coordination/scripts/storage/require-maina-storage.sh`; installed path `/Users/divay/Developer/Maina/qualification/storage-architecture/jobs/storage-local-staging-format-20260904/require-maina-storage.sh`; SHA-256 `e8efcaa346ca46ed746970f7739f1346f25442719961f1c8e3d884b3d54c538f`, 3,387 bytes, mode `0755`.
 - Guard success was exit `0` with exact root `/Volumes/DivaySSD/MainaBuild`. The bound wrappers reject absent, wrong, or unsafe storage with exit `78` and no internal fallback.
 - Audited source baselines: Android/shared `c3fb09043be9e71121a80f6640f05db76396b446`; iOS `efde3ce18a54d1f61660d485f475a41b6f3b086c`. Both were clean and upstream-exact before the pilot.
 
@@ -26,11 +27,13 @@ Status: the Android representative no-device pilot passed. iOS storage routing a
 1. Guarded control-plane probe: `PATH="$PWD/scripts/external-bin:$PATH" scripts/external-bin/xcodebuild -workspace ios/Maina.xcworkspace -scheme Maina -configuration Release -showBuildSettings`; exit `0`; latest elapsed `3 s`. The project/workspace call was routed through the external DerivedData shim. Bare shim passthrough remains limited to non-building controls such as `-version` and `-checkFirstLaunchStatus`.
 2. No compiler/signing pilot was run. The exact Team certificate/toolchain gate was available, but there was no current matching provisioning profile; profile refresh and a signed build remain separate work.
 3. The ignored real `ios/build` tree was proven to contain only reproducible generated Expo/React Native metadata, then preserve-copied and re-read before cutover: 90 regular files, 21 directories including root, 0 symlinks, 465,763 logical bytes, 700 KiB allocated.
-4. Normalized source/copy evidence matched exactly:
+4. Historical evidence limitation: no independent sanitized cutover receipt was retained. The three values below are contemporaneous aggregate observations only. Because the internal source was removed after the checks, they are not replayable or independently verifiable now:
    - file manifest SHA-256 `8032fdc12c0b2bb24178ad045fb392d126412998e3cc6c0a7c5d297bfea685bc`
    - directory manifest SHA-256 `060bc8f89aca27cba64ceed705c800df8426789faac7164e0f42f03f66a48a25`
    - extended-attribute manifest SHA-256 `1d40907f948b2fe3508a3ae2730a5b6f2f997a9e5fb4274e99a650fbba4a5f45` across 111 source and 111 copy nodes
 5. `/Users/divay/Developer/.worktrees/maina-ios-feasibility/ios/build` is now the exact absolute symlink to `/Volumes/DivaySSD/MainaBuild/builds/apps/ios-feasibility/ios/native`. `lstat`, `readlink`, `realpath`, normalized manifests, and followed device identity all passed. The internal original was retained until those checks and the focused verifier passed, then only that temporary rollback copy was removed.
+
+A future real-directory cutover is not accepted unless its sanitized source/copy manifest receipt is retained outside both trees and hash-bound in tracked pilot evidence before the rollback is removed. The receipt must record relative-path, mode, byte, and content hashes; applicable directory and extended-attribute summaries; policy and guard identities; timestamps; and the verification result. Never reconstruct a missing receipt after cutover.
 
 ## Safety boundary
 
