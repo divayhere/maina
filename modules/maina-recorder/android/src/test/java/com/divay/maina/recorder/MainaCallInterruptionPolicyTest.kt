@@ -625,6 +625,64 @@ class MainaCallInterruptionPolicyTest {
     }
 
     @Test
+    fun `released Maina recorder clears stale silencing and rejected call enters automatic resume`() {
+        val recording = MainaCaptureControlState(phase = MainaCaptureControlPhase.RECORDING)
+        val pausePending = (MainaCallInterruptionPolicy.onCommunicationChanged(recording, active = true)
+            as MainaCaptureControlDecision.Pause).state
+        val paused = MainaCallInterruptionPolicy.pauseSucceeded(pausePending)
+
+        val exactRecorderSilenced = MainaCallInterruptionPolicy.refreshedClientSilenced(
+            cached = true,
+            observed = false,
+        )
+        val communicationActive = MainaCallInterruptionPolicy.communicationActive(
+            audioMode = AudioManager.MODE_NORMAL,
+            clientSilenced = exactRecorderSilenced,
+        )
+        val recovery = MainaCallInterruptionPolicy.onCommunicationChanged(paused, communicationActive)
+
+        assertFalse(exactRecorderSilenced)
+        assertFalse(communicationActive)
+        assertTrue(recovery is MainaCaptureControlDecision.Resume)
+        assertEquals(
+            MainaCaptureControlPhase.RESUME_PENDING,
+            (recovery as MainaCaptureControlDecision.Resume).state.phase,
+        )
+        assertEquals(MainaCapturePauseOwner.SYSTEM, recovery.state.pauseOwner)
+    }
+
+    @Test
+    fun `communication silencing is derived from Maina exact AudioRecord rather than global captures`() {
+        val native = source(
+            "modules/maina-recorder/android/src/main/java/com/divay/maina/recorder/MainaNativeAudioCapture.kt",
+        )
+        val exactObservation = native.substring(
+            native.indexOf("fun ownClientSilenced"),
+            native.indexOf("fun start(options", native.indexOf("fun ownClientSilenced")),
+        )
+        assertTrue(exactObservation.contains("synchronized(recorderLock)"))
+        assertTrue(exactObservation.contains("recorder ?: return@synchronized false"))
+        assertTrue(exactObservation.contains("activeRecordingConfiguration?.isClientSilenced"))
+
+        val service = source(
+            "modules/maina-recorder/android/src/main/java/com/divay/maina/recorder/MainaRecordingService.kt",
+        )
+        val refresh = service.substring(
+            service.indexOf("private fun refreshedClientSilenced"),
+            service.indexOf("private fun observedCommunicationActive"),
+        )
+        assertTrue(refresh.contains("nativeCapture.ownClientSilenced()"))
+        assertFalse(refresh.contains("audioManager.activeRecordingConfigurations"))
+
+        val callback = service.substring(
+            service.indexOf("private val recordingCallback"),
+            service.indexOf("private val deviceCallback"),
+        )
+        assertTrue(callback.contains("refreshedClientSilenced()"))
+        assertFalse(callback.contains("clientSilenced = candidates.any"))
+    }
+
+    @Test
     fun `communication watcher runs only while capture control is active`() {
         assertFalse(MainaCallInterruptionPolicy.shouldWatchCommunication(MainaCaptureControlState()))
         for (phase in listOf(

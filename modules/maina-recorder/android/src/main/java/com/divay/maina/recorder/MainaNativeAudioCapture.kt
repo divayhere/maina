@@ -174,6 +174,22 @@ internal class MainaNativeAudioCapture(
 
     fun privacyGenerationSnapshot(): Long = privacyLatchGeneration.get()
 
+    /**
+     * Returns silencing truth for Maina's exact AudioRecord only. Once pause
+     * releases that recorder there is no Maina capture client left to remain
+     * silenced, so a stale/global recording configuration must not keep call
+     * recovery paused after Android returns to MODE_NORMAL.
+     */
+    fun ownClientSilenced(): Boolean? {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return false
+        return synchronized(recorderLock) {
+            val activeRecorder = recorder ?: return@synchronized false
+            runCatching {
+                activeRecorder.activeRecordingConfiguration?.isClientSilenced ?: false
+            }.getOrNull()
+        }
+    }
+
     fun start(options: Options, expectedLatchGeneration: Long): Snapshot = synchronized(lock) {
         check(!running.get()) { "Native capture is already active" }
         require(options.meetingId.isNotBlank()) { "meetingId is required" }

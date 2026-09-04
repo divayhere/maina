@@ -99,9 +99,7 @@ class MainaRecordingService : Service() {
             }
             if (signature == lastRecordingSignature) return
             lastRecordingSignature = signature
-            clientSilenced = candidates.any {
-                Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && it.isClientSilenced
-            }
+            refreshedClientSilenced()
             reconcileCommunicationInterruption()
             candidates.forEach { config -> reportActiveRecording(config) }
         }
@@ -1457,16 +1455,7 @@ class MainaRecordingService : Service() {
     }
 
     private fun refreshedClientSilenced(): Boolean {
-        val resolvedAudioSource = nativeCapture.snapshot().resolvedAudioSource
-        val observed = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            resolvedAudioSource?.let { source -> runCatching {
-                audioManager.activeRecordingConfigurations
-                    .filter { it.clientAudioSource == source }
-                    .any(AudioRecordingConfiguration::isClientSilenced)
-            }.getOrNull() }
-        } else {
-            false
-        }
+        val observed = nativeCapture.ownClientSilenced()
         return MainaCallInterruptionPolicy.refreshedClientSilenced(clientSilenced, observed).also {
             clientSilenced = it
         }
