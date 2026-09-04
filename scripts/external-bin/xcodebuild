@@ -1,0 +1,37 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+PROJECT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
+# shellcheck source=../maina-ios-env.sh
+source "$PROJECT_DIR/scripts/maina-ios-env.sh"
+
+has_project=false
+derived_data=''
+expect_derived_data=false
+for argument in "$@"; do
+  if $expect_derived_data; then
+    derived_data="$argument"
+    expect_derived_data=false
+    continue
+  fi
+  case "$argument" in
+    -workspace|-project) has_project=true ;;
+    -derivedDataPath) expect_derived_data=true ;;
+    -derivedDataPath=*) derived_data="${argument#-derivedDataPath=}" ;;
+  esac
+done
+if $expect_derived_data; then
+  echo "xcodebuild -derivedDataPath is missing its value." >&2
+  exit 78
+fi
+
+if [[ -n "$derived_data" ]]; then
+  maina_require_storage_path "$derived_data" || exit $?
+  exec /usr/bin/xcodebuild "$@"
+fi
+if $has_project; then
+  derived_data="$MAINA_IOS_DERIVED_DATA_ROOT/expo-run"
+  maina_storage_mkdir "$derived_data"
+  exec /usr/bin/xcodebuild "$@" -derivedDataPath "$derived_data"
+fi
+exec /usr/bin/xcodebuild "$@"

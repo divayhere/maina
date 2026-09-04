@@ -2,14 +2,21 @@
 set -euo pipefail
 
 PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-NODE_BIN="/Users/divay/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin"
-RUBY_BIN="${MAINA_IOS_RUBY_BIN:-/Users/divay/Developer/.tools/maina-ruby-3.3.9-v2/bin}"
+# shellcheck source=maina-ios-env.sh
+source "$PROJECT_DIR/scripts/maina-ios-env.sh"
+"$PROJECT_DIR/scripts/restore-external-build-links.sh" dependencies
+
 EXPECTED_FINAL="${MAINA_EXPECTED_FINAL_COMMIT:?Set the exact Admin-reviewed final iOS commit}"
 export MAINA_EXPECTED_FINAL_COMMIT="$EXPECTED_FINAL"
-OUTPUT_DIR="${MAINA_RELEASE_OUTPUT_DIR:?Set an absolute empty output directory for the one iOS build}"
+OUTPUT_DIR="${MAINA_RELEASE_OUTPUT_DIR:-$MAINA_IOS_RELEASE_OUTPUT_ROOT/ios/Maina-0.10.44-26-candidate}"
 TEAM_ID="${MAINA_IOS_TEAM_ID:-9X4X3R4KCN}"
 [[ "$TEAM_ID" == "9X4X3R4KCN" ]] || { echo "iOS candidate team must remain 9X4X3R4KCN." >&2; exit 2; }
 [[ "$OUTPUT_DIR" == /* ]] || { echo "MAINA_RELEASE_OUTPUT_DIR must be absolute." >&2; exit 2; }
+maina_require_storage_path "$OUTPUT_DIR" || exit $?
+case "$OUTPUT_DIR" in
+  "$MAINA_IOS_RELEASE_OUTPUT_ROOT"/ios/*) ;;
+  *) echo "MAINA_RELEASE_OUTPUT_DIR must stay under the guarded iOS artifact root." >&2; exit 78 ;;
+esac
 [[ "${MAINA_ADMIN_CAPACITY_CLEARANCE:-}" == "approved" ]] || {
   echo "Fresh post-Android Admin capacity clearance is required before the one iOS build." >&2
   exit 2
@@ -26,12 +33,23 @@ if [[ -d "$OUTPUT_DIR" && -n "$(find "$OUTPUT_DIR" -mindepth 1 -maxdepth 1 -prin
   echo "iOS evidence output directory is not fresh; refusing to mix prior evidence with a new attempt." >&2
   exit 73
 fi
-mkdir -p "$OUTPUT_DIR"
+BUILD_ROOT="${MAINA_IOS_CANDIDATE_DERIVED_DATA:-$MAINA_IOS_DERIVED_DATA_ROOT/Maina-0.10.44-26-candidate}"
+maina_require_storage_path "$BUILD_ROOT" || exit $?
+case "$BUILD_ROOT" in
+  "$MAINA_IOS_DERIVED_DATA_ROOT"/*) ;;
+  *) echo "iOS candidate DerivedData must stay under the guarded iOS DerivedData root." >&2; exit 78 ;;
+esac
+if [[ -e "$BUILD_ROOT" && ! -d "$BUILD_ROOT" ]]; then
+  echo "iOS DerivedData path exists and is not a directory." >&2
+  exit 2
+fi
+if [[ -d "$BUILD_ROOT" && -n "$(find "$BUILD_ROOT" -mindepth 1 -maxdepth 1 -print -quit)" ]]; then
+  echo "iOS DerivedData directory is not fresh; refusing mixed build state." >&2
+  exit 73
+fi
+maina_storage_mkdir "$OUTPUT_DIR"
 : > "$OUTPUT_DIR/build-attempted"
 BUILD_LOG="$OUTPUT_DIR/ios-build.log"
-BUILD_ROOT="$OUTPUT_DIR/DerivedData"
-export PATH="$NODE_BIN:$RUBY_BIN:$PATH"
-export NODE_BINARY="$NODE_BIN/node"
 export NODE_ENV=production
 export SENTRY_DISABLE_AUTO_UPLOAD=true
 export SENTRY_ALLOW_FAILURE=true

@@ -5,17 +5,21 @@ set -euo pipefail
 # intentionally a later runtime download into the app sandbox; it is never
 # bundled in an IPA.
 PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+# shellcheck source=maina-ios-env.sh
+source "$PROJECT_DIR/scripts/maina-ios-env.sh"
+
 VERSION="1.13.4"
 EXPECTED_SHA256="74306ad04310d921ce0ba9b356a349a2020a0eb79994da33e356e67f303e42c6"
 ARCHIVE_NAME="sherpa-onnx-v${VERSION}-ios-no-tts.xcframework.zip"
 URL="https://github.com/k2-fsa/sherpa-onnx/releases/download/v${VERSION}/${ARCHIVE_NAME}"
-CACHE_ROOT="${MAINA_IOS_RUNTIME_CACHE:-$PROJECT_DIR/.artifacts/ios-runtime}"
+CACHE_ROOT="$MAINA_IOS_RUNTIME_CACHE"
 ARCHIVE="$CACHE_ROOT/$ARCHIVE_NAME"
 SOURCE_ARCHIVE="${MAINA_SHERPA_ARCHIVE:-}"
 VENDOR_ROOT="$PROJECT_DIR/modules/maina-recorder/ios/vendor"
 FRAMEWORK="$VENDOR_ROOT/sherpa-onnx.xcframework"
 
-mkdir -p "$CACHE_ROOT" "$VENDOR_ROOT"
+maina_storage_mkdir "$CACHE_ROOT"
+mkdir -p "$VENDOR_ROOT"
 
 if [[ -n "$SOURCE_ARCHIVE" ]]; then
   if [[ ! -f "$SOURCE_ARCHIVE" ]]; then

@@ -2,9 +2,9 @@
 set -euo pipefail
 
 PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-NODE_BIN="/Users/divay/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin"
-RUBY_BIN="${MAINA_IOS_RUBY_BIN:-/Users/divay/Developer/.tools/maina-ruby-3.3.9-v2/bin}"
-export PATH="$NODE_BIN:$RUBY_BIN:$PATH"
+# shellcheck source=maina-ios-env.sh
+source "$PROJECT_DIR/scripts/maina-ios-env.sh"
+
 if [[ -z "${SENTRY_AUTH_TOKEN:-}" ]]; then
   export SENTRY_DISABLE_AUTO_UPLOAD=true
 fi
@@ -24,10 +24,11 @@ if [[ "$(pod --version)" != "1.17.0" ]]; then
 fi
 cd "$PROJECT_DIR"
 node scripts/verify-build-source-state.mjs ios "${MAINA_EXPECTED_FINAL_COMMIT:?Set MAINA_EXPECTED_FINAL_COMMIT to the Admin-reviewed iOS pin}"
-NODE_ENV=development npm ci
+"$PROJECT_DIR/scripts/install-external-node-dependencies.sh"
 export NODE_ENV=production
 npm run ios:runtime
 npm run verify:ios-native
 npx expo prebuild --platform ios --no-install --clean
+"$PROJECT_DIR/scripts/restore-external-build-links.sh" ios
 (cd ios && pod install)
-ruby scripts/configure-ios-ui-tests.rb
+"$PROJECT_DIR/scripts/configure-ios-ui-tests-guarded.sh"

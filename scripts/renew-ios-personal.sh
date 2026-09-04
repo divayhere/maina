@@ -2,7 +2,11 @@
 set -euo pipefail
 
 PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-NODE_BIN="/Users/divay/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin"
+# shellcheck source=maina-ios-env.sh
+source "$PROJECT_DIR/scripts/maina-ios-env.sh"
+"$PROJECT_DIR/scripts/restore-external-build-links.sh" dependencies
+
+NODE_BIN="$MAINA_IOS_NODE_BIN"
 DEVICE_ID="${MAINA_IOS_DEVICE_ID:-945E396B-87B0-5CB7-9A3D-A5E75CF9B4CD}"
 DEVICE_UDID="${MAINA_IOS_DEVICE_UDID:-00008120-001E146611E2601E}"
 BUNDLE_ID="${MAINA_IOS_BUNDLE_ID:-com.divay.maina.staging}"
@@ -76,7 +80,12 @@ xcrun devicectl device copy from --device "$DEVICE_ID" --domain-type systemCrash
 node scripts/inspect-mobile-backup.mjs "$RUN_ROOT/device/container" > "$RUN_ROOT/before.json"
 
 npm run ios:prepare
-BUILD_ROOT="/Users/divay/Developer/.builds/maina-ios-renewal-$RUN_ID"
+BUILD_ROOT="${MAINA_IOS_RENEWAL_DERIVED_DATA:-$MAINA_IOS_DERIVED_DATA_ROOT/renewal-$RUN_ID}"
+maina_require_storage_path "$BUILD_ROOT" || exit $?
+[[ ! -e "$BUILD_ROOT" ]] || {
+  echo "iOS renewal DerivedData already exists; refusing mixed build state." >&2
+  exit 73
+}
 xcodebuild -workspace ios/Maina.xcworkspace -scheme Maina -configuration Release \
   -destination "platform=iOS,id=$DEVICE_UDID" -derivedDataPath "$BUILD_ROOT" \
   -allowProvisioningUpdates DEVELOPMENT_TEAM="$TEAM_ID" CODE_SIGN_STYLE=Automatic build

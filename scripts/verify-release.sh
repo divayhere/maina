@@ -2,8 +2,10 @@
 set -euo pipefail
 
 PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-# shellcheck source=maina-env.sh
-source "$PROJECT_DIR/scripts/maina-env.sh"
+# shellcheck source=maina-build-env.sh
+source "$PROJECT_DIR/scripts/maina-build-env.sh"
+"$MAINA_NODE_BIN/node" "$PROJECT_DIR/scripts/verify-external-storage-contract.mjs"
+"$PROJECT_DIR/scripts/restore-external-build-links.sh" dependencies
 
 cd "$PROJECT_DIR"
 "$PROJECT_DIR/scripts/verify-toolchain.sh"
@@ -31,19 +33,19 @@ if rg -q 'queueTextArtifact\(' "$PROJECT_DIR/src/app/record.tsx" "$PROJECT_DIR/s
   exit 1
 fi
 
-EXPORT_DIR="$(mktemp -d -t maina-export.XXXXXX)"
+EXPORT_DIR="$(mktemp -d "$MAINA_ANDROID_TEMP_ROOT/maina-export.XXXXXX")"
 npx expo export --platform android --output-dir "$EXPORT_DIR"
+"$PROJECT_DIR/scripts/restore-external-build-links.sh" android
 
 cd "$PROJECT_DIR/android"
 ./gradlew \
   --gradle-user-home "$GRADLE_USER_HOME" \
-  --project-cache-dir "$MAINA_BUILD_ROOT/gradle-project-cache" \
-  --init-script "$PROJECT_DIR/scripts/gradle-output-redirect.init.gradle" \
+  --project-cache-dir "$MAINA_GRADLE_PROJECT_CACHE" \
   -PreactNativeArchitectures="$MAINA_ANDROID_ABI" \
   :maina-recorder:testDebugUnitTest :maina-recorder:compileDebugKotlin :app:compileDebugKotlin :app:mergeDebugAssets :app:mergeDebugNativeLibs \
   --console=plain --no-daemon
 
-MERGED_NATIVE_ROOT="$MAINA_BUILD_ROOT/outputs"
+MERGED_NATIVE_ROOT="$MAINA_ANDROID_OUTPUT_ROOT"
 if ! find "$MERGED_NATIVE_ROOT" -type f \( -name 'libonnxruntime.so' -o -name 'libsherpa-onnx-jni.so' \) | grep -q .; then
   echo "Sherpa JNI runtime was not merged into the Android app output" >&2
   exit 1
@@ -53,7 +55,7 @@ fi
 # the *app* merge layer, not only inside the Expo module, so a future Gradle or
 # autolinking change cannot compile Kotlin successfully but ship an APK that
 # crashes on its first post-recording transcription.
-VAD_ASSET="$(find "$MAINA_BUILD_ROOT/outputs/_app" \
+VAD_ASSET="$(find "$MAINA_ANDROID_OUTPUT_ROOT/_app" \
   -path '*/intermediates/assets/debug/mergeDebugAssets/silero_vad.int8.onnx' \
   -type f | head -n 1)"
 if [[ -z "$VAD_ASSET" || ! -f "$VAD_ASSET" ]]; then
@@ -80,7 +82,7 @@ for GENERATED_CODEGEN in \
   fi
 done
 
-DEBUG_MANIFEST="$(find "$MAINA_BUILD_ROOT/outputs" \
+DEBUG_MANIFEST="$(find "$MAINA_ANDROID_OUTPUT_ROOT" \
   -path '*/merged_manifest/debug/processDebugMainManifest/AndroidManifest.xml' \
   -o -path '*/merged_manifests/debug/processDebugManifest/AndroidManifest.xml' \
   | head -n 1)"
@@ -99,7 +101,7 @@ rg -q 'FOREGROUND_SERVICE_MICROPHONE' "$DEBUG_MANIFEST"
 rg -q 'FOREGROUND_SERVICE_MEDIA_PROCESSING' "$DEBUG_MANIFEST"
 rg -q 'android:foregroundServiceType="mediaProcessing"' "$DEBUG_MANIFEST"
 
-RELEASE_MANIFEST="$(find "$MAINA_BUILD_ROOT/outputs" \
+RELEASE_MANIFEST="$(find "$MAINA_ANDROID_OUTPUT_ROOT" \
   -path '*/merged_manifest/release/processReleaseMainManifest/AndroidManifest.xml' \
   -o -path '*/merged_manifests/release/processReleaseManifest/AndroidManifest.xml' \
   | head -n 1)"

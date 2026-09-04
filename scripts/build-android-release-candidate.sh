@@ -2,12 +2,18 @@
 set -euo pipefail
 
 PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-# shellcheck source=maina-env.sh
-source "$PROJECT_DIR/scripts/maina-env.sh"
+# shellcheck source=maina-build-env.sh
+source "$PROJECT_DIR/scripts/maina-build-env.sh"
+"$PROJECT_DIR/scripts/restore-external-build-links.sh" dependencies
 
 EXPECTED_FINAL="${MAINA_EXPECTED_FINAL_COMMIT:?Set the exact Admin-reviewed final Android commit}"
-OUTPUT_DIR="${MAINA_RELEASE_OUTPUT_DIR:?Set an absolute empty output directory for the one Android build}"
+OUTPUT_DIR="${MAINA_RELEASE_OUTPUT_DIR:-$MAINA_RELEASE_OUTPUT_ROOT/android/Maina-0.10.44-70-candidate}"
 [[ "$OUTPUT_DIR" == /* ]] || { echo "MAINA_RELEASE_OUTPUT_DIR must be absolute." >&2; exit 2; }
+maina_require_storage_path "$OUTPUT_DIR" || exit $?
+case "$OUTPUT_DIR" in
+  "$MAINA_RELEASE_OUTPUT_ROOT"/android/*) ;;
+  *) echo "MAINA_RELEASE_OUTPUT_DIR must stay under the guarded Android artifact root." >&2; exit 78 ;;
+esac
 [[ "${MAINA_ADMIN_CAPACITY_CLEARANCE:-}" == "approved" ]] || {
   echo "Fresh Admin capacity clearance is required before the one Android build." >&2
   exit 2
@@ -24,7 +30,7 @@ if [[ -d "$OUTPUT_DIR" && -n "$(find "$OUTPUT_DIR" -mindepth 1 -maxdepth 1 -prin
   echo "Android evidence output directory is not fresh; refusing to mix prior evidence with a new attempt." >&2
   exit 73
 fi
-mkdir -p "$OUTPUT_DIR"
+maina_storage_mkdir "$OUTPUT_DIR"
 : > "$OUTPUT_DIR/build-attempted"
 BUILD_LOG="$OUTPUT_DIR/android-build.log"
 
@@ -36,13 +42,17 @@ node scripts/verify-generated-native-release-metadata.mjs android
 
 set +e
 (
+  set -e
   cd android
-  "$MAINA_GRADLE_HOME/bin/gradle" \
-    --gradle-user-home "$GRADLE_USER_HOME" \
-    --project-cache-dir "$MAINA_BUILD_ROOT/gradle-project-cache" \
-    --init-script "$PROJECT_DIR/scripts/gradle-output-redirect.init.gradle" \
-    -PreactNativeArchitectures="$MAINA_ANDROID_ABI" \
-    clean :app:assembleRelease --console=plain --no-daemon
+  gradle_args=(
+    --gradle-user-home "$GRADLE_USER_HOME"
+    --project-cache-dir "$MAINA_GRADLE_PROJECT_CACHE"
+    -PreactNativeArchitectures="$MAINA_ANDROID_ABI"
+    --console=plain --no-daemon
+  )
+  "$MAINA_GRADLE_HOME/bin/gradle" "${gradle_args[@]}" clean
+  "$PROJECT_DIR/scripts/restore-external-build-links.sh" android
+  "$MAINA_GRADLE_HOME/bin/gradle" "${gradle_args[@]}" :app:assembleRelease
 ) 2>&1 | tee "$BUILD_LOG"
 build_status=${PIPESTATUS[0]}
 set -e
@@ -55,7 +65,7 @@ if rg -i -q 'ENOSPC|No space left|I/O error|input/output error' "$BUILD_LOG"; th
   exit 1
 fi
 
-APK="$MAINA_BUILD_ROOT/outputs/_app/outputs/apk/release/app-release.apk"
+APK="$MAINA_ANDROID_OUTPUT_ROOT/_app/outputs/apk/release/app-release.apk"
 [[ -n "$APK" && -f "$APK" ]] || { echo "Exact release APK was not produced." >&2; exit 1; }
 HELD_APK="$OUTPUT_DIR/Maina-0.10.44-70.apk"
 cp "$APK" "$HELD_APK"

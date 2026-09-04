@@ -2,20 +2,23 @@
 set -euo pipefail
 
 PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+# shellcheck source=maina-ios-env.sh
+source "$PROJECT_DIR/scripts/maina-ios-env.sh"
+
 RELEASE_PLAN="$PROJECT_DIR/release/m3-m4-0.10.44-candidate-plan.json"
-ACTIVE_CANDIDATE_VERSION="$(/Users/divay/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node -p "require('$RELEASE_PLAN').release.version")"
-if [[ "$(/Users/divay/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node -p "require('$PROJECT_DIR/app.json').expo.version")" == "$ACTIVE_CANDIDATE_VERSION" ]]; then
+ACTIVE_CANDIDATE_VERSION="$("$MAINA_IOS_NODE_BIN/node" -p "require('$RELEASE_PLAN').release.version")"
+if [[ "$("$MAINA_IOS_NODE_BIN/node" -p "require('$PROJECT_DIR/app.json').expo.version")" == "$ACTIVE_CANDIDATE_VERSION" ]]; then
   echo "Refusing combined candidate build/install. Use ios:build-candidate, Admin artifact audit, then ios:install-preserving." >&2
   exit 2
 fi
 
 # Deterministic local staging release for the one qualified USB iPhone 15.
 # Override the identifiers explicitly when the physical staging phone changes.
-NODE_BIN="/Users/divay/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin"
+NODE_BIN="$MAINA_IOS_NODE_BIN"
 DEVICE_ID="${MAINA_IOS_DEVICE_ID:-945E396B-87B0-5CB7-9A3D-A5E75CF9B4CD}"
 DEVICE_UDID="${MAINA_IOS_DEVICE_UDID:-00008120-001E146611E2601E}"
 DEVICE_PRODUCT_TYPE="${MAINA_IOS_DEVICE_PRODUCT_TYPE:-iPhone15,4}"
-PYMOBILEDEVICE3_BIN="${MAINA_PYMOBILEDEVICE3_BIN:-/Users/divay/Developer/.tools/maina-pymobiledevice3/bin/pymobiledevice3}"
+PYMOBILEDEVICE3_BIN="${MAINA_PYMOBILEDEVICE3_BIN:-$PROJECT_DIR/.tools/pymobiledevice3-venv/bin/pymobiledevice3}"
 BUNDLE_ID="${MAINA_IOS_BUNDLE_ID:-com.divay.maina.staging}"
 TEAM_ID="${MAINA_IOS_TEAM_ID:-9X4X3R4KCN}"
 MIN_FREE_KB=$((8 * 1024 * 1024))
@@ -29,6 +32,8 @@ fi
 
 cd "$PROJECT_DIR"
 [[ "$(node --version)" == v24.* ]] || { echo "Maina iOS requires Node 24." >&2; exit 1; }
+"$PROJECT_DIR/scripts/restore-external-build-links.sh" dependencies
+"$PROJECT_DIR/scripts/restore-external-build-links.sh" ios
 xcodebuild -checkFirstLaunchStatus
 [[ -d ios/Maina.xcworkspace ]] || { echo "Run npm run ios:prepare first; ios/Maina.xcworkspace is missing." >&2; exit 1; }
 
@@ -51,7 +56,7 @@ usb_device_ok="$(USBMUX_JSON="$usb_device_json" node -e '
   exit 1
 }
 
-free_kb="$(df -Pk / | awk 'NR == 2 {print $4}')"
+free_kb="$(df -Pk "$MAINA_STORAGE_ROOT" | awk 'NR == 2 {print $4}')"
 (( free_kb >= MIN_FREE_KB )) || {
   echo "At least 8 GB free is required for a clean iOS release build." >&2
   exit 1
@@ -70,9 +75,10 @@ npm run lint
 npm test -- --run
 npm run verify:ios-native
 
-build_root="${MAINA_IOS_BUILD_ROOT:-/Users/divay/Developer/.builds/maina-ios-release-v${build_number}}"
+build_root="${MAINA_IOS_STAGING_DERIVED_DATA:-$MAINA_IOS_DERIVED_DATA_ROOT/staging-v${build_number}}"
+maina_require_storage_path "$build_root" || exit $?
 case "$build_root" in
-  /Users/divay/Developer/.builds/maina-ios-release-v*) ;;
+  "$MAINA_IOS_DERIVED_DATA_ROOT"/staging-v*) ;;
   *) echo "Refusing to clean unexpected iOS build root: $build_root" >&2; exit 1 ;;
 esac
 # Release evidence must never reuse stale Clang/Swift modules after pod or

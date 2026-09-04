@@ -2,8 +2,8 @@
 set -euo pipefail
 
 PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-# shellcheck source=maina-env.sh
-source "$PROJECT_DIR/scripts/maina-env.sh"
+# shellcheck source=maina-build-env.sh
+source "$PROJECT_DIR/scripts/maina-build-env.sh"
 
 node_major="$(node --version | sed -E 's/^v([0-9]+).*/\1/')"
 if [[ "$node_major" != "24" ]]; then
