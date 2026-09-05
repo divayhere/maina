@@ -5,7 +5,7 @@ PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 # shellcheck source=maina-ios-env.sh
 source "$PROJECT_DIR/scripts/maina-ios-env.sh"
 
-RELEASE_PLAN="$PROJECT_DIR/release/m3-m4-0.10.47-candidate-plan.json"
+RELEASE_PLAN="$PROJECT_DIR/release/m3-m4-0.10.48-candidate-plan.json"
 ACTIVE_CANDIDATE_VERSION="$("$MAINA_IOS_NODE_BIN/node" -p "require('$RELEASE_PLAN').release.version")"
 if [[ "$("$MAINA_IOS_NODE_BIN/node" -p "require('$PROJECT_DIR/app.json').expo.version")" == "$ACTIVE_CANDIDATE_VERSION" ]]; then
   echo "Refusing combined candidate build/install. Use ios:build-candidate, Admin artifact audit, then ios:install-preserving." >&2
