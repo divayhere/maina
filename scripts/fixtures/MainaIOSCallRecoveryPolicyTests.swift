@@ -30,6 +30,29 @@ require(!MainaIOSCallRecoveryPolicy.manualResumeAllowed(
   communicationActive: false, observerCallActive: true
 ), "manual resume cannot override an observer-owned call")
 
+let staleCommunicationActive = true
+let rejectedCallRefresh = MainaIOSCallRecoveryPolicy.refreshedCommunicationActive(
+  cached: staleCommunicationActive,
+  observerCallActive: false
+)
+require(staleCommunicationActive, "the fixture must begin with stale active-call state")
+require(!rejectedCallRefresh, "an ended/rejected call must clear stale cached call state")
+require(MainaIOSCallRecoveryPolicy.action(
+  paused: true, interrupted: true, manuallyPaused: false,
+  communicationActive: rejectedCallRefresh,
+  observerCallActive: false, recoveryLoopActive: false
+) == .start, "clearing stale call state must start unattended recovery")
+require(MainaIOSCallRecoveryPolicy.manualResumeAllowed(
+  communicationActive: rejectedCallRefresh,
+  observerCallActive: false
+), "clearing stale call state must also release the manual recovery veto")
+
+let newlyObservedCall = MainaIOSCallRecoveryPolicy.refreshedCommunicationActive(
+  cached: false,
+  observerCallActive: true
+)
+require(newlyObservedCall, "a currently observed call must still veto recovery")
+
 print("iOS call-recovery policy tests passed.")
   }
 }

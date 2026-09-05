@@ -73,6 +73,8 @@ for (const token of [
   'CXCallObserver',
   'capture-recovery-vetoed-by-call',
   'MainaIOSCallRecoveryPolicy.action',
+  'MainaIOSCallRecoveryPolicy.refreshedCommunicationActive',
+  'refreshCommunicationActiveFromObserver()',
   'chunk-allocated',
   'next.record(), next.isRecording',
 ]) {
@@ -180,6 +182,25 @@ for (const token of [
   if (!readFileSync(continuedProcessingPlugin, 'utf8').includes(token)) {
     throw new Error(`iOS AppDelegate registration invariant missing: ${token}`);
   }
+}
+
+const recoverySourceSections = [
+  ['route recovery', 'private func handleRouteChange', 'private func handleInterruption'],
+  ['interruption end', 'private func handleInterruption', 'private func handleMediaServicesReset'],
+  ['foreground recovery', 'private func recoverWhenAppBecomesActive', '/**\n   * AVAudioSession can remain unavailable'],
+];
+for (const [label, startToken, endToken] of recoverySourceSections) {
+  const start = captureSource.indexOf(startToken);
+  const end = captureSource.indexOf(endToken, start + startToken.length);
+  if (start < 0 || end <= start || !captureSource.slice(start, end).includes('refreshCommunicationActiveFromObserver()')) {
+    throw new Error(`iOS ${label} must refresh exact CallKit state before deciding whether recovery is blocked.`);
+  }
+}
+const scheduledRecoveryStart = captureSource.indexOf('private func scheduleRecovery');
+const scheduledRecoveryEnd = captureSource.indexOf('private func beginRecoveryBackgroundTaskIfNeeded', scheduledRecoveryStart);
+const scheduledRecoverySource = captureSource.slice(scheduledRecoveryStart, scheduledRecoveryEnd);
+if ((scheduledRecoverySource.match(/refreshCommunicationActiveFromObserver\(\)/g) ?? []).length < 2) {
+  throw new Error('iOS scheduled recovery must refresh exact CallKit state both before scheduling and before microphone reacquisition.');
 }
 
 // This is intentionally a macOS-only static gate; Linux CI still runs TS tests.

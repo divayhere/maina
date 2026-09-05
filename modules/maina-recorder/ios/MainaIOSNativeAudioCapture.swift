@@ -80,10 +80,10 @@ final class MainaIOSNativeAudioCapture: NSObject, AVAudioRecorderDelegate, CXCal
   ) throws -> [String: Any] {
     try queue.sync {
       guard state == .idle else { throw CaptureError.invalidState("A Maina recording is already active.") }
-      communicationActive = callObserver.calls.contains(where: { !$0.hasEnded })
+      let observerCallActive = refreshCommunicationActiveFromObserver()
       guard MainaIOSCallRecoveryPolicy.manualResumeAllowed(
         communicationActive: communicationActive,
-        observerCallActive: callObserver.calls.contains(where: { !$0.hasEnded })
+        observerCallActive: observerCallActive
       ) else {
         throw CaptureError.invalidState("The microphone is currently owned by a call.")
       }
@@ -151,10 +151,10 @@ final class MainaIOSNativeAudioCapture: NSObject, AVAudioRecorderDelegate, CXCal
   func resume() throws -> [String: Any] {
     try queue.sync {
       guard state == .paused else { throw CaptureError.invalidState("Maina is not paused.") }
-      communicationActive = callObserver.calls.contains(where: { !$0.hasEnded })
+      let observerCallActive = refreshCommunicationActiveFromObserver()
       guard MainaIOSCallRecoveryPolicy.manualResumeAllowed(
         communicationActive: communicationActive,
-        observerCallActive: callObserver.calls.contains(where: { !$0.hasEnded })
+        observerCallActive: observerCallActive
       ) else {
         throw CaptureError.invalidState("The microphone is still owned by a call or system interruption.")
       }
@@ -549,9 +549,10 @@ final class MainaIOSNativeAudioCapture: NSObject, AVAudioRecorderDelegate, CXCal
         "reason": String(describing: reason ?? .unknown),
         "route": routeDescription(),
       ])
+      let observerCallActive = refreshCommunicationActiveFromObserver()
       guard MainaIOSCallRecoveryPolicy.manualResumeAllowed(
         communicationActive: communicationActive,
-        observerCallActive: callObserver.calls.contains(where: { !$0.hasEnded })
+        observerCallActive: observerCallActive
       ) else {
         appendJournal("capture-recovery-vetoed-by-call", fields: ["signal": "route-change"])
         return
@@ -605,7 +606,7 @@ final class MainaIOSNativeAudioCapture: NSObject, AVAudioRecorderDelegate, CXCal
     case .ended:
       let optionsValue = notification.userInfo?[AVAudioSessionInterruptionOptionKey] as? UInt ?? 0
       let options = AVAudioSession.InterruptionOptions(rawValue: optionsValue)
-      communicationActive = callObserver.calls.contains(where: { !$0.hasEnded })
+      let observerCallActive = refreshCommunicationActiveFromObserver()
       guard interrupted else { return }
       guard !deliberatelyPaused else {
         interrupted = false
@@ -614,9 +615,9 @@ final class MainaIOSNativeAudioCapture: NSObject, AVAudioRecorderDelegate, CXCal
       }
       appendJournal("interruption-ended", fields: [
         "systemSuggestedResume": options.contains(.shouldResume),
-        "communicationActive": communicationActive,
+        "communicationActive": observerCallActive,
       ])
-      if !communicationActive { scheduleRecovery(reason: "interruption-recovery") }
+      if !observerCallActive { scheduleRecovery(reason: "interruption-recovery") }
     @unknown default:
       break
     }
@@ -630,7 +631,8 @@ final class MainaIOSNativeAudioCapture: NSObject, AVAudioRecorderDelegate, CXCal
   }
 
   private func recoverWhenAppBecomesActive() {
-    guard state == .paused, interrupted, !deliberatelyPaused, !communicationActive else { return }
+    let observerCallActive = refreshCommunicationActiveFromObserver()
+    guard state == .paused, interrupted, !deliberatelyPaused, !observerCallActive else { return }
     appendJournal("foreground-recovery-check", fields: [:])
     scheduleRecovery(reason: "foreground-recovery")
   }
@@ -642,12 +644,13 @@ final class MainaIOSNativeAudioCapture: NSObject, AVAudioRecorderDelegate, CXCal
    * instead of converting a temporary session race into terminal data loss.
    */
   private func scheduleRecovery(reason: String, attempt: Int = 0) {
+    let observerCallActive = refreshCommunicationActiveFromObserver()
     let action = MainaIOSCallRecoveryPolicy.action(
       paused: state == .paused,
       interrupted: interrupted,
       manuallyPaused: deliberatelyPaused,
       communicationActive: communicationActive,
-      observerCallActive: callObserver.calls.contains(where: { !$0.hasEnded }),
+      observerCallActive: observerCallActive,
       recoveryLoopActive: routeRecoveryActive && attempt == 0
     )
     guard action == .start || attempt > 0 else {
@@ -672,7 +675,8 @@ final class MainaIOSNativeAudioCapture: NSObject, AVAudioRecorderDelegate, CXCal
         self.interrupted,
         !self.deliberatelyPaused
       else { return }
-      if self.communicationActive || self.callObserver.calls.contains(where: { !$0.hasEnded }) {
+      let observerCallActive = self.refreshCommunicationActiveFromObserver()
+      if observerCallActive {
         self.suspendRecoveryForActiveCall(reason: "call-became-active")
         return
       }
@@ -725,7 +729,7 @@ final class MainaIOSNativeAudioCapture: NSObject, AVAudioRecorderDelegate, CXCal
   }
 
   private func canContinueRecoveryWatcher() -> Bool {
-    if communicationActive || callObserver.calls.contains(where: { !$0.hasEnded }) { return false }
+    if refreshCommunicationActiveFromObserver() { return false }
     if UIApplication.shared.applicationState == .active { return true }
     guard recoveryBackgroundTask != .invalid else { return false }
     return UIApplication.shared.backgroundTimeRemaining > 4
@@ -819,8 +823,21 @@ final class MainaIOSNativeAudioCapture: NSObject, AVAudioRecorderDelegate, CXCal
     ])
   }
 
+  @discardableResult
+  private func refreshCommunicationActiveFromObserver() -> Bool {
+    let observerCallActive = callObserver.calls.contains(where: { !$0.hasEnded })
+    communicationActive = MainaIOSCallRecoveryPolicy.refreshedCommunicationActive(
+      cached: communicationActive,
+      observerCallActive: observerCallActive
+    )
+    return observerCallActive
+  }
+
   func callObserver(_ callObserver: CXCallObserver, callChanged call: CXCall) {
-    let active = callObserver.calls.contains(where: { !$0.hasEnded })
+    let active = MainaIOSCallRecoveryPolicy.refreshedCommunicationActive(
+      cached: communicationActive,
+      observerCallActive: callObserver.calls.contains(where: { !$0.hasEnded })
+    )
     guard communicationActive != active else { return }
     communicationActive = active
     appendJournal("call-state-changed", fields: ["active": active])
