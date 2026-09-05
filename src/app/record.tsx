@@ -64,6 +64,7 @@ import { CaptureHealthTracker } from '@/hardware/recording/health';
 import { isNativeCaptureStalled } from '@/hardware/recording/nativeCaptureHealth';
 import { waitForNativeCaptureState } from '@/hardware/recording/nativeCaptureLifecycle';
 import { recordingDir, segmentIndexFromUri, segmentPath } from '@/hardware/recording/paths';
+import { recordingSaveHandoff } from '@/hardware/recording/saveHandoff';
 import { registerActiveTriggerHandler } from '@/hardware/trigger/hardwareTrigger';
 import { resolveRemoteAction } from '@/hardware/trigger/remoteControl';
 import { log } from '@/services/logger';
@@ -1077,11 +1078,14 @@ export default function RecordScreen() {
   const stopAndSave = async () => {
     if (savingRef.current || !meetingCreatedRef.current) return;
     savingRef.current = true;
-    await setNativeCaptureState('finalizing').catch(() => {});
+    // The native service publishes finalizing only after it has issued a real
+    // STOP token. Legacy capture keeps this presentation in savingRef instead
+    // of creating an orphaned native notification if JS is interrupted here.
+    const saveHandoff = recordingSaveHandoff(CAPTURE_ENGINE);
     activeRef.current = false;
     if (restartTimerRef.current) clearTimeout(restartTimerRef.current);
     await finalizeTranscriptText(interimRef.current);
-    if (CAPTURE_ENGINE === 'native-qwen') {
+    if (saveHandoff === 'native-terminal-owner') {
       showCaptureNote('Saving audio and starting local transcription...', 60_000);
       await stopNativeCapture().then(async () => {
         const finalStatus = await waitForNativeCaptureState(getNativeCaptureStatusAsync, 'idle', {
@@ -1145,7 +1149,12 @@ export default function RecordScreen() {
         restarts: restartCountRef.current,
       });
       clearDiagnosticContext();
-      await setNativeCaptureState('idle').catch(() => {});
+      // Native Android publishes idle only after its STOP owner proves both
+      // AudioRecord shutdown and durable post-processing handoff. JS must not
+      // mask a native recovery-required result with a presentation update.
+      if (saveHandoff === 'legacy-js-presentation') {
+        await setNativeCaptureState('idle').catch(() => {});
+      }
       openNewlySavedMeeting(id);
       if (Platform.OS === 'ios' && CAPTURE_ENGINE === 'native-qwen') {
         // iOS has no Android foreground ASR service. Start the durable,
