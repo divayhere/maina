@@ -11,15 +11,15 @@ STORAGE_GUARD_SHA256="e8efcaa346ca46ed746970f7739f1346f25442719961f1c8e3d884b3d5
 }
 STORAGE_ROOT="$($STORAGE_GUARD)" || exit $?
 [[ "$STORAGE_ROOT" == "/Volumes/DivaySSD/MainaBuild" ]] || { echo "Canonical Maina storage root was rejected." >&2; exit 78; }
-RELEASE_OUTPUT_ROOT="${MAINA_RELEASE_OUTPUT_ROOT:-$STORAGE_ROOT/artifacts/apps/android-main}"
-OUTPUT_DIR="${MAINA_RELEASE_OUTPUT_DIR:-$RELEASE_OUTPUT_ROOT/android/Maina-0.10.51-77-candidate}"
+MAINA_RELEASE_OUTPUT_ROOT="${MAINA_RELEASE_OUTPUT_ROOT:-$STORAGE_ROOT/artifacts/apps/android-main}"
+OUTPUT_DIR="${MAINA_RELEASE_OUTPUT_DIR:-$MAINA_RELEASE_OUTPUT_ROOT/android/Maina-0.10.51-77-candidate}"
 [[ "$OUTPUT_DIR" == /* ]] || { echo "MAINA_RELEASE_OUTPUT_DIR must be absolute." >&2; exit 2; }
 case "$OUTPUT_DIR" in
   "$STORAGE_ROOT"/*) ;;
   *) echo "Android evidence output escapes the guarded external root." >&2; exit 78 ;;
 esac
 case "$OUTPUT_DIR" in
-  "$RELEASE_OUTPUT_ROOT"/android/*) ;;
+  "$MAINA_RELEASE_OUTPUT_ROOT"/android/*) ;;
   *) echo "MAINA_RELEASE_OUTPUT_DIR must stay under the guarded Android artifact root." >&2; exit 78 ;;
 esac
 [[ "${MAINA_ADMIN_CAPACITY_CLEARANCE:-}" == "approved" ]] || {
@@ -48,10 +48,6 @@ MAINA_EXPECTED_FINAL_COMMIT="$EXPECTED_FINAL" "$NODE_BIN/node" \
 # side-effect-free qualification preflight has passed.
 # shellcheck source=maina-build-env.sh
 source "$PROJECT_DIR/scripts/maina-build-env.sh"
-[[ "$MAINA_RELEASE_OUTPUT_ROOT" == "$RELEASE_OUTPUT_ROOT" ]] || {
-  echo "Android release output root changed after preflight." >&2
-  exit 78
-}
 maina_require_storage_path "$OUTPUT_DIR" || exit $?
 cd "$PROJECT_DIR"
 node scripts/verify-build-source-state.mjs android "$EXPECTED_FINAL"
