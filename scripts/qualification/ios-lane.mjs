@@ -124,8 +124,13 @@ export function collectIosPreflight({
     'IOS_SIGNING_NOT_READY',
   );
 
-  const pmd = run(pymobiledevice3, ['--version']);
-  record('pymobiledevice3', pmd.ok && pmd.stdout.trim().length > 0, 'PYMOBILEDEVICE3_UNAVAILABLE');
+  const pmd = run(pymobiledevice3, ['version']);
+  const pmdVersion = pmd.stdout.trim();
+  record(
+    'pymobiledevice3',
+    pmd.ok && pmdVersion.length > 0 && pmdVersion.length <= 256,
+    'PYMOBILEDEVICE3_UNAVAILABLE',
+  );
 
   return Object.freeze(results.map((result) => Object.freeze(result)));
 }
@@ -341,6 +346,7 @@ export async function selfTest() {
     DeveloperCertificates: [certificate.toString('base64')],
     ExpirationDate: new Date(nowMs + 49 * 60 * 60 * 1000).toISOString(),
   };
+  const pmdInvocations = [];
   const syntheticRun = (command, args) => {
     if (command === '/synthetic/node/node') return result('v24.19.0\n');
     if (command === storageGuard) return result(`${expectedStorageRoot}\n`);
@@ -353,7 +359,10 @@ export async function selfTest() {
     if (command === '/usr/bin/xcrun' && args.includes('--find')) return result('/Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild\n');
     if (command === '/usr/bin/xcrun' && args.includes('devicectl')) return result('');
     if (command === '/usr/bin/security') return result(identityOutput);
-    if (command === '/synthetic/pymobiledevice3') return result('pymobiledevice3 4.0.0\n');
+    if (command === '/synthetic/pymobiledevice3') {
+      pmdInvocations.push({ command, args: [...args] });
+      return result('11.1.2\n');
+    }
     throw new Error(`UNEXPECTED_SYNTHETIC_COMMAND:${command}`);
   };
   const syntheticEnv = {
@@ -370,6 +379,35 @@ export async function selfTest() {
     nowMs,
   });
   assert.ok(syntheticResults.every(({ status }) => status === 'PASS'));
+  assert.deepEqual(pmdInvocations, [{
+    command: syntheticEnv.MAINA_PMD,
+    args: ['version'],
+  }]);
+
+  const pmdCapability = (pmdResult) => collectIosPreflight({
+    env: syntheticEnv,
+    run: (command, args) => {
+      if (command === syntheticEnv.MAINA_PMD) {
+        assert.deepEqual(args, ['version']);
+        return pmdResult;
+      }
+      return syntheticRun(command, args);
+    },
+    listProfiles: () => [validProfile],
+    nowMs,
+  }).find(({ capability }) => capability === 'pymobiledevice3');
+  assert.deepEqual(pmdCapability(result('', { ok: false, stderr: 'absent' })), {
+    capability: 'pymobiledevice3', status: 'FAIL', reasonCode: 'PYMOBILEDEVICE3_UNAVAILABLE',
+  });
+  assert.deepEqual(pmdCapability(result('11.1.2\n', { ok: false, stderr: 'nonzero' })), {
+    capability: 'pymobiledevice3', status: 'FAIL', reasonCode: 'PYMOBILEDEVICE3_UNAVAILABLE',
+  });
+  assert.deepEqual(pmdCapability(result('   \n')), {
+    capability: 'pymobiledevice3', status: 'FAIL', reasonCode: 'PYMOBILEDEVICE3_UNAVAILABLE',
+  });
+  assert.deepEqual(pmdCapability(result(`${'1'.repeat(257)}\n`)), {
+    capability: 'pymobiledevice3', status: 'FAIL', reasonCode: 'PYMOBILEDEVICE3_UNAVAILABLE',
+  });
   const missingRevision = collectIosPreflight({
     env: { ...syntheticEnv, MAINA_EXPECTED_FINAL_COMMIT: '' },
     run: syntheticRun,
@@ -518,7 +556,7 @@ export async function selfTest() {
   assert.equal((installer.match(/device install app/g) ?? []).length, 1);
   assert.doesNotMatch(installer, /device=%s|bundle=%s|retained lock:|raw_exception/);
 
-  console.log('iOS qualification adapter self-tests passed (preflight 5, signing 9, native-plist collector 6, observer 1, mutation 2, script boundaries 13).');
+  console.log('iOS qualification adapter self-tests passed (preflight 9, signing 9, native-plist collector 6, observer 1, mutation 2, script boundaries 13).');
 }
 
 function syntheticProvisioningProfilePlist({ plan, expirationDate, certificates }) {
