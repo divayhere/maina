@@ -10,7 +10,7 @@ if (!['android', 'ios'].includes(platform) || !/^[0-9a-f]{40}$/.test(expectedFin
 }
 
 const root = realpathSync(path.resolve(import.meta.dirname, '..'));
-const plan = JSON.parse(readFileSync(path.join(root, 'release/m3-m4-0.10.47-candidate-plan.json'), 'utf8'));
+const plan = JSON.parse(readFileSync(path.join(root, 'release/m3-m4-0.10.48-candidate-plan.json'), 'utf8'));
 const expected = plan.sources[platform];
 const git = (...args) => execFileSync('git', args, { cwd: root, encoding: 'utf8' }).trim();
 
