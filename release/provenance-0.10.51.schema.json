@@ -1,0 +1,104 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://maina.local/schemas/release-provenance.0.10.51.v1.json",
+  "title": "Maina exact signed 0.10.51 release provenance",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "releaseId", "release", "sources", "toolchains", "featureFlagDefaults", "artifacts", "approval"],
+  "properties": {
+    "schemaVersion": { "const": "maina.release-provenance.v1" },
+    "releaseId": { "const": "maina-m3-m4-0.10.51" },
+    "release": {
+      "type": "object",
+      "required": ["version", "androidVersionCode", "iosBuildNumber"],
+      "properties": {
+        "version": { "const": "0.10.51" },
+        "androidVersionCode": { "const": 77 },
+        "iosBuildNumber": { "const": "33" }
+      }
+    },
+    "sources": {
+      "type": "object",
+      "required": ["android", "ios", "coordinationCommit", "backendSourceCommit", "backendProductionDeployment"],
+      "properties": {
+        "android": { "$ref": "#/$defs/sourcePin" },
+        "ios": { "$ref": "#/$defs/sourcePin" },
+        "coordinationCommit": { "$ref": "#/$defs/gitSha" },
+        "backendSourceCommit": { "$ref": "#/$defs/gitSha" },
+        "backendProductionDeployment": { "type": "string", "pattern": "^[0-9a-f-]{36}$" }
+      }
+    },
+    "toolchains": { "type": "object" },
+    "featureFlagDefaults": { "type": "object" },
+    "artifacts": {
+      "type": "object",
+      "required": ["android", "ios"],
+      "properties": {
+        "android": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/artifact" }] },
+        "ios": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/artifact" }] }
+      }
+    },
+    "approval": {
+      "type": "object",
+      "required": ["status", "approvedBy", "approvedAt"],
+      "properties": {
+        "status": { "enum": ["candidate", "admin-approved"] },
+        "approvedBy": { "type": ["string", "null"] },
+        "approvedAt": { "type": ["string", "null"], "format": "date-time" }
+      }
+    }
+  },
+  "$defs": {
+    "gitSha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "sourcePin": {
+      "type": "object",
+      "required": ["repository", "branch", "productCommit", "finalCommit", "upstreamCommit"],
+      "properties": {
+        "repository": { "type": "string" },
+        "branch": { "type": "string" },
+        "productCommit": { "$ref": "#/$defs/gitSha" },
+        "finalCommit": { "$ref": "#/$defs/gitSha" },
+        "upstreamCommit": { "$ref": "#/$defs/gitSha" }
+      }
+    },
+    "artifact": {
+      "type": "object",
+      "required": ["path", "sha256", "bytes", "buildLog", "inspection", "audit"],
+      "properties": {
+        "path": { "type": "string" },
+        "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "bytes": { "type": "integer", "minimum": 1 },
+        "buildLog": {
+          "type": "object",
+          "required": ["path", "sha256", "bytes"],
+          "properties": {
+            "path": { "type": "string" },
+            "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "bytes": { "type": "integer", "minimum": 1 }
+          }
+        },
+        "inspection": {
+          "type": "object",
+          "required": ["path", "sha256", "bytes", "command"],
+          "properties": {
+            "path": { "type": "string" },
+            "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "bytes": { "type": "integer", "minimum": 1 },
+            "command": { "const": "scripts/inspect-exact-artifact.mjs" }
+          }
+        },
+        "debugSymbols": {
+          "type": "object",
+          "required": ["path", "sha256", "bytes", "uuid"],
+          "properties": {
+            "path": { "type": "string" },
+            "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+            "bytes": { "type": "integer", "minimum": 1 },
+            "uuid": { "type": "string" }
+          }
+        },
+        "audit": { "type": "object" }
+      }
+    }
+  }
+}
