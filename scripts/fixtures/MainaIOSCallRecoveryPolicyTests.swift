@@ -126,6 +126,18 @@ require(
   ),
   "deliberate manual pause must revoke automatic recovery"
 )
+require(
+  MainaIOSCallRecoveryPolicy.recoveryMayRetry(elapsedMs: 29_999, budgetMs: 30_000),
+  "the live recovery watcher may retry inside its bounded window"
+)
+require(
+  !MainaIOSCallRecoveryPolicy.recoveryMayRetry(elapsedMs: 30_000, budgetMs: 30_000),
+  "the live recovery watcher must stop at its exact budget"
+)
+require(
+  !MainaIOSCallRecoveryPolicy.recoveryMayRetry(elapsedMs: -1, budgetMs: 30_000),
+  "invalid elapsed time must fail closed"
+)
 
 print("iOS call-recovery policy tests passed.")
   }

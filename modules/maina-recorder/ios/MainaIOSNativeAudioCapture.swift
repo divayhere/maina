@@ -65,6 +65,7 @@ final class MainaIOSNativeAudioCapture: NSObject, AVAudioRecorderDelegate, CXCal
   // Keep the first retry immediate, then stay within one bounded UIKit
   // background-time assertion instead of requiring the owner to reopen Maina.
   private static let recoveryDelaysMs = [0, 250, 500, 1_000, 2_000, 3_000]
+  private static let recoveryRetryBudgetMs: Double = 30_000
 
   private override init() {
     super.init()
@@ -759,7 +760,15 @@ final class MainaIOSNativeAudioCapture: NSObject, AVAudioRecorderDelegate, CXCal
           "failureDisposition": disposition == .temporaryPlatformHold ? "temporary-platform-hold" : "other",
         ])
         let nextAttempt = attempt + 1
-        if self.canContinueRecoveryWatcher() {
+        let recoveryElapsedMs = max(
+          0,
+          (ProcessInfo.processInfo.systemUptime -
+            (self.recoveryStartedUptime ?? ProcessInfo.processInfo.systemUptime)) * 1_000
+        )
+        if self.canContinueRecoveryWatcher() && MainaIOSCallRecoveryPolicy.recoveryMayRetry(
+          elapsedMs: recoveryElapsedMs,
+          budgetMs: Self.recoveryRetryBudgetMs
+        ) {
           // After the initial fast sequence, retry at a capped three-second
           // cadence until UIKit's actual background-time assertion approaches
           // expiration. Signals coalesce into this one generation/loop.

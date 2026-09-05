@@ -50,6 +50,10 @@ enum MainaIOSCallRecoveryPolicy {
     disposition == .temporaryPlatformHold && !stopped && !manuallyPaused
   }
 
+  static func recoveryMayRetry(elapsedMs: Double, budgetMs: Double) -> Bool {
+    elapsedMs >= 0 && elapsedMs < budgetMs
+  }
+
   static func action(
     paused: Bool,
     interrupted: Bool,
