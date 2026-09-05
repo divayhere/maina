@@ -924,6 +924,9 @@ final class MainaIOSNativeAudioCapture: NSObject, AVAudioRecorderDelegate, CXCal
   }
 
   private func suspendRecoveryForActiveCall(reason: String) {
+    // Re-entry must invalidate the one already-scheduled callback before a
+    // later call-ended signal starts a fresh loop for this same meeting.
+    recoveryGeneration += 1
     routeRecoveryActive = false
     recoveryLoopStartedUptime = nil
     endRecoveryBackgroundTask()

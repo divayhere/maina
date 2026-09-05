@@ -261,6 +261,14 @@ if (!recoveryCatchSource.includes('recoveryLoopStartedUptime) * 1_000')) {
 if (recoveryCatchSource.includes('recoveryStartedUptime ??')) {
   throw new Error('iOS bounded recovery must not consume its budget during the call interval.');
 }
+const suspensionStart = captureSource.indexOf('private func suspendRecoveryForActiveCall');
+const suspensionEnd = captureSource.indexOf('@discardableResult', suspensionStart);
+const suspensionSource = captureSource.slice(suspensionStart, suspensionEnd);
+for (const token of ['recoveryGeneration += 1', 'recoveryLoopStartedUptime = nil']) {
+  if (!suspensionSource.includes(token)) {
+    throw new Error(`iOS call re-entry must revoke the current recovery loop: ${token}`);
+  }
+}
 
 // This is intentionally a macOS-only static gate; Linux CI still runs TS tests.
 if (process.platform === 'darwin') {
