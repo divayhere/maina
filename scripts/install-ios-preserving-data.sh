@@ -7,6 +7,7 @@ DEVICE_ID="${MAINA_IOS_DEVICE_ID:-945E396B-87B0-5CB7-9A3D-A5E75CF9B4CD}"
 DEVICE_UDID="${MAINA_IOS_DEVICE_UDID:-00008120-001E146611E2601E}"
 BUNDLE_ID="${MAINA_IOS_BUNDLE_ID:-com.divay.maina.staging}"
 APP_ZIP="${1:-}"
+EXPECTED_TOOLING="${MAINA_EXPECTED_FINAL_COMMIT:?Set the exact independently accepted P0H-04 tooling commit}"
 PROVENANCE="${MAINA_RELEASE_PROVENANCE:?Set MAINA_RELEASE_PROVENANCE to the Admin-approved dual-platform provenance}"
 [[ -f "$APP_ZIP" ]] || { echo "Usage: npm run ios:install-preserving -- /absolute/Maina.app.zip" >&2; exit 2; }
 [[ "$APP_ZIP" == /* ]] || { echo "iOS candidate path must be absolute." >&2; exit 2; }
@@ -26,8 +27,7 @@ IFS=$'\t' read -r _ _ _ EXPECTED_BUNDLE_ID EXPECTED_VERSION EXPECTED_BUILD \
   exit 2
 }
 
-TOOLING_HEAD="$(git rev-parse HEAD)"
-MAINA_EXPECTED_FINAL_COMMIT="$TOOLING_HEAD" node \
+MAINA_EXPECTED_FINAL_COMMIT="$EXPECTED_TOOLING" node \
   "$PROJECT_DIR/scripts/qualification/ios-lane.mjs" preflight >/dev/null
 
 candidate_sha256="$(shasum -a 256 "$APP_ZIP" | awk '{print $1}')"

@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { accessSync, constants, readFileSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { accessSync, constants, readFileSync, readdirSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { delimiter, dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 
@@ -30,7 +31,12 @@ const expectedCapabilities = Object.freeze([
   'pymobiledevice3',
 ]);
 
-export function collectIosPreflight({ env = process.env, run = runCommand } = {}) {
+export function collectIosPreflight({
+  env = process.env,
+  run = runCommand,
+  listProfiles = collectProvisioningProfiles,
+  nowMs = Date.now(),
+} = {}) {
   const results = [];
   const record = (capability, passed, reasonCode) => {
     results.push(passed ? { capability, status: 'PASS' } : { capability, status: 'FAIL', reasonCode });
@@ -59,7 +65,7 @@ export function collectIosPreflight({ env = process.env, run = runCommand } = {}
 
   const head = run('git', ['-C', projectDir, 'rev-parse', 'HEAD']);
   const upstream = run('git', ['-C', projectDir, 'rev-parse', '@{upstream}']);
-  const expectedRevision = env.MAINA_EXPECTED_FINAL_COMMIT ?? head.stdout.trim();
+  const expectedRevision = env.MAINA_EXPECTED_FINAL_COMMIT ?? '';
   record(
     'source_revision',
     head.ok && upstream.ok && /^[a-f0-9]{40}$/.test(expectedRevision)
@@ -104,9 +110,17 @@ export function collectIosPreflight({ env = process.env, run = runCommand } = {}
   record('ios_device_endpoint', endpoint.ok, 'IOS_DEVICE_ENDPOINT_UNAVAILABLE');
 
   const identities = run('/usr/bin/security', ['find-identity', '-v', '-p', 'codesigning']);
+  const plan = loadReleasePlan();
+  const profiles = listProfiles({ env, run });
   record(
     'ios_signing_and_provisioning_readiness',
-    teamId === '9X4X3R4KCN' && identities.ok && /[1-9][0-9]* valid identities found/.test(identities.stdout),
+    identities.ok && evaluateIosSigningReadiness({
+      plan,
+      teamId,
+      identityOutput: `${identities.stdout}\n${identities.stderr}`,
+      profiles,
+      nowMs,
+    }),
     'IOS_SIGNING_NOT_READY',
   );
 
@@ -129,9 +143,88 @@ function loadContract() {
   return JSON.parse(readFileSync(join(projectDir, 'coordination', 'operations', 'contracts', 'qualification-harness.v1.json'), 'utf8'));
 }
 
-function runCommand(command, args) {
-  const result = spawnSync(command, args, { encoding: 'utf8', env: process.env });
+function loadReleasePlan() {
+  return JSON.parse(readFileSync(join(projectDir, 'release', 'm3-m4-0.10.51-candidate-plan.json'), 'utf8'));
+}
+
+function runCommand(command, args, { input } = {}) {
+  const result = spawnSync(command, args, { encoding: 'utf8', env: process.env, input });
   return Object.freeze({ ok: result.status === 0, stdout: result.stdout ?? '', stderr: result.stderr ?? '' });
+}
+
+function collectProvisioningProfiles({ env, run }) {
+  const directories = env.MAINA_IOS_PROVISIONING_PROFILE_DIRS
+    ? env.MAINA_IOS_PROVISIONING_PROFILE_DIRS.split(delimiter).filter(Boolean)
+    : [
+        join(env.HOME ?? homedir(), 'Library', 'MobileDevice', 'Provisioning Profiles'),
+        join(env.HOME ?? homedir(), 'Library', 'Developer', 'Xcode', 'UserData', 'Provisioning Profiles'),
+      ];
+  const profiles = [];
+  for (const directory of directories) {
+    let entries;
+    try {
+      entries = readdirSync(directory, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      if (!entry.isFile() || !/\.(?:mobileprovision|provisionprofile)$/.test(entry.name)) continue;
+      const decoded = run('/usr/bin/security', ['cms', '-D', '-i', join(directory, entry.name)]);
+      if (!decoded.ok) continue;
+      const converted = run('/usr/bin/plutil', ['-convert', 'json', '-o', '-', '-'], { input: decoded.stdout });
+      if (!converted.ok) continue;
+      try {
+        profiles.push(JSON.parse(converted.stdout));
+      } catch {
+        // A malformed profile is unavailable, not evidence for readiness.
+      }
+    }
+  }
+  return profiles;
+}
+
+export function evaluateIosSigningReadiness({ plan, teamId, identityOutput, profiles, nowMs }) {
+  if (teamId !== plan.identity.iosTeamId) return false;
+  const policy = plan.artifactPolicy.ios;
+  const identityName = policy.designatedRequirement.match(/certificate leaf\[subject\.CN\] = "([^"]+)"/)?.[1];
+  if (!identityName?.startsWith('Apple Development: ')) return false;
+  if (!policy.designatedRequirement.includes(`identifier "${plan.identity.iosBundleIdentifier}"`)) return false;
+  const escapedIdentity = identityName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const identityMatch = identityOutput.match(new RegExp(`\\b([A-Fa-f0-9]{40})\\b[^\\n]*"${escapedIdentity}"`));
+  if (!identityMatch || !/[1-9][0-9]* valid identities found/.test(identityOutput)) return false;
+  const identitySha1 = identityMatch[1].toLowerCase();
+  const minimumExpiryMs = nowMs + plan.toolchains.ios.minimumProfileWindowHours * 60 * 60 * 1000;
+
+  return profiles.some((profile) => {
+    const entitlements = profile?.Entitlements;
+    const expirationMs = Date.parse(profile?.ExpirationDate ?? '');
+    const certificateMatches = Array.isArray(profile?.DeveloperCertificates)
+      && profile.DeveloperCertificates.some((certificate) => {
+        try {
+          return createHash('sha1').update(Buffer.from(certificate, 'base64')).digest('hex') === identitySha1;
+        } catch {
+          return false;
+        }
+      });
+    return profile?.Name === policy.profileName
+      && Array.isArray(profile?.TeamIdentifier)
+      && profile.TeamIdentifier.length === 1
+      && profile.TeamIdentifier[0] === plan.identity.iosTeamId
+      && canonicalJson(entitlements) === canonicalJson(policy.profileEntitlements)
+      && entitlements?.['application-identifier'] === `${plan.identity.iosTeamId}.${plan.identity.iosBundleIdentifier}`
+      && entitlements?.['com.apple.developer.team-identifier'] === plan.identity.iosTeamId
+      && certificateMatches
+      && Number.isFinite(expirationMs)
+      && expirationMs > minimumExpiryMs;
+  });
+}
+
+function canonicalJson(value) {
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
+  if (value && typeof value === 'object') {
+    return `{${Object.keys(value).sort(compareCodeUnits).map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`).join(',')}}`;
+  }
+  return JSON.stringify(value);
 }
 
 function isReadable(path) {
@@ -153,31 +246,82 @@ function compareCodeUnits(left, right) {
 
 export async function selfTest() {
   const revision = 'a'.repeat(40);
+  const plan = loadReleasePlan();
+  const certificate = Buffer.from('synthetic-plan-bound-apple-development-certificate');
+  const certificateSha1 = createHash('sha1').update(certificate).digest('hex').toUpperCase();
+  const identityName = plan.artifactPolicy.ios.designatedRequirement.match(/certificate leaf\[subject\.CN\] = "([^"]+)"/)?.[1];
+  const identityOutput = `  1) ${certificateSha1} "${identityName}"\n     1 valid identities found\n`;
+  const nowMs = Date.parse('2026-09-05T00:00:00Z');
+  const validProfile = {
+    Name: plan.artifactPolicy.ios.profileName,
+    TeamIdentifier: [plan.identity.iosTeamId],
+    Entitlements: structuredClone(plan.artifactPolicy.ios.profileEntitlements),
+    DeveloperCertificates: [certificate.toString('base64')],
+    ExpirationDate: new Date(nowMs + 49 * 60 * 60 * 1000).toISOString(),
+  };
+  const syntheticRun = (command, args) => {
+    if (command === '/synthetic/node/node') return result('v24.19.0\n');
+    if (command === storageGuard) return result(`${expectedStorageRoot}\n`);
+    if (command === 'git' && args.includes('status')) return result('');
+    if (command === 'git') return result(`${revision}\n`);
+    if (command === '/usr/bin/xcodebuild' && args.includes('-version')) return result('Xcode 26.0\nBuild version 17A324\n');
+    if (command === '/usr/bin/xcodebuild') return result('');
+    if (command === '/usr/bin/xcrun' && args.includes('--show-sdk-version')) return result('26.0\n');
+    if (command === '/usr/bin/xcrun' && args.includes('--show-sdk-path')) return result('/Applications/Xcode.app/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS26.0.sdk\n');
+    if (command === '/usr/bin/xcrun' && args.includes('--find')) return result('/Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild\n');
+    if (command === '/usr/bin/xcrun' && args.includes('devicectl')) return result('');
+    if (command === '/usr/bin/security') return result(identityOutput);
+    if (command === '/synthetic/pymobiledevice3') return result('pymobiledevice3 4.0.0\n');
+    throw new Error(`UNEXPECTED_SYNTHETIC_COMMAND:${command}`);
+  };
+  const syntheticEnv = {
+    ...process.env,
+    MAINA_EXPECTED_FINAL_COMMIT: revision,
+    MAINA_IOS_NODE_BIN: '/synthetic/node',
+    MAINA_IOS_TEAM_ID: plan.identity.iosTeamId,
+    MAINA_PMD: '/synthetic/pymobiledevice3',
+  };
   const syntheticResults = collectIosPreflight({
-    env: {
-      ...process.env,
-      MAINA_EXPECTED_FINAL_COMMIT: revision,
-      MAINA_IOS_NODE_BIN: '/synthetic/node',
-      MAINA_IOS_TEAM_ID: '9X4X3R4KCN',
-      MAINA_PMD: '/synthetic/pymobiledevice3',
-    },
-    run: (command, args) => {
-      if (command === '/synthetic/node/node') return result('v24.19.0\n');
-      if (command === storageGuard) return result(`${expectedStorageRoot}\n`);
-      if (command === 'git' && args.includes('status')) return result('');
-      if (command === 'git') return result(`${revision}\n`);
-      if (command === '/usr/bin/xcodebuild' && args.includes('-version')) return result('Xcode 26.0\nBuild version 17A324\n');
-      if (command === '/usr/bin/xcodebuild') return result('');
-      if (command === '/usr/bin/xcrun' && args.includes('--show-sdk-version')) return result('26.0\n');
-      if (command === '/usr/bin/xcrun' && args.includes('--show-sdk-path')) return result('/Applications/Xcode.app/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS26.0.sdk\n');
-      if (command === '/usr/bin/xcrun' && args.includes('--find')) return result('/Applications/Xcode.app/Contents/Developer/usr/bin/xcodebuild\n');
-      if (command === '/usr/bin/xcrun' && args.includes('devicectl')) return result('');
-      if (command === '/usr/bin/security') return result('  1 valid identities found\n');
-      if (command === '/synthetic/pymobiledevice3') return result('pymobiledevice3 4.0.0\n');
-      throw new Error(`UNEXPECTED_SYNTHETIC_COMMAND:${command}`);
-    },
+    env: syntheticEnv,
+    run: syntheticRun,
+    listProfiles: () => [validProfile],
+    nowMs,
   });
   assert.ok(syntheticResults.every(({ status }) => status === 'PASS'));
+  const missingRevision = collectIosPreflight({
+    env: { ...syntheticEnv, MAINA_EXPECTED_FINAL_COMMIT: '' },
+    run: syntheticRun,
+    listProfiles: () => [validProfile],
+    nowMs,
+  });
+  assert.deepEqual(missingRevision.find(({ capability }) => capability === 'source_revision'), {
+    capability: 'source_revision', status: 'FAIL', reasonCode: 'SOURCE_REVISION_MISMATCH',
+  });
+  const driftRevision = collectIosPreflight({
+    env: { ...syntheticEnv, MAINA_EXPECTED_FINAL_COMMIT: 'b'.repeat(40) },
+    run: syntheticRun,
+    listProfiles: () => [validProfile],
+    nowMs,
+  });
+  assert.equal(driftRevision.find(({ capability }) => capability === 'source_revision')?.status, 'FAIL');
+
+  const signing = (overrides = {}) => evaluateIosSigningReadiness({
+    plan,
+    teamId: plan.identity.iosTeamId,
+    identityOutput,
+    profiles: [validProfile],
+    nowMs,
+    ...overrides,
+  });
+  assert.equal(signing(), true);
+  assert.equal(signing({ identityOutput: '  1) FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF "Developer ID Application: Unrelated Corp (WRONGTEAM)"\n     1 valid identities found\n' }), false);
+  assert.equal(signing({ profiles: [] }), false);
+  assert.equal(signing({ profiles: [{ ...validProfile, Name: 'Wrong profile' }] }), false);
+  assert.equal(signing({ profiles: [{ ...validProfile, TeamIdentifier: ['WRONGTEAM'] }] }), false);
+  assert.equal(signing({ profiles: [{ ...validProfile, Entitlements: { ...validProfile.Entitlements, 'application-identifier': '9X4X3R4KCN.com.divay.other' } }] }), false);
+  assert.equal(signing({ profiles: [{ ...validProfile, Entitlements: { ...validProfile.Entitlements, 'get-task-allow': false } }] }), false);
+  assert.equal(signing({ profiles: [{ ...validProfile, ExpirationDate: new Date(nowMs + 48 * 60 * 60 * 1000).toISOString() }] }), false);
+  assert.equal(signing({ profiles: [{ ...validProfile, DeveloperCertificates: [Buffer.from('wrong').toString('base64')] }] }), false);
 
   const passResults = expectedCapabilities.map((capability) => ({ capability, status: 'PASS' }));
   assert.equal(evaluateIosPreflight(passResults).state, 'PASS');
@@ -255,10 +399,12 @@ export async function selfTest() {
   ], 'IOS_INSTALL_MUTATION_BOUNDARY_INVALID');
   assert.match(installer, /mutation_started=0/);
   assert.match(installer, /mutation_started" == "1"/);
+  assert.match(installer, /MAINA_EXPECTED_FINAL_COMMIT:\?Set the exact independently accepted P0H-04 tooling commit/);
+  assert.doesNotMatch(installer, /TOOLING_HEAD=.*git rev-parse HEAD/);
   assert.equal((installer.match(/device install app/g) ?? []).length, 1);
   assert.doesNotMatch(installer, /device=%s|bundle=%s|retained lock:|raw_exception/);
 
-  console.log('iOS qualification adapter self-tests passed (preflight 3, observer 1, mutation 2, script boundaries 11).');
+  console.log('iOS qualification adapter self-tests passed (preflight 5, signing 9, observer 1, mutation 2, script boundaries 13).');
 }
 
 function result(stdout, { ok = true, stderr = '' } = {}) {
