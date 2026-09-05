@@ -13,7 +13,7 @@ import {
 } from './lib/release-provenance-core.mjs';
 
 const root = path.resolve(import.meta.dirname, '..');
-const plan = JSON.parse(readFileSync(path.join(root, 'release/m3-m4-0.10.46-candidate-plan.json'), 'utf8'));
+const plan = JSON.parse(readFileSync(path.join(root, 'release/m3-m4-0.10.47-candidate-plan.json'), 'utf8'));
 const temporary = mkdtempSync(path.join(tmpdir(), 'maina-release-provenance-'));
 const hash = 'a'.repeat(64);
 const uuid = 'AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE';
