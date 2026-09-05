@@ -368,8 +368,11 @@ if (kind === 'android-main') {
   assert.equal(lstatSync(path.join(root, 'scripts/install-external-node-dependencies.sh')).mode & 0o777, 0o755);
   assertOrder(dependencyInstaller, ['source "$PROJECT_DIR/scripts/maina-ios-env.sh"', 'maina_storage_mkdir "$dependency_root"', 'NODE_ENV=development npm ci', 'restore-external-build-links.sh" dependencies'], 'external npm install');
   const iosPrepare = read('scripts/prepare-ios-local.sh');
-  assertOrder(iosPrepare, ['source "$PROJECT_DIR/scripts/maina-ios-env.sh"', 'install-external-node-dependencies.sh"', 'expo prebuild --platform ios --no-install --clean', 'restore-external-build-links.sh" ios', 'pod install'], 'iOS prepare');
-  assertOrder(iosPrepare, ['pod install', 'configure-ios-ui-tests-guarded.sh"'], 'iOS UI-test configuration');
+  const iosPodInstall = 'PROJECT_ROOT="$PROJECT_DIR" pod install';
+  assertOrder(iosPrepare, ['source "$PROJECT_DIR/scripts/maina-ios-env.sh"', 'install-external-node-dependencies.sh"', 'expo prebuild --platform ios --no-install --clean', 'restore-external-build-links.sh" ios', iosPodInstall], 'iOS prepare');
+  assertOrder(iosPrepare, [iosPodInstall, 'configure-ios-ui-tests-guarded.sh"'], 'iOS UI-test configuration');
+  assert.match(iosPrepare, /\(cd ios && PROJECT_ROOT="\$PROJECT_DIR" pod install\)/, 'CocoaPods must capture the canonical app project root for Expo build phases.');
+  assert.doesNotMatch(iosPrepare, /\(cd ios && pod install\)/, 'CocoaPods must not infer the app root from an externally stored Pods project.');
   const iosRuntime = read('scripts/prepare-ios-sherpa-runtime.sh');
   assertOrder(iosRuntime, ['source "$PROJECT_DIR/scripts/maina-ios-env.sh"', 'maina_storage_mkdir "$CACHE_ROOT"', 'mkdir -p "$VENDOR_ROOT"'], 'iOS runtime');
   const iosRenewal = read('scripts/renew-ios-personal.sh');
