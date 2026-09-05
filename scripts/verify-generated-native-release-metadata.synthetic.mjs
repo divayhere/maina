@@ -15,7 +15,7 @@ import path from 'node:path';
 import { validateGeneratedNativeReleaseMetadata } from './verify-generated-native-release-metadata.mjs';
 
 const root = path.resolve(import.meta.dirname, '..');
-const plan = JSON.parse(readFileSync(path.join(root, 'release/m3-m4-0.10.50-candidate-plan.json'), 'utf8'));
+const plan = JSON.parse(readFileSync(path.join(root, 'release/m3-m4-0.10.51-candidate-plan.json'), 'utf8'));
 const generatedPaths = [
   path.join(root, 'android/app/build.gradle'),
   path.join(root, 'ios/Maina/Info.plist'),

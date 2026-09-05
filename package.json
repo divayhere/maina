@@ -1,7 +1,7 @@
 {
   "name": "maina",
   "main": "index.js",
-  "version": "0.10.50",
+  "version": "0.10.51",
   "dependencies": {
     "@expo/ui": "~57.0.14",
     "@expo/vector-icons": "^15.0.2",
@@ -73,7 +73,7 @@
     "verify:build-source": "node scripts/verify-build-source-state.mjs",
     "verify:external-storage": "node scripts/verify-external-storage-contract.mjs",
     "verify:release-build-scripts": "npm run verify:external-storage && node scripts/verify-release-build-scripts.mjs",
-    "verify:release-plan-candidate": "node scripts/verify-release-plan-0.10.50.mjs && node scripts/verify-generated-native-release-metadata.synthetic.mjs",
+    "verify:release-plan-candidate": "node scripts/verify-release-plan-0.10.51.mjs && node scripts/verify-generated-native-release-metadata.synthetic.mjs",
     "ios:runtime": "bash scripts/prepare-ios-sherpa-runtime.sh",
     "ios:model:stage": "bash scripts/stage-ios-qwen-model.sh",
     "ios:ui-tests:configure": "bash scripts/configure-ios-ui-tests-guarded.sh",

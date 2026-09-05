@@ -60,9 +60,9 @@ function readCanonicalFiles(platform) {
 function main() {
   const [platform] = process.argv.slice(2);
   if (!['android', 'ios'].includes(platform)) throw new Error('Usage: verify-generated-native-release-metadata.mjs <android|ios>');
-  const plan = JSON.parse(readFileSync(path.join(projectRoot, 'release/m3-m4-0.10.50-candidate-plan.json'), 'utf8'));
+  const plan = JSON.parse(readFileSync(path.join(projectRoot, 'release/m3-m4-0.10.51-candidate-plan.json'), 'utf8'));
   validateGeneratedNativeReleaseMetadata({ platform, plan, files: readCanonicalFiles(platform) });
-  console.log(`Generated ${platform} native release metadata exactly matches the 0.10.50 candidate plan.`);
+  console.log(`Generated ${platform} native release metadata exactly matches the 0.10.51 candidate plan.`);
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) main();
