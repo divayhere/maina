@@ -51,6 +51,12 @@ assert.throws(
   () => findQualifiedIosDevice(disconnectedPayload, { ...expectedDevice, nowMs: proofNow }, { ...capabilityProof, privateOutput: 'forbidden' }),
   /unknown fields/,
 );
+for (const tunnelState of [undefined, 'unknown']) {
+  const changed = structuredClone(disconnectedPayload);
+  if (tunnelState === undefined) delete changed.result.devices[0].connectionProperties.tunnelState;
+  else changed.result.devices[0].connectionProperties.tunnelState = tunnelState;
+  assert.throws(() => findQualifiedIosDevice(changed, { ...expectedDevice, nowMs: proofNow }, capabilityProof), /tunnel state is invalid/);
+}
 for (const [label, mutate, pattern] of [
   ['UDID', (device) => { device.hardwareProperties.udid = 'wrong'; }, /UDID/],
   ['model', (device) => { device.hardwareProperties.marketingName = 'Other'; }, /model/],

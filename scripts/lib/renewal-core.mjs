@@ -44,7 +44,9 @@ export function findQualifiedIosDevice(payload, expected, capabilityProof = null
   if (device.connectionProperties?.transportType !== 'wired') throw new Error('iOS target is not connected by USB.');
   if (device.connectionProperties?.pairingState !== 'paired') throw new Error('iOS device is not paired.');
   if (device.deviceProperties?.developerModeStatus !== 'enabled') throw new Error('iOS Developer Mode is disabled.');
-  if (device.connectionProperties?.tunnelState !== 'connected') {
+  const tunnelState = device.connectionProperties?.tunnelState;
+  if (!['connected', 'disconnected'].includes(tunnelState)) throw new Error('iOS device tunnel state is invalid.');
+  if (tunnelState === 'disconnected') {
     validateIosCoreDeviceCapabilityProof(capabilityProof, expected);
   }
   return device;
