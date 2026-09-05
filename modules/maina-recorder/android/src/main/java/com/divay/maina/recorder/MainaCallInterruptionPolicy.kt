@@ -63,6 +63,25 @@ internal enum class MainaTerminalCompletionAuthority {
 internal enum class MainaTerminalCompletionPublication { IDLE, RECOVERY_REQUIRED }
 
 /**
+ * JS may mirror legacy recorder presentation only while no native capture
+ * authority exists. This is enforced by the service, so a late caller cannot
+ * erase a queued/running/failed native terminal operation by writing `idle`.
+ */
+internal object MainaExternalCapturePresentationPolicy {
+    fun allowed(
+        requestedState: String,
+        controlState: MainaCaptureControlState,
+        activeOperation: MainaCaptureOperationToken?,
+        nativeState: String,
+        terminalPublication: MainaTerminalPublicationStatus,
+    ): Boolean = requestedState in setOf("idle", "recording", "paused") &&
+        controlState.phase == MainaCaptureControlPhase.IDLE &&
+        activeOperation == null &&
+        nativeState == "idle" &&
+        terminalPublication.phase == MainaTerminalPublicationPhase.NONE
+}
+
+/**
  * Pure authority and publication policy for STOP/ABORT. The native service is
  * the sole owner of these transitions: JS cannot publish a saving state, and a
  * native completion cannot publish idle until both native shutdown and the
@@ -152,6 +171,9 @@ internal object MainaTerminalPublicationPolicy {
     } else {
         MainaTerminalCompletionPublication.RECOVERY_REQUIRED
     }
+
+    fun nativeStopIsClean(state: String, lastError: String?): Boolean =
+        state == "idle" && lastError == null
 
     fun succeeded(
         current: MainaTerminalPublicationStatus,

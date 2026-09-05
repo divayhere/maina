@@ -1195,6 +1195,63 @@ class MainaCallInterruptionPolicyTest {
     }
 
     @Test
+    fun `external presentation cannot erase native terminal or active state`() {
+        val idleControl = MainaCaptureControlState(phase = MainaCaptureControlPhase.IDLE)
+        val none = MainaTerminalPublicationPolicy.initial()
+        listOf("idle", "recording", "paused").forEach { requested ->
+            assertTrue(MainaExternalCapturePresentationPolicy.allowed(
+                requested,
+                idleControl,
+                activeOperation = null,
+                nativeState = "idle",
+                terminalPublication = none,
+            ))
+        }
+
+        val stop = MainaCaptureOperationToken(
+            operationId = 45,
+            generation = 10,
+            owner = MainaCapturePauseOwner.NONE,
+            kind = MainaCaptureOperationKind.STOP,
+            expectedPhase = MainaCaptureControlPhase.TERMINAL,
+        )
+        val terminal = MainaCaptureControlState(phase = MainaCaptureControlPhase.TERMINAL)
+        val queued = MainaTerminalPublicationPolicy.queued(stop, 1_000)
+        val running = MainaTerminalPublicationPolicy.running(queued, stop, 1_100)
+        val stale = MainaTerminalPublicationPolicy.staleSuperseded(queued, stop.copy(operationId = 46), 1_200)
+        val recovery = MainaTerminalPublicationPolicy.recoveryRequired(running, stop, 2_000)
+        listOf(queued, running, stale, recovery).forEach { publication ->
+            assertFalse(MainaExternalCapturePresentationPolicy.allowed(
+                "idle", terminal, stop, "idle", publication,
+            ))
+        }
+        assertFalse(MainaExternalCapturePresentationPolicy.allowed(
+            "idle", idleControl, null, "recording", none,
+        ))
+        assertFalse(MainaExternalCapturePresentationPolicy.allowed(
+            "idle", idleControl, null, "idle", recovery,
+        ))
+        assertFalse(MainaCaptureOperationPolicy.startAdmissionAllowed(
+            terminal,
+            captureUiState = "error",
+            operationActive = false,
+        ))
+    }
+
+    @Test
+    fun `route storage or native error cannot publish a clean stop`() {
+        assertTrue(MainaTerminalPublicationPolicy.nativeStopIsClean("idle", null))
+        listOf(
+            "Audio route recovery failed",
+            "Storage reserve reached",
+            "Native recorder stop failed",
+        ).forEach { error ->
+            assertFalse(MainaTerminalPublicationPolicy.nativeStopIsClean("idle", error))
+        }
+        assertFalse(MainaTerminalPublicationPolicy.nativeStopIsClean("recording", null))
+    }
+
+    @Test
     fun `duplicate terminal requests coalesce without issuing another owner`() {
         val stop = MainaCaptureOperationToken(
             operationId = 50,
@@ -1277,6 +1334,28 @@ class MainaCallInterruptionPolicyTest {
             save.indexOf("} else if (!pausedRef.current)"),
         )
         assertFalse(nativeSave.contains("setNativeCaptureState('idle')"))
+        val saveFailure = save.substring(save.indexOf("} catch (cause)"))
+        assertTrue(saveFailure.contains("saveHandoff === 'legacy-js-presentation'"))
+
+        val cancel = record.substring(
+            record.indexOf("const cancel = async"),
+            record.indexOf("const confirmCancel"),
+        )
+        assertTrue(cancel.contains("native discard finalization was not acknowledged"))
+        assertTrue(cancel.contains("Your data was left untouched"))
+        assertTrue(cancel.indexOf("return;") < cancel.indexOf("deleteMeeting("))
+        assertTrue(cancel.contains("CAPTURE_ENGINE !== 'native-qwen'"))
+
+        val lifecycleCleanup = record.substring(
+            record.indexOf("return () => {\n      if (captureNoteTimerRef.current)"),
+            record.indexOf("// This effect owns one recording session lifecycle"),
+        )
+        val nativeCleanup = lifecycleCleanup.substring(
+            lifecycleCleanup.indexOf("if (CAPTURE_ENGINE === 'native-qwen')"),
+            lifecycleCleanup.indexOf("} else {"),
+        )
+        assertTrue(nativeCleanup.contains("stopNativeCapture()"))
+        assertFalse(nativeCleanup.contains("stopRecordingForegroundService()"))
 
         val service = source(
             "modules/maina-recorder/android/src/main/java/com/divay/maina/recorder/MainaRecordingService.kt",
@@ -1297,6 +1376,13 @@ class MainaCallInterruptionPolicyTest {
         assertTrue(stopOutcome.indexOf("MainaTerminalPublicationPolicy.succeeded") < stopOutcome.indexOf("setCaptureState(\"idle\")"))
         assertTrue(service.contains("\"terminalReasonCode\" to terminalPublication.reasonCode.wireValue"))
         assertTrue(service.contains("\"error\" -> \"Maina save needs recovery\""))
+        val externalState = service.substring(
+            service.indexOf("if (intent?.action == ACTION_SET_STATE)"),
+            service.indexOf("when (intent?.action)"),
+        )
+        assertTrue(externalState.contains("MainaExternalCapturePresentationPolicy.allowed"))
+        assertTrue(externalState.contains("external-capture-state-rejected"))
+        assertTrue(stopOutcome.contains("outcome.snapshot.lastError"))
         val durableHandoff = service.substring(
             service.indexOf("private fun handleStopCompletion"),
             service.indexOf("private fun handleAbortCompletion"),
