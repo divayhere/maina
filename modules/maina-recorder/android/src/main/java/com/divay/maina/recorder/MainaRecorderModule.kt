@@ -111,7 +111,10 @@ class MainaRecorderModule : Module() {
         }
 
         AsyncFunction("setCaptureState") { state: String ->
-            require(state in setOf("idle", "recording", "paused", "finalizing")) { "Invalid capture state: $state" }
+            // STOP/ABORT tokens are the only authority allowed to publish the
+            // native service's finalizing state. JS may still mirror the three
+            // non-terminal presentation states used by the legacy engine.
+            require(state in setOf("idle", "recording", "paused")) { "Invalid capture state: $state" }
             val context = requireContext()
             startControlService(
                 context,

@@ -23,6 +23,163 @@ internal sealed interface MainaCaptureControlDecision {
 
 internal enum class MainaCaptureOperationKind { START, PAUSE, RESUME, STOP, ABORT }
 
+internal enum class MainaTerminalPublicationPhase(val wireValue: String) {
+    NONE("none"),
+    QUEUED("queued"),
+    RUNNING("running"),
+    SUCCEEDED("succeeded"),
+    STALE_SUPERSEDED("stale_superseded"),
+    RECOVERY_REQUIRED("recovery_required"),
+}
+
+internal enum class MainaTerminalReasonCode(val wireValue: String) {
+    NO_TERMINAL_OPERATION("no_terminal_operation"),
+    STOP_QUEUED("stop_queued"),
+    STOP_RUNNING("stop_running"),
+    STOP_SUCCEEDED("stop_succeeded"),
+    STOP_STALE_SUPERSEDED("stop_stale_superseded"),
+    STOP_TIMEOUT_OR_ERROR("stop_timeout_or_error"),
+}
+
+internal data class MainaTerminalPublicationStatus(
+    val phase: MainaTerminalPublicationPhase = MainaTerminalPublicationPhase.NONE,
+    val reasonCode: MainaTerminalReasonCode = MainaTerminalReasonCode.NO_TERMINAL_OPERATION,
+    val ownerOperationId: Long? = null,
+    val startedElapsedMs: Long? = null,
+    val updatedElapsedMs: Long = 0L,
+) {
+    fun elapsedMs(nowElapsedMs: Long): Long = startedElapsedMs
+        ?.let { (nowElapsedMs - it).coerceAtLeast(0L) }
+        ?: 0L
+}
+
+internal enum class MainaTerminalCompletionAuthority {
+    ACCEPTED,
+    SUPERSEDED_BY_NEWER_TERMINAL,
+    LIFECYCLE_SHUTDOWN,
+    ORPHANED_STALE,
+}
+
+internal enum class MainaTerminalCompletionPublication { IDLE, RECOVERY_REQUIRED }
+
+/**
+ * Pure authority and publication policy for STOP/ABORT. The native service is
+ * the sole owner of these transitions: JS cannot publish a saving state, and a
+ * native completion cannot publish idle until both native shutdown and the
+ * durable post-processing/discard handoff have succeeded.
+ */
+internal object MainaTerminalPublicationPolicy {
+    private fun MainaCaptureOperationToken.isTerminal(): Boolean =
+        kind == MainaCaptureOperationKind.STOP || kind == MainaCaptureOperationKind.ABORT
+
+    fun initial(nowElapsedMs: Long = 0L) = MainaTerminalPublicationStatus(updatedElapsedMs = nowElapsedMs)
+
+    fun shouldCoalesce(
+        active: MainaCaptureOperationToken?,
+        state: MainaCaptureControlState,
+        publication: MainaTerminalPublicationStatus,
+    ): Boolean = state.phase == MainaCaptureControlPhase.TERMINAL && (
+        active?.isTerminal() == true || publication.phase in setOf(
+            MainaTerminalPublicationPhase.SUCCEEDED,
+            MainaTerminalPublicationPhase.RECOVERY_REQUIRED,
+        )
+    )
+
+    fun queued(operation: MainaCaptureOperationToken, nowElapsedMs: Long): MainaTerminalPublicationStatus {
+        require(operation.isTerminal())
+        return MainaTerminalPublicationStatus(
+            phase = MainaTerminalPublicationPhase.QUEUED,
+            reasonCode = MainaTerminalReasonCode.STOP_QUEUED,
+            ownerOperationId = operation.operationId,
+            startedElapsedMs = nowElapsedMs,
+            updatedElapsedMs = nowElapsedMs,
+        )
+    }
+
+    fun running(
+        current: MainaTerminalPublicationStatus,
+        operation: MainaCaptureOperationToken,
+        nowElapsedMs: Long,
+    ): MainaTerminalPublicationStatus {
+        require(operation.isTerminal())
+        require(current.ownerOperationId == operation.operationId)
+        return current.copy(
+            phase = MainaTerminalPublicationPhase.RUNNING,
+            reasonCode = MainaTerminalReasonCode.STOP_RUNNING,
+            updatedElapsedMs = nowElapsedMs.coerceAtLeast(current.updatedElapsedMs),
+        )
+    }
+
+    fun completionAuthority(
+        active: MainaCaptureOperationToken?,
+        completion: MainaCaptureOperationToken,
+        state: MainaCaptureControlState,
+        acceptingWork: Boolean,
+    ): MainaTerminalCompletionAuthority {
+        if (!acceptingWork) return MainaTerminalCompletionAuthority.LIFECYCLE_SHUTDOWN
+        if (active == completion && state.phase == MainaCaptureControlPhase.TERMINAL) {
+            return MainaTerminalCompletionAuthority.ACCEPTED
+        }
+        if (
+            state.phase == MainaCaptureControlPhase.TERMINAL &&
+            active?.isTerminal() == true &&
+            active.operationId > completion.operationId
+        ) {
+            return MainaTerminalCompletionAuthority.SUPERSEDED_BY_NEWER_TERMINAL
+        }
+        return MainaTerminalCompletionAuthority.ORPHANED_STALE
+    }
+
+    fun staleSuperseded(
+        current: MainaTerminalPublicationStatus,
+        newerOwner: MainaCaptureOperationToken,
+        nowElapsedMs: Long,
+    ): MainaTerminalPublicationStatus {
+        require(newerOwner.isTerminal())
+        return current.copy(
+            phase = MainaTerminalPublicationPhase.STALE_SUPERSEDED,
+            reasonCode = MainaTerminalReasonCode.STOP_STALE_SUPERSEDED,
+            ownerOperationId = newerOwner.operationId,
+            updatedElapsedMs = nowElapsedMs.coerceAtLeast(current.updatedElapsedMs),
+        )
+    }
+
+    fun completionPublication(
+        nativeStopped: Boolean,
+        durableCompletion: Boolean,
+    ): MainaTerminalCompletionPublication = if (nativeStopped && durableCompletion) {
+        MainaTerminalCompletionPublication.IDLE
+    } else {
+        MainaTerminalCompletionPublication.RECOVERY_REQUIRED
+    }
+
+    fun succeeded(
+        current: MainaTerminalPublicationStatus,
+        operation: MainaCaptureOperationToken,
+        nowElapsedMs: Long,
+    ): MainaTerminalPublicationStatus {
+        require(operation.isTerminal())
+        return current.copy(
+            phase = MainaTerminalPublicationPhase.SUCCEEDED,
+            reasonCode = MainaTerminalReasonCode.STOP_SUCCEEDED,
+            ownerOperationId = operation.operationId,
+            updatedElapsedMs = nowElapsedMs.coerceAtLeast(current.updatedElapsedMs),
+        )
+    }
+
+    fun recoveryRequired(
+        current: MainaTerminalPublicationStatus,
+        operation: MainaCaptureOperationToken?,
+        nowElapsedMs: Long,
+    ): MainaTerminalPublicationStatus = current.copy(
+        phase = MainaTerminalPublicationPhase.RECOVERY_REQUIRED,
+        reasonCode = MainaTerminalReasonCode.STOP_TIMEOUT_OR_ERROR,
+        ownerOperationId = operation?.operationId ?: current.ownerOperationId,
+        startedElapsedMs = current.startedElapsedMs ?: nowElapsedMs,
+        updatedElapsedMs = nowElapsedMs.coerceAtLeast(current.updatedElapsedMs),
+    )
+}
+
 /**
  * Immutable authority issued by the service main looper before native work is queued.
  * The reducer may observe a communication transition while an operation is running,

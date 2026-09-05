@@ -55,6 +55,7 @@ class MainaRecordingService : Service() {
     @Volatile private var postProcessingHandledMeetingId: String? = null
     @Volatile private var clientSilenced = false
     @Volatile private var controlState = MainaCaptureControlState()
+    @Volatile private var terminalPublication = MainaTerminalPublicationPolicy.initial()
     @Volatile private var communicationResumeScheduled = false
     @Volatile private var communicationResumeStartedAtMs = 0L
     @Volatile private var communicationResumeAttempts = 0
@@ -174,8 +175,6 @@ class MainaRecordingService : Service() {
                     nativeCaptureStatus = payload + mapOf("state" to "error")
                     postMainOutcome {
                         if (captureState == "recording") {
-                            setCaptureState("finalizing")
-                            refreshForegroundUi()
                             onStartCommand(
                                 Intent(this, MainaRecordingService::class.java).setAction(ACTION_STOP_NATIVE_CAPTURE),
                                 0,
@@ -191,10 +190,11 @@ class MainaRecordingService : Service() {
                 // while React/JS is busy and avoids persisting per-frame data.
                 nativeCaptureStatus = nativeCaptureStatus + payload + mapOf(
                     "operationId" to nativeCaptureStatus["operationId"],
-                )
+                ) + terminalPublicationFields()
             },
         )
-        nativeCaptureStatus = mapOf("state" to "idle")
+        terminalPublication = MainaTerminalPublicationPolicy.initial(SystemClock.elapsedRealtime())
+        nativeCaptureStatus = mapOf("state" to "idle") + terminalPublicationFields()
         restoreDurableCaptureControl()
         knownExternalInputIds += audioManager
             .getDevices(AudioManager.GET_DEVICES_INPUTS)
@@ -267,7 +267,7 @@ class MainaRecordingService : Service() {
         if (intent?.action == ACTION_SET_STATE) {
             val previousState = captureState
             captureState = intent.getStringExtra(EXTRA_CAPTURE_STATE)
-                ?.takeIf { it in setOf("idle", "recording", "paused", "finalizing") }
+                ?.takeIf { it in setOf("idle", "recording", "paused") }
                 ?: captureState
             if (captureState != previousState) {
                 vibrateTransition(previousState, captureState)
@@ -364,6 +364,7 @@ class MainaRecordingService : Service() {
                 } else {
                     durableControl = captureControlStore.read()
                     applyControlState(startIntentState)
+                    terminalPublication = MainaTerminalPublicationPolicy.initial(SystemClock.elapsedRealtime())
                     val operation = issueCaptureOperation(
                         kind = MainaCaptureOperationKind.START,
                         owner = MainaCapturePauseOwner.SYSTEM,
@@ -374,7 +375,7 @@ class MainaRecordingService : Service() {
                         "meetingId" to meetingId,
                         "sourceMode" to sourceMode,
                         "operationId" to operation.operationId,
-                    )
+                    ) + terminalPublicationFields()
                     dispatchPreparedCapture(
                         operation = operation,
                         pendingState = "starting",
@@ -571,6 +572,47 @@ class MainaRecordingService : Service() {
         )
     }
 
+    private fun terminalPublicationFields(nowElapsedMs: Long = SystemClock.elapsedRealtime()): Map<String, Any?> = mapOf(
+        "terminalPublicationState" to terminalPublication.phase.wireValue,
+        "terminalReasonCode" to terminalPublication.reasonCode.wireValue,
+        "terminalElapsedMs" to terminalPublication.elapsedMs(nowElapsedMs),
+    )
+
+    private fun publishTerminalStatus(
+        next: MainaTerminalPublicationStatus,
+        base: Map<String, Any?> = nativeCaptureStatus,
+    ) {
+        terminalPublication = next
+        nativeCaptureStatus = base + terminalPublicationFields()
+    }
+
+    private fun publishTerminalRecoveryRequired(
+        operation: MainaCaptureOperationToken?,
+        base: Map<String, Any?>,
+    ) {
+        publishTerminalStatus(
+            MainaTerminalPublicationPolicy.recoveryRequired(
+                terminalPublication,
+                operation,
+                SystemClock.elapsedRealtime(),
+            ),
+            base + mapOf(
+                "state" to "error",
+                "lastError" to "Native capture finalization requires recovery",
+            ),
+        )
+        activeCaptureOperation = null
+        setCaptureState("error")
+        recordNativeEvent(
+            level = "error",
+            category = "native-capture",
+            eventName = "native-stop-recovery-required",
+            message = "Native capture finalization requires a bounded recovery",
+            payload = terminalPublicationFields(),
+        )
+        refreshForegroundUi()
+    }
+
     private data class NativeOutcome(
         val operation: MainaCaptureOperationToken,
         val snapshot: MainaNativeAudioCapture.Snapshot,
@@ -661,6 +703,17 @@ class MainaRecordingService : Service() {
         abort: Boolean,
         requestedTerminalState: MainaCaptureControlState? = null,
     ) {
+        requireMainReducer()
+        if (MainaTerminalPublicationPolicy.shouldCoalesce(
+                activeCaptureOperation,
+                controlState,
+                terminalPublication,
+            )
+        ) {
+            nativeCaptureStatus = nativeCaptureStatus + terminalPublicationFields()
+            refreshForegroundUi()
+            return
+        }
         var operation: MainaCaptureOperationToken? = null
         var terminalState: MainaCaptureControlState? = null
         val persistenceFailure = MainaCaptureSafetySequencer.latchApplyPersistThenQueue(
@@ -671,6 +724,12 @@ class MainaRecordingService : Service() {
                     requestedTerminalState ?: MainaCallInterruptionPolicy.terminal(controlState),
                 )
                 terminalState = controlState
+                operation?.let {
+                    publishTerminalStatus(
+                        MainaTerminalPublicationPolicy.queued(it, SystemClock.elapsedRealtime()),
+                    )
+                    setCaptureState("finalizing")
+                }
             },
             persist = {
                 persistControlStateOrThrow(
@@ -683,7 +742,6 @@ class MainaRecordingService : Service() {
             },
         )
         persistenceFailure?.let { recordControlPersistenceFailure(event, it) }
-        runCatching { setCaptureState("finalizing") }
     }
 
     private fun accepts(operation: MainaCaptureOperationToken): Boolean {
@@ -1213,9 +1271,16 @@ class MainaRecordingService : Service() {
     }
 
     private fun dispatchNativeStop(operation: MainaCaptureOperationToken, abort: Boolean) {
-        nativeCaptureStatus = nativeCapture.snapshot().asMap() + mapOf(
-            "state" to "finalizing",
-            "operationId" to operation.operationId,
+        publishTerminalStatus(
+            MainaTerminalPublicationPolicy.running(
+                terminalPublication,
+                operation,
+                SystemClock.elapsedRealtime(),
+            ),
+            nativeCapture.snapshot().asMap() + mapOf(
+                "state" to "finalizing",
+                "operationId" to operation.operationId,
+            ),
         )
         val enqueued = enqueueNativeWork {
             val result = runCatching { nativeCapture.stop() }
@@ -1240,35 +1305,98 @@ class MainaRecordingService : Service() {
 
     private fun handleStopOutcome(outcome: NativeOutcome, abort: Boolean) {
         requireMainReducer()
-        if (!accepts(outcome.operation)) return
-        if (outcome.error != null) {
-            nativeCaptureStatus = outcome.snapshot.asMap() + mapOf(
-                "state" to "error",
-                "lastError" to outcome.error,
-                "operationId" to outcome.operation.operationId,
-            )
-            refreshForegroundUi()
+        when (MainaTerminalPublicationPolicy.completionAuthority(
+            activeCaptureOperation,
+            outcome.operation,
+            controlState,
+            MainaCaptureLifecyclePolicy.acceptsNativeWork(acceptingNativeWork, destroyed),
+        )) {
+            MainaTerminalCompletionAuthority.LIFECYCLE_SHUTDOWN -> return
+            MainaTerminalCompletionAuthority.SUPERSEDED_BY_NEWER_TERMINAL -> {
+                val newerOwner = activeCaptureOperation
+                    ?: return publishTerminalRecoveryRequired(outcome.operation, outcome.snapshot.asMap())
+                publishTerminalStatus(
+                    MainaTerminalPublicationPolicy.staleSuperseded(
+                        terminalPublication,
+                        newerOwner,
+                        SystemClock.elapsedRealtime(),
+                    ),
+                    nativeCaptureStatus,
+                )
+                refreshForegroundUi()
+                return
+            }
+            MainaTerminalCompletionAuthority.ORPHANED_STALE -> {
+                publishTerminalRecoveryRequired(outcome.operation, outcome.snapshot.asMap())
+                return
+            }
+            MainaTerminalCompletionAuthority.ACCEPTED -> Unit
+        }
+        val nativeStopped = outcome.error == null && outcome.snapshot.state == "idle"
+        if (!nativeStopped) {
+            publishTerminalRecoveryRequired(outcome.operation, outcome.snapshot.asMap())
+            return
+        }
+        val durableCompletion = runCatching {
+            if (abort) handleAbortCompletion(outcome.snapshot) else handleStopCompletion(outcome.snapshot)
+        }.getOrDefault(false)
+        if (MainaTerminalPublicationPolicy.completionPublication(
+                nativeStopped = true,
+                durableCompletion = durableCompletion,
+            ) == MainaTerminalCompletionPublication.RECOVERY_REQUIRED
+        ) {
+            publishTerminalRecoveryRequired(outcome.operation, outcome.snapshot.asMap())
             return
         }
         activeCaptureOperation = null
-        nativeCaptureStatus = outcome.snapshot.asMap() + mapOf("operationId" to outcome.operation.operationId)
-        if (abort) handleAbortCompletion(outcome.snapshot) else handleStopCompletion(outcome.snapshot)
+        publishTerminalStatus(
+            MainaTerminalPublicationPolicy.succeeded(
+                terminalPublication,
+                outcome.operation,
+                SystemClock.elapsedRealtime(),
+            ),
+            outcome.snapshot.asMap() + mapOf(
+                "state" to "idle",
+                "operationId" to outcome.operation.operationId,
+            ),
+        )
         setCaptureState("idle")
         refreshForegroundUi()
     }
 
-    private fun handleStopCompletion(snapshot: MainaNativeAudioCapture.Snapshot) {
-        val meetingId = snapshot.meetingId ?: lastCaptureMeetingId ?: return
-        val directory = lastCaptureDirectory ?: return
+    private fun handleStopCompletion(snapshot: MainaNativeAudioCapture.Snapshot): Boolean {
+        val meetingId = snapshot.meetingId ?: lastCaptureMeetingId ?: return false
+        val directory = lastCaptureDirectory ?: return false
         // Stop can arrive more than once. Only the accepted terminal operation
         // may hand this meeting to post-processing.
-        if (postProcessingHandledMeetingId == meetingId) return
-        postProcessingHandledMeetingId = meetingId
+        if (postProcessingHandledMeetingId == meetingId) return true
+        val captureEndedAt = System.currentTimeMillis()
+        val outbox = MainaPostProcessingOutbox.shared(applicationContext)
+        val durableHandoff = runCatching {
+            // Persist the single logical meeting handoff before asking Android
+            // to start another service. A successful startService call is not
+            // itself durable evidence that post-processing accepted the work.
+            outbox.begin(
+                meetingId,
+                directory,
+                lastCaptureStartedAt,
+                captureEndedAt,
+                0L,
+                0L,
+                0,
+                0,
+                snapshot.routeRestartCount,
+                snapshot.captureGapMs,
+            )
+            true
+        }.getOrDefault(false)
+        if (!durableHandoff) return false
+
         val intent = Intent(this, MainaPostProcessingService::class.java).apply {
             action = MainaPostProcessingService.ACTION_START
             putExtra(MainaPostProcessingService.EXTRA_MEETING_ID, meetingId)
             putExtra(MainaPostProcessingService.EXTRA_DIRECTORY, directory)
-            putExtra(MainaPostProcessingService.EXTRA_CAPTURE_ENDED_AT, System.currentTimeMillis())
+            putExtra(MainaPostProcessingService.EXTRA_CAPTURE_ENDED_AT, captureEndedAt)
             putExtra(MainaPostProcessingService.EXTRA_MEETING_STARTED_AT, lastCaptureStartedAt)
             putExtra(MainaPostProcessingService.EXTRA_ROUTE_RESTART_COUNT, snapshot.routeRestartCount)
             putExtra(MainaPostProcessingService.EXTRA_CAPTURE_GAP_MS, snapshot.captureGapMs)
@@ -1276,28 +1404,16 @@ class MainaRecordingService : Service() {
         val launch = runCatching {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) startForegroundService(intent) else startService(intent)
         }
-        var fallbackDurable = false
+        var recoveryScheduled = false
         launch.onFailure { cause ->
             val message = cause.message ?: cause.javaClass.simpleName
             runCatching {
-                MainaPostProcessingOutbox.shared(applicationContext).begin(
-                    meetingId,
-                    directory,
-                    lastCaptureStartedAt,
-                    System.currentTimeMillis(),
-                    0L,
-                    0L,
-                    0,
-                    0,
-                    snapshot.routeRestartCount,
-                    snapshot.captureGapMs,
-                )
-                MainaPostProcessingOutbox.shared(applicationContext).defer(
+                outbox.defer(
                     meetingId,
                     "Saved audio is waiting for local transcription: $message",
                 )
                 MainaPostProcessingRecoveryScheduler.enqueue(applicationContext, meetingId)
-            }.onSuccess { fallbackDurable = true }
+            }.onSuccess { recoveryScheduled = true }
             recordNativeEvent(
                 level = "warn",
                 category = "native-post-processing",
@@ -1306,15 +1422,18 @@ class MainaRecordingService : Service() {
                 payload = mapOf("meetingId" to meetingId, "error" to message),
             )
         }
-        if (launch.isSuccess || fallbackDurable) {
-            captureControlStore.clear()
-            durableControl = null
-        } else {
-            postProcessingHandledMeetingId = null
+        if (launch.isSuccess || recoveryScheduled) {
+            return runCatching {
+                captureControlStore.clear()
+                durableControl = null
+                postProcessingHandledMeetingId = meetingId
+                true
+            }.getOrDefault(false)
         }
+        return false
     }
 
-    private fun handleAbortCompletion(snapshot: MainaNativeAudioCapture.Snapshot) {
+    private fun handleAbortCompletion(snapshot: MainaNativeAudioCapture.Snapshot): Boolean {
         // Discard is terminal and never enqueues post-processing.
         postProcessingHandledMeetingId = snapshot.meetingId ?: lastCaptureMeetingId
         lastCaptureMeetingId = null
@@ -1322,6 +1441,7 @@ class MainaRecordingService : Service() {
         lastCaptureStartedAt = 0L
         captureControlStore.clear()
         durableControl = null
+        return true
     }
 
     private fun refreshForegroundUi() {
@@ -1356,6 +1476,7 @@ class MainaRecordingService : Service() {
                     "recording" -> "Maina is recording"
                     "paused" -> "Maina is paused"
                     "finalizing" -> "Maina is saving"
+                    "error" -> "Maina save needs recovery"
                     else -> "Maina is ready"
                 },
             )
@@ -1364,6 +1485,7 @@ class MainaRecordingService : Service() {
                     "recording" -> "Audio recovery is active."
                     "paused" -> "Resume or stop and save this meeting."
                     "finalizing" -> "Finalising transcript and audio files."
+                    "error" -> "Audio is preserved. Re-open Maina to recover this meeting."
                     else -> when {
                         !accessibilityEnabled -> "Enable clicker control in Accessibility for locked-screen use."
                         !accessibilityConnected -> "Re-open Maina and verify the clicker once before your meeting."

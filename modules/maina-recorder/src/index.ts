@@ -81,6 +81,9 @@ export interface NativeCaptureStatus {
   systemRetainedResumeCount?: number;
   systemRecreationResumeCount?: number;
   systemRecoveryReason?: string | null;
+  terminalPublicationState?: 'none' | 'queued' | 'running' | 'succeeded' | 'stale_superseded' | 'recovery_required';
+  terminalReasonCode?: 'no_terminal_operation' | 'stop_queued' | 'stop_running' | 'stop_succeeded' | 'stop_stale_superseded' | 'stop_timeout_or_error';
+  terminalElapsedMs?: number;
   recoveryAwaitingPublicSignal?: boolean;
   recoveryReasonCode?: string | null;
   platformHoldCount?: number;
