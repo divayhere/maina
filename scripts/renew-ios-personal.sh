@@ -33,19 +33,26 @@ RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)"
 RUN_ROOT="$BACKUP_ROOT/Backups/$RUN_ID"
 mkdir -p "$RUN_ROOT/preflight" "$RUN_ROOT/device"
 
-# CoreDevice tunnels are demand-driven and may appear disconnected in
-# `list devices` until a device service is acquired. Establish that service
-# immediately before the strict wired-iPhone identity gate; a locked or
-# unavailable phone still fails closed here.
+# CoreDevice list metadata can remain disconnected even while a bounded device
+# service is usable. Acquire and timestamp that exact service immediately before
+# the strict wired-iPhone identity gate; a locked or unavailable phone still
+# fails closed here.
+CAPABILITY_STARTED_MS="$(node -p 'Date.now()')"
 xcrun devicectl device info processes --device "$DEVICE_ID" --timeout 15 --quiet >/dev/null
+CAPABILITY_COMPLETED_MS="$(node -p 'Date.now()')"
 xcrun devicectl list devices --json-output "$RUN_ROOT/devices.json" --quiet
 xcrun devicectl device info apps --device "$DEVICE_ID" --bundle-id "$BUNDLE_ID" \
   --columns '*' --json-output "$RUN_ROOT/apps.json" --quiet
-node --input-type=module - "$RUN_ROOT/devices.json" "$RUN_ROOT/apps.json" "$DEVICE_ID" "$DEVICE_UDID" "$BUNDLE_ID" <<'NODE'
+node --input-type=module - "$RUN_ROOT/devices.json" "$RUN_ROOT/apps.json" "$DEVICE_ID" "$DEVICE_UDID" "$BUNDLE_ID" "$CAPABILITY_STARTED_MS" "$CAPABILITY_COMPLETED_MS" <<'NODE'
 import { readFileSync } from 'node:fs';
 import { findInstalledIosApp, findQualifiedIosDevice } from './scripts/lib/renewal-core.mjs';
-const [, , devicesPath, appsPath, deviceId, udid, bundleId] = process.argv;
-findQualifiedIosDevice(JSON.parse(readFileSync(devicesPath)), { deviceId, udid, marketingName: 'iPhone 15' });
+const [, , devicesPath, appsPath, deviceId, udid, bundleId, startedAtMs, completedAtMs] = process.argv;
+const proof = {
+  schemaVersion: 'maina.ios-coredevice-capability-proof.v1', deviceId,
+  operation: 'device-info-processes', timeoutMs: 15_000,
+  startedAtMs: Number(startedAtMs), completedAtMs: Number(completedAtMs), exitCode: 0,
+};
+findQualifiedIosDevice(JSON.parse(readFileSync(devicesPath)), { deviceId, udid, marketingName: 'iPhone 15', nowMs: Date.now() }, proof);
 const app = findInstalledIosApp(JSON.parse(readFileSync(appsPath)), bundleId);
 console.log(`Qualified USB iPhone 15; installed Maina ${app.version} (${app.build}).`);
 NODE

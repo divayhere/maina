@@ -1,4 +1,40 @@
-export function findQualifiedIosDevice(payload, expected) {
+const IOS_CAPABILITY_PROOF_KEYS = [
+  'schemaVersion',
+  'deviceId',
+  'operation',
+  'timeoutMs',
+  'startedAtMs',
+  'completedAtMs',
+  'exitCode',
+];
+
+function requireExactKeys(value, keys, label) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error(`${label} is missing.`);
+  const actual = Object.keys(value).sort();
+  const expected = [...keys].sort();
+  if (JSON.stringify(actual) !== JSON.stringify(expected)) throw new Error(`${label} contains missing or unknown fields.`);
+}
+
+export function validateIosCoreDeviceCapabilityProof(proof, expected) {
+  requireExactKeys(proof, IOS_CAPABILITY_PROOF_KEYS, 'iOS CoreDevice capability proof');
+  if (proof.schemaVersion !== 'maina.ios-coredevice-capability-proof.v1') throw new Error('iOS CoreDevice capability proof schema mismatch.');
+  if (proof.deviceId !== expected.deviceId) throw new Error('iOS CoreDevice capability proof device mismatch.');
+  if (proof.operation !== 'device-info-processes') throw new Error('iOS CoreDevice capability proof operation mismatch.');
+  if (proof.timeoutMs !== 15_000) throw new Error('iOS CoreDevice capability proof timeout is not the exact bounded value.');
+  if (proof.exitCode !== 0) throw new Error('iOS CoreDevice capability probe did not succeed.');
+  if (!Number.isSafeInteger(proof.startedAtMs) || !Number.isSafeInteger(proof.completedAtMs)
+    || proof.startedAtMs <= 0 || proof.completedAtMs < proof.startedAtMs
+    || proof.completedAtMs - proof.startedAtMs > proof.timeoutMs + 5_000) {
+    throw new Error('iOS CoreDevice capability proof timing is invalid.');
+  }
+  const nowMs = Number.isSafeInteger(expected.nowMs) ? expected.nowMs : Date.now();
+  if (proof.completedAtMs > nowMs + 1_000 || nowMs - proof.completedAtMs > 60_000) {
+    throw new Error('iOS CoreDevice capability proof is stale or future-dated.');
+  }
+  return true;
+}
+
+export function findQualifiedIosDevice(payload, expected, capabilityProof = null) {
   const devices = payload?.result?.devices ?? [];
   const device = devices.find((item) => item.identifier === expected.deviceId);
   if (!device) throw new Error(`Qualified iOS device is missing: ${expected.deviceId}`);
@@ -6,9 +42,11 @@ export function findQualifiedIosDevice(payload, expected) {
   if (device.hardwareProperties?.marketingName !== expected.marketingName) throw new Error('iOS model mismatch.');
   if (device.hardwareProperties?.reality !== 'physical') throw new Error('iOS target is not physical.');
   if (device.connectionProperties?.transportType !== 'wired') throw new Error('iOS target is not connected by USB.');
-  if (device.connectionProperties?.tunnelState !== 'connected') throw new Error('iOS device tunnel is not connected.');
   if (device.connectionProperties?.pairingState !== 'paired') throw new Error('iOS device is not paired.');
   if (device.deviceProperties?.developerModeStatus !== 'enabled') throw new Error('iOS Developer Mode is disabled.');
+  if (device.connectionProperties?.tunnelState !== 'connected') {
+    validateIosCoreDeviceCapabilityProof(capabilityProof, expected);
+  }
   return device;
 }
 

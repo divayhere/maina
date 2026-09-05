@@ -12,6 +12,16 @@ import {
 } from './lib/renewal-core.mjs';
 
 const expectedDevice = { deviceId: 'device', udid: 'udid', marketingName: 'iPhone 15' };
+const proofNow = 2_000_000;
+const capabilityProof = {
+  schemaVersion: 'maina.ios-coredevice-capability-proof.v1',
+  deviceId: 'device',
+  operation: 'device-info-processes',
+  timeoutMs: 15_000,
+  startedAtMs: proofNow - 1_000,
+  completedAtMs: proofNow,
+  exitCode: 0,
+};
 const devicePayload = { result: { devices: [{
   identifier: 'device',
   hardwareProperties: { udid: 'udid', marketingName: 'iPhone 15', reality: 'physical' },
@@ -19,6 +29,40 @@ const devicePayload = { result: { devices: [{
   deviceProperties: { developerModeStatus: 'enabled' },
 }] } };
 assert.equal(findQualifiedIosDevice(devicePayload, expectedDevice).identifier, 'device');
+const disconnectedPayload = { result: { devices: [{
+  ...devicePayload.result.devices[0],
+  connectionProperties: { ...devicePayload.result.devices[0].connectionProperties, tunnelState: 'disconnected' },
+}] } };
+assert.throws(() => findQualifiedIosDevice(disconnectedPayload, { ...expectedDevice, nowMs: proofNow }), /capability proof/);
+assert.throws(
+  () => findQualifiedIosDevice(disconnectedPayload, { ...expectedDevice, nowMs: proofNow }, { ...capabilityProof, exitCode: 1 }),
+  /did not succeed/,
+);
+assert.equal(findQualifiedIosDevice(disconnectedPayload, { ...expectedDevice, nowMs: proofNow }, capabilityProof).identifier, 'device');
+assert.throws(
+  () => findQualifiedIosDevice(disconnectedPayload, { ...expectedDevice, nowMs: proofNow }, { ...capabilityProof, deviceId: 'other-device' }),
+  /proof device mismatch/,
+);
+assert.throws(
+  () => findQualifiedIosDevice(disconnectedPayload, { ...expectedDevice, nowMs: proofNow }, { ...capabilityProof, completedAtMs: proofNow - 60_001, startedAtMs: proofNow - 61_001 }),
+  /stale/,
+);
+assert.throws(
+  () => findQualifiedIosDevice(disconnectedPayload, { ...expectedDevice, nowMs: proofNow }, { ...capabilityProof, privateOutput: 'forbidden' }),
+  /unknown fields/,
+);
+for (const [label, mutate, pattern] of [
+  ['UDID', (device) => { device.hardwareProperties.udid = 'wrong'; }, /UDID/],
+  ['model', (device) => { device.hardwareProperties.marketingName = 'Other'; }, /model/],
+  ['physical', (device) => { device.hardwareProperties.reality = 'simulator'; }, /physical/],
+  ['transport', (device) => { device.connectionProperties.transportType = 'wireless'; }, /USB/],
+  ['pairing', (device) => { device.connectionProperties.pairingState = 'unpaired'; }, /paired/],
+  ['developer mode', (device) => { device.deviceProperties.developerModeStatus = 'disabled'; }, /Developer Mode/],
+]) {
+  const changed = structuredClone(disconnectedPayload);
+  mutate(changed.result.devices[0]);
+  assert.throws(() => findQualifiedIosDevice(changed, { ...expectedDevice, nowMs: proofNow }, capabilityProof), pattern, label);
+}
 assert.throws(
   () => findQualifiedIosDevice({ result: { devices: [{
     ...devicePayload.result.devices[0],
@@ -135,6 +179,13 @@ assert.match(
   /device info processes --device "\$DEVICE_ID" --timeout 15 --quiet/,
   'Renewal must acquire a fresh CoreDevice tunnel immediately before device validation.',
 );
+for (const [name, script] of [['renewal', iosRenewalScript], ['installer', iosInstaller]]) {
+  assert.match(script, /CAPABILITY_STARTED_MS="\$\(node -p 'Date\.now\(\)'\)"/, `${name} must timestamp the capability probe start.`);
+  assert.match(script, /CAPABILITY_COMPLETED_MS="\$\(node -p 'Date\.now\(\)'\)"/, `${name} must timestamp the capability probe completion.`);
+  assert.match(script, /maina\.ios-coredevice-capability-proof\.v1/, `${name} must pass a typed capability proof.`);
+  assert.match(script, /operation: 'device-info-processes', timeoutMs: 15_000/, `${name} must bind the exact bounded process probe.`);
+  assert.match(script, /findQualifiedIosDevice\([^;]+, proof\);/, `${name} must pass the fresh capability proof to device validation.`);
+}
 assert.match(
   iosRenewalScript,
   /plutil', \['-extract', 'ExpirationDate', 'raw', profile\]/,
