@@ -54,6 +54,16 @@ enum MainaIOSCallRecoveryPolicy {
     elapsedMs >= 0 && elapsedMs < budgetMs
   }
 
+  static func recoveryLoopStart(
+    existing: TimeInterval?,
+    action: Action,
+    attempt: Int,
+    now: TimeInterval
+  ) -> TimeInterval? {
+    if attempt > 0 { return existing }
+    return action == .start ? now : existing
+  }
+
   static func action(
     paused: Bool,
     interrupted: Bool,

@@ -45,6 +45,7 @@ final class MainaIOSNativeAudioCapture: NSObject, AVAudioRecorderDelegate, CXCal
   private var lastRouteChangeAtMs: Double?
   private var captureGapMs: Double = 0
   private var recoveryStartedUptime: TimeInterval?
+  private var recoveryLoopStartedUptime: TimeInterval?
   private var rmsDbfs: Float = -90
   private var peakDbfs: Float = -90
   private var deliberatelyPaused = false
@@ -112,6 +113,7 @@ final class MainaIOSNativeAudioCapture: NSObject, AVAudioRecorderDelegate, CXCal
       self.interrupted = false
       self.recoveryAwaitingPublicSignal = false
       self.recoveryReasonCode = nil
+      self.recoveryLoopStartedUptime = nil
       self.platformHoldCount = 0
       self.recoverySignalCount = 0
       self.recoveryGeneration += 1
@@ -698,6 +700,23 @@ final class MainaIOSNativeAudioCapture: NSObject, AVAudioRecorderDelegate, CXCal
       }
       return
     }
+    recoveryLoopStartedUptime = MainaIOSCallRecoveryPolicy.recoveryLoopStart(
+      existing: recoveryLoopStartedUptime,
+      action: action,
+      attempt: attempt,
+      now: ProcessInfo.processInfo.systemUptime
+    )
+    guard let recoveryLoopStartedUptime else {
+      routeRecoveryActive = false
+      recoveryAwaitingPublicSignal = true
+      recoveryReasonCode = "recovery-loop-clock-missing"
+      appendJournal("capture-recovery-deferred", fields: [
+        "reason": recoveryReasonCode ?? "recovery-loop-clock-missing",
+        "awaitingPublicSignal": true,
+      ])
+      endRecoveryBackgroundTask()
+      return
+    }
     if attempt == 0 {
       recoveryAwaitingPublicSignal = false
       recoveryReasonCode = reason
@@ -727,6 +746,7 @@ final class MainaIOSNativeAudioCapture: NSObject, AVAudioRecorderDelegate, CXCal
         self.routeRecoveryActive = false
         self.recoveryAwaitingPublicSignal = false
         self.recoveryReasonCode = "recovered"
+        self.recoveryLoopStartedUptime = nil
         self.routeRestartCount += 1
         self.lastError = nil
         let gap = max(0, (ProcessInfo.processInfo.systemUptime - (self.recoveryStartedUptime ?? ProcessInfo.processInfo.systemUptime)) * 1_000)
@@ -763,7 +783,7 @@ final class MainaIOSNativeAudioCapture: NSObject, AVAudioRecorderDelegate, CXCal
         let recoveryElapsedMs = max(
           0,
           (ProcessInfo.processInfo.systemUptime -
-            (self.recoveryStartedUptime ?? ProcessInfo.processInfo.systemUptime)) * 1_000
+            recoveryLoopStartedUptime) * 1_000
         )
         if self.canContinueRecoveryWatcher() && MainaIOSCallRecoveryPolicy.recoveryMayRetry(
           elapsedMs: recoveryElapsedMs,
@@ -791,6 +811,7 @@ final class MainaIOSNativeAudioCapture: NSObject, AVAudioRecorderDelegate, CXCal
             "recoveryReasonCode": self.recoveryReasonCode ?? "other",
             "awaitingPublicSignal": self.recoveryAwaitingPublicSignal,
           ])
+          self.recoveryLoopStartedUptime = nil
           self.endRecoveryBackgroundTask()
         }
       }
@@ -832,6 +853,7 @@ final class MainaIOSNativeAudioCapture: NSObject, AVAudioRecorderDelegate, CXCal
       // Revoke any timer owned by the exhausted UIKit assertion while keeping
       // exactly one pending recovery generation for the next public signal.
       recoveryGeneration += 1
+      recoveryLoopStartedUptime = nil
       recoveryBackgroundTask = .invalid
       return current
     }
@@ -867,6 +889,7 @@ final class MainaIOSNativeAudioCapture: NSObject, AVAudioRecorderDelegate, CXCal
     routeRecoveryActive = false
     recoveryAwaitingPublicSignal = false
     recoveryReasonCode = nil
+    recoveryLoopStartedUptime = nil
     endRecoveryBackgroundTask()
   }
 
@@ -880,6 +903,7 @@ final class MainaIOSNativeAudioCapture: NSObject, AVAudioRecorderDelegate, CXCal
     routeRecoveryActive = false
     recoveryAwaitingPublicSignal = false
     recoveryReasonCode = reason
+    recoveryLoopStartedUptime = nil
     endRecoveryBackgroundTask()
     interrupted = true
     stopTimers()
@@ -894,12 +918,14 @@ final class MainaIOSNativeAudioCapture: NSObject, AVAudioRecorderDelegate, CXCal
     routeRecoveryActive = false
     recoveryAwaitingPublicSignal = false
     recoveryReasonCode = "cancelled"
+    recoveryLoopStartedUptime = nil
     endRecoveryBackgroundTask()
     appendJournal("capture-recovery-cancelled", fields: ["reason": reason, "generation": recoveryGeneration])
   }
 
   private func suspendRecoveryForActiveCall(reason: String) {
     routeRecoveryActive = false
+    recoveryLoopStartedUptime = nil
     endRecoveryBackgroundTask()
     appendJournal("capture-recovery-suspended-for-call", fields: [
       "reason": reason,

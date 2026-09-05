@@ -139,6 +139,44 @@ require(
   "invalid elapsed time must fail closed"
 )
 
+let longCallEndedAt: TimeInterval = 120
+let firstPostCallLoop = MainaIOSCallRecoveryPolicy.recoveryLoopStart(
+  existing: nil,
+  action: .start,
+  attempt: 0,
+  now: longCallEndedAt
+)
+require(firstPostCallLoop == longCallEndedAt, "a long call must receive a fresh post-call recovery budget")
+require(
+  MainaIOSCallRecoveryPolicy.recoveryMayRetry(
+    elapsedMs: (120.001 - (firstPostCallLoop ?? 0)) * 1_000,
+    budgetMs: 30_000
+  ),
+  "call duration must not consume the post-call recovery budget"
+)
+let recursiveLoop = MainaIOSCallRecoveryPolicy.recoveryLoopStart(
+  existing: firstPostCallLoop,
+  action: .start,
+  attempt: 4,
+  now: 126
+)
+require(recursiveLoop == firstPostCallLoop, "recursive attempts must preserve one loop clock")
+let coalescedLoop = MainaIOSCallRecoveryPolicy.recoveryLoopStart(
+  existing: firstPostCallLoop,
+  action: .coalesce,
+  attempt: 0,
+  now: 127
+)
+require(coalescedLoop == firstPostCallLoop, "duplicate public signals must not reset the active loop")
+let laterPublicSignalLoop = MainaIOSCallRecoveryPolicy.recoveryLoopStart(
+  existing: nil,
+  action: .start,
+  attempt: 0,
+  now: 240
+)
+require(laterPublicSignalLoop == 240, "a later real public signal must start a fresh bounded loop")
+require(laterPublicSignalLoop != firstPostCallLoop, "separate public-signal loops must not share stale timing")
+
 print("iOS call-recovery policy tests passed.")
   }
 }

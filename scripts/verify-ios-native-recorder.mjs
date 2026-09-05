@@ -81,6 +81,7 @@ for (const token of [
   'awaitingPublicSignal',
   'recoverySignalCount',
   'recoveryRetryBudgetMs: Double = 30_000',
+  'recoveryLoopStartedUptime',
   'MainaIOSCallRecoveryPolicy.refreshedCommunicationActive',
   'refreshCommunicationActiveFromObserver()',
   'chunk-allocated',
@@ -95,6 +96,7 @@ for (const token of [
   'cannotInterruptOthersCode = 560_557_684',
   'domain == cannotInterruptOthersDomain && code == cannotInterruptOthersCode',
   'static func recoveryMayRetry',
+  'static func recoveryLoopStart',
   'case queueSystemRecovery',
   'case resumeDeliberatePause',
   'case rejectCommunicationActive',
@@ -245,10 +247,19 @@ for (const token of [
   'recoveryReasonCode == "cannot-interrupt-others"',
   'recoveryAwaitingPublicSignal = temporaryPlatformHold',
   'recoveryGeneration += 1',
+  'recoveryLoopStartedUptime = nil',
 ]) {
   if (!backgroundExpirySource.includes(token)) {
     throw new Error(`iOS background-exhaustion pending-generation invariant missing: ${token}`);
   }
+}
+const recoveryCatchStart = scheduledRecoverySource.indexOf('} catch {');
+const recoveryCatchSource = scheduledRecoverySource.slice(recoveryCatchStart);
+if (!recoveryCatchSource.includes('recoveryLoopStartedUptime) * 1_000')) {
+  throw new Error('iOS bounded recovery must measure from the current recovery loop, not the call start.');
+}
+if (recoveryCatchSource.includes('recoveryStartedUptime ??')) {
+  throw new Error('iOS bounded recovery must not consume its budget during the call interval.');
 }
 
 // This is intentionally a macOS-only static gate; Linux CI still runs TS tests.
