@@ -18,11 +18,18 @@ for argument in "$@"; do
     -workspace|-project) has_project=true ;;
     -derivedDataPath) expect_derived_data=true ;;
     -derivedDataPath=*) derived_data="${argument#-derivedDataPath=}" ;;
+    PODFILE_DIR=*)
+      echo "Refusing caller-supplied PODFILE_DIR; Maina Xcode project builds require the canonical Podfile directory." >&2
+      exit 78
+      ;;
   esac
 done
 if $expect_derived_data; then
   echo "xcodebuild -derivedDataPath is missing its value." >&2
   exit 78
+fi
+if $has_project; then
+  set -- "$@" "PODFILE_DIR=$PROJECT_DIR/ios"
 fi
 
 if [[ -n "$derived_data" ]]; then

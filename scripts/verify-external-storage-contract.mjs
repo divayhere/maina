@@ -373,22 +373,26 @@ if (kind === 'android-main') {
   const iosRuntime = read('scripts/prepare-ios-sherpa-runtime.sh');
   assertOrder(iosRuntime, ['source "$PROJECT_DIR/scripts/maina-ios-env.sh"', 'maina_storage_mkdir "$CACHE_ROOT"', 'mkdir -p "$VENDOR_ROOT"'], 'iOS runtime');
   const iosRenewal = read('scripts/renew-ios-personal.sh');
-  assertOrder(iosRenewal, ['source "$PROJECT_DIR/scripts/maina-ios-env.sh"', 'mkdir -p "$BACKUP_ROOT/Backups"', 'MAINA_IOS_DERIVED_DATA_ROOT/renewal-$RUN_ID', 'maina_require_storage_path "$BUILD_ROOT"', 'xcodebuild -workspace'], 'iOS renewal');
+  assertOrder(iosRenewal, ['source "$PROJECT_DIR/scripts/maina-ios-env.sh"', 'mkdir -p "$BACKUP_ROOT/Backups"', 'MAINA_IOS_DERIVED_DATA_ROOT/renewal-$RUN_ID', 'maina_require_storage_path "$BUILD_ROOT"', 'xcodebuild -workspace', 'PODFILE_DIR="$PROJECT_DIR/ios"'], 'iOS renewal');
   const iosCandidate = read('scripts/build-ios-release-candidate.sh');
-  assertOrder(iosCandidate, ['source "$PROJECT_DIR/scripts/maina-ios-env.sh"', 'maina_require_storage_path "$OUTPUT_DIR"', 'maina_storage_mkdir "$OUTPUT_DIR"', ': > "$OUTPUT_DIR/build-attempted"', 'xcodebuild -workspace'], 'iOS candidate');
+  assertOrder(iosCandidate, ['source "$PROJECT_DIR/scripts/maina-ios-env.sh"', 'maina_require_storage_path "$OUTPUT_DIR"', 'maina_storage_mkdir "$OUTPUT_DIR"', ': > "$OUTPUT_DIR/build-attempted"', 'xcodebuild -workspace', 'PODFILE_DIR="$PROJECT_DIR/ios"'], 'iOS candidate');
   assert.match(iosCandidate, /"\$MAINA_IOS_RELEASE_OUTPUT_ROOT"\/ios\/\*/);
   assert.match(iosCandidate, /"\$MAINA_IOS_DERIVED_DATA_ROOT"\/\*/);
   const staging = read('scripts/build-install-ios-staging.sh');
   assertOrder(staging, ['source "$PROJECT_DIR/scripts/maina-ios-env.sh"', 'restore-external-build-links.sh" dependencies', 'restore-external-build-links.sh" ios', 'xcodebuild -checkFirstLaunchStatus'], 'iOS staging');
+  assertOrder(staging, ['xcodebuild \\', 'PODFILE_DIR="$PROJECT_DIR/ios"', 'build'], 'iOS staging build');
   const iosRunner = read('scripts/run-ios-local.sh');
   const xcodebuildShim = read('scripts/external-bin/xcodebuild');
   assert.equal(lstatSync(path.join(root, 'scripts/run-ios-local.sh')).mode & 0o777, 0o755);
   assert.equal(lstatSync(path.join(root, 'scripts/external-bin/xcodebuild')).mode & 0o777, 0o755);
   assertOrder(iosRunner, ['source "$PROJECT_DIR/scripts/maina-ios-env.sh"', 'restore-external-build-links.sh" dependencies', 'restore-external-build-links.sh" ios', 'maina_storage_mkdir "$expo_output"', 'scripts/external-bin:$PATH', 'expo run:ios --output "$expo_output"'], 'iOS local runner');
-  assertOrder(xcodebuildShim, ['source "$PROJECT_DIR/scripts/maina-ios-env.sh"', 'maina_require_storage_path "$derived_data"', 'maina_storage_mkdir "$derived_data"', 'exec /usr/bin/xcodebuild "$@" -derivedDataPath "$derived_data"'], 'xcodebuild shim');
+  assertOrder(xcodebuildShim, ['source "$PROJECT_DIR/scripts/maina-ios-env.sh"', 'PODFILE_DIR=*)', 'Refusing caller-supplied PODFILE_DIR', 'set -- "$@" "PODFILE_DIR=$PROJECT_DIR/ios"', 'maina_require_storage_path "$derived_data"', 'maina_storage_mkdir "$derived_data"', 'exec /usr/bin/xcodebuild "$@" -derivedDataPath "$derived_data"'], 'xcodebuild shim');
   const badDerivedData = spawnSync(path.join(root, 'scripts/external-bin/xcodebuild'), ['-derivedDataPath', '/tmp', '-version'], { cwd: root, encoding: 'utf8' });
   assert.equal(badDerivedData.status, 78);
   assert.match(badDerivedData.stderr, /escapes the guarded external root/);
+  const badPodfileDir = spawnSync(path.join(root, 'scripts/external-bin/xcodebuild'), ['-workspace', 'ios/Maina.xcworkspace', 'PODFILE_DIR=/tmp', '-version'], { cwd: root, encoding: 'utf8' });
+  assert.equal(badPodfileDir.status, 78);
+  assert.match(badPodfileDir.stderr, /Refusing caller-supplied PODFILE_DIR/);
 }
 
 console.log(`External storage contract verified for ${kind}; protected internal outputs remain local.`);

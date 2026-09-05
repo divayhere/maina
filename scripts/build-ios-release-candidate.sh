@@ -63,6 +63,7 @@ set +e
 xcodebuild -workspace ios/Maina.xcworkspace -scheme Maina -configuration Release \
   -destination 'generic/platform=iOS' -derivedDataPath "$BUILD_ROOT" \
   -allowProvisioningUpdates DEVELOPMENT_TEAM="$TEAM_ID" CODE_SIGN_STYLE=Automatic \
+  PODFILE_DIR="$PROJECT_DIR/ios" \
   2>&1 | tee "$BUILD_LOG"
 build_status=${PIPESTATUS[0]}
 set -e

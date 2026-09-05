@@ -88,7 +88,8 @@ maina_require_storage_path "$BUILD_ROOT" || exit $?
 }
 xcodebuild -workspace ios/Maina.xcworkspace -scheme Maina -configuration Release \
   -destination "platform=iOS,id=$DEVICE_UDID" -derivedDataPath "$BUILD_ROOT" \
-  -allowProvisioningUpdates DEVELOPMENT_TEAM="$TEAM_ID" CODE_SIGN_STYLE=Automatic build
+  -allowProvisioningUpdates DEVELOPMENT_TEAM="$TEAM_ID" CODE_SIGN_STYLE=Automatic \
+  PODFILE_DIR="$PROJECT_DIR/ios" build
 APP="$BUILD_ROOT/Build/Products/Release-iphoneos/Maina.app"
 codesign --verify --deep --strict "$APP"
 

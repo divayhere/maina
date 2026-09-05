@@ -94,6 +94,7 @@ xcodebuild \
   CODE_SIGN_STYLE=Automatic \
   CURRENT_PROJECT_VERSION="$build_number" \
   MARKETING_VERSION="$version" \
+  PODFILE_DIR="$PROJECT_DIR/ios" \
   build
 
 app="$build_root/Build/Products/Release-iphoneos/Maina.app"
