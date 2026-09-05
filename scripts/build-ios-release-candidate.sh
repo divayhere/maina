@@ -8,7 +8,7 @@ source "$PROJECT_DIR/scripts/maina-ios-env.sh"
 
 EXPECTED_FINAL="${MAINA_EXPECTED_FINAL_COMMIT:?Set the exact Admin-reviewed final iOS commit}"
 export MAINA_EXPECTED_FINAL_COMMIT="$EXPECTED_FINAL"
-OUTPUT_DIR="${MAINA_RELEASE_OUTPUT_DIR:-$MAINA_IOS_RELEASE_OUTPUT_ROOT/ios/Maina-0.10.49-31-candidate}"
+OUTPUT_DIR="${MAINA_RELEASE_OUTPUT_DIR:-$MAINA_IOS_RELEASE_OUTPUT_ROOT/ios/Maina-0.10.50-32-candidate}"
 TEAM_ID="${MAINA_IOS_TEAM_ID:-9X4X3R4KCN}"
 [[ "$TEAM_ID" == "9X4X3R4KCN" ]] || { echo "iOS candidate team must remain 9X4X3R4KCN." >&2; exit 2; }
 [[ "$OUTPUT_DIR" == /* ]] || { echo "MAINA_RELEASE_OUTPUT_DIR must be absolute." >&2; exit 2; }
@@ -33,7 +33,7 @@ if [[ -d "$OUTPUT_DIR" && -n "$(find "$OUTPUT_DIR" -mindepth 1 -maxdepth 1 -prin
   echo "iOS evidence output directory is not fresh; refusing to mix prior evidence with a new attempt." >&2
   exit 73
 fi
-BUILD_ROOT="${MAINA_IOS_CANDIDATE_DERIVED_DATA:-$MAINA_IOS_DERIVED_DATA_ROOT/Maina-0.10.49-31-candidate}"
+BUILD_ROOT="${MAINA_IOS_CANDIDATE_DERIVED_DATA:-$MAINA_IOS_DERIVED_DATA_ROOT/Maina-0.10.50-32-candidate}"
 maina_require_storage_path "$BUILD_ROOT" || exit $?
 case "$BUILD_ROOT" in
   "$MAINA_IOS_DERIVED_DATA_ROOT"/*) ;;
@@ -79,11 +79,11 @@ fi
 APP="$BUILD_ROOT/Build/Products/Release-iphoneos/Maina.app"
 DSYM="$BUILD_ROOT/Build/Products/Release-iphoneos/Maina.app.dSYM"
 [[ -d "$APP" && -d "$DSYM" ]] || { echo "Signed app or matching dSYM is missing." >&2; exit 1; }
-APP_ZIP="$OUTPUT_DIR/Maina-0.10.49-31.app.zip"
-DSYM_ZIP="$OUTPUT_DIR/Maina-0.10.49-31.app.dSYM.zip"
+APP_ZIP="$OUTPUT_DIR/Maina-0.10.50-32.app.zip"
+DSYM_ZIP="$OUTPUT_DIR/Maina-0.10.50-32.app.dSYM.zip"
 /usr/bin/ditto -c -k --sequesterRsrc --keepParent "$APP" "$APP_ZIP"
 /usr/bin/ditto -c -k --sequesterRsrc --keepParent "$DSYM" "$DSYM_ZIP"
-node scripts/inspect-exact-artifact.mjs ios release/m3-m4-0.10.49-candidate-plan.json "$APP_ZIP" "$DSYM_ZIP" \
+node scripts/inspect-exact-artifact.mjs ios release/m3-m4-0.10.50-candidate-plan.json "$APP_ZIP" "$DSYM_ZIP" \
   > "$OUTPUT_DIR/ios-inspection.json"
 node scripts/verify-generated-native-release-metadata.mjs ios
 node scripts/verify-build-source-state.mjs ios "$EXPECTED_FINAL"

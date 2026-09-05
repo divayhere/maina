@@ -3,7 +3,7 @@
     "name": "Maina",
     "slug": "maina",
     "owner": "divayheres-team",
-    "version": "0.10.49",
+    "version": "0.10.50",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
     "scheme": "maina",
@@ -11,7 +11,7 @@
     "ios": {
       "icon": "./assets/expo.icon",
       "bundleIdentifier": "com.divay.maina.staging",
-      "buildNumber": "31",
+      "buildNumber": "32",
       "infoPlist": {
         "NSMicrophoneUsageDescription": "Maina records meetings on this iPhone so it can create a private transcript and meeting notes.",
         "UIBackgroundModes": [
@@ -26,7 +26,7 @@
     },
     "android": {
       "package": "com.divay.maina",
-      "versionCode": 75,
+      "versionCode": 76,
       "allowBackup": false,
       "permissions": [
         "RECORD_AUDIO",

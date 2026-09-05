@@ -16,7 +16,7 @@ MODE="${2:-}"
 
 PROVENANCE="${MAINA_RELEASE_PROVENANCE:?Set MAINA_RELEASE_PROVENANCE to the Admin-approved dual-platform provenance}"
 node "$PROJECT_DIR/scripts/release-provenance-cli.mjs" authorize android \
-  "$PROJECT_DIR/release/m3-m4-0.10.49-candidate-plan.json" "$PROVENANCE" "$APK"
+  "$PROJECT_DIR/release/m3-m4-0.10.50-candidate-plan.json" "$PROVENANCE" "$APK"
 
 candidate_sha256="$(shasum -a 256 "$APK" | awk '{print $1}')"
 safe_device="$(printf '%s' "$MAINA_DEVICE_SERIAL" | tr -cd 'A-Za-z0-9._-')"
