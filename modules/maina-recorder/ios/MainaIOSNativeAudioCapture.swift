@@ -52,6 +52,10 @@ final class MainaIOSNativeAudioCapture: NSObject, AVAudioRecorderDelegate, CXCal
   private var communicationActive = false
   private var recoveryGeneration = 0
   private var recoveryBackgroundTask: UIBackgroundTaskIdentifier = .invalid
+  private var recoveryAwaitingPublicSignal = false
+  private var recoveryReasonCode: String?
+  private var platformHoldCount = 0
+  private var recoverySignalCount = 0
   private var lastStorageCheckUptime: TimeInterval = 0
   private var freeStorageBytes: Int64 = 0
   private var onRouteChanged: (([String: Any]) -> Void)?
@@ -105,6 +109,10 @@ final class MainaIOSNativeAudioCapture: NSObject, AVAudioRecorderDelegate, CXCal
       self.peakDbfs = -90
       self.deliberatelyPaused = false
       self.interrupted = false
+      self.recoveryAwaitingPublicSignal = false
+      self.recoveryReasonCode = nil
+      self.platformHoldCount = 0
+      self.recoverySignalCount = 0
       self.recoveryGeneration += 1
       self.lastStorageCheckUptime = 0
       self.freeStorageBytes = Self.availableStorageBytes(at: directory)
@@ -152,11 +160,29 @@ final class MainaIOSNativeAudioCapture: NSObject, AVAudioRecorderDelegate, CXCal
     try queue.sync {
       guard state == .paused else { throw CaptureError.invalidState("Maina is not paused.") }
       let observerCallActive = refreshCommunicationActiveFromObserver()
-      guard MainaIOSCallRecoveryPolicy.manualResumeAllowed(
+      switch MainaIOSCallRecoveryPolicy.manualResumeAction(
+        interrupted: interrupted,
+        deliberatelyPaused: deliberatelyPaused,
         communicationActive: communicationActive,
         observerCallActive: observerCallActive
-      ) else {
+      ) {
+      case .queueSystemRecovery:
+        recoverySignalCount += 1
+        recoveryAwaitingPublicSignal = true
+        recoveryReasonCode = "manual-system-recovery-requested"
+        appendJournal("manual-system-recovery-requested", fields: [
+          "generation": recoveryGeneration,
+        ])
+        scheduleRecovery(reason: "manual-resume-request")
+        return [
+          "requested": true,
+          "waiting": state != .recording,
+          "recoveryReasonCode": recoveryReasonCode ?? "system-recovery-pending",
+        ]
+      case .rejectCommunicationActive:
         throw CaptureError.invalidState("The microphone is still owned by a call or system interruption.")
+      case .resumeDeliberatePause:
+        break
       }
       cancelSystemRecovery(reason: "manual-resume")
       state = .resuming
@@ -220,6 +246,10 @@ final class MainaIOSNativeAudioCapture: NSObject, AVAudioRecorderDelegate, CXCal
         "peakDbfs": peakDbfs,
         "freeStorageBytes": freeStorageBytes,
         "storageReserveBytes": Self.storageReserveBytes,
+        "recoveryAwaitingPublicSignal": recoveryAwaitingPublicSignal,
+        "recoveryReasonCode": recoveryReasonCode ?? NSNull(),
+        "platformHoldCount": platformHoldCount,
+        "recoverySignalCount": recoverySignalCount,
       ]
       if let meetingId { result["meetingId"] = meetingId }
       if state == .paused {
@@ -545,6 +575,8 @@ final class MainaIOSNativeAudioCapture: NSObject, AVAudioRecorderDelegate, CXCal
     // interruption-ended notification is delayed. Treat it as another bounded
     // recovery signal while preserving the same meeting and closed chunks.
     if state == .paused, interrupted, !deliberatelyPaused {
+      recoverySignalCount += 1
+      recoveryReasonCode = "route-change-signal"
       appendJournal("route-change-while-interrupted", fields: [
         "reason": String(describing: reason ?? .unknown),
         "route": routeDescription(),
@@ -613,6 +645,8 @@ final class MainaIOSNativeAudioCapture: NSObject, AVAudioRecorderDelegate, CXCal
         appendJournal("interruption-ended", fields: ["resumed": false])
         return
       }
+      recoverySignalCount += 1
+      recoveryReasonCode = "interruption-ended-signal"
       appendJournal("interruption-ended", fields: [
         "systemSuggestedResume": options.contains(.shouldResume),
         "communicationActive": observerCallActive,
@@ -633,6 +667,8 @@ final class MainaIOSNativeAudioCapture: NSObject, AVAudioRecorderDelegate, CXCal
   private func recoverWhenAppBecomesActive() {
     let observerCallActive = refreshCommunicationActiveFromObserver()
     guard state == .paused, interrupted, !deliberatelyPaused, !observerCallActive else { return }
+    recoverySignalCount += 1
+    recoveryReasonCode = "app-active-wake"
     appendJournal("foreground-recovery-check", fields: [:])
     scheduleRecovery(reason: "foreground-recovery")
   }
@@ -662,6 +698,8 @@ final class MainaIOSNativeAudioCapture: NSObject, AVAudioRecorderDelegate, CXCal
       return
     }
     if attempt == 0 {
+      recoveryAwaitingPublicSignal = false
+      recoveryReasonCode = reason
       beginRecoveryBackgroundTaskIfNeeded(reason: reason)
     }
     let generation = recoveryGeneration
@@ -686,6 +724,8 @@ final class MainaIOSNativeAudioCapture: NSObject, AVAudioRecorderDelegate, CXCal
         self.state = .recording
         self.interrupted = false
         self.routeRecoveryActive = false
+        self.recoveryAwaitingPublicSignal = false
+        self.recoveryReasonCode = "recovered"
         self.routeRestartCount += 1
         self.lastError = nil
         let gap = max(0, (ProcessInfo.processInfo.systemUptime - (self.recoveryStartedUptime ?? ProcessInfo.processInfo.systemUptime)) * 1_000)
@@ -702,12 +742,21 @@ final class MainaIOSNativeAudioCapture: NSObject, AVAudioRecorderDelegate, CXCal
         self.onRouteChanged?(self.routeEvent(change: "active-route"))
       } catch {
         let nsError = error as NSError
+        let disposition = MainaIOSCallRecoveryPolicy.failureDisposition(
+          domain: nsError.domain,
+          code: nsError.code
+        )
+        if disposition == .temporaryPlatformHold {
+          self.platformHoldCount += 1
+          self.recoveryReasonCode = "cannot-interrupt-others"
+          self.lastError = "iPhone is still releasing the microphone. Maina will continue this meeting on the next permitted wake."
+        }
         self.appendJournal("capture-recovery-attempt-failed", fields: [
           "reason": reason,
           "attempt": attempt + 1,
-          "error": error.localizedDescription,
           "errorDomain": nsError.domain,
           "errorCode": nsError.code,
+          "failureDisposition": disposition == .temporaryPlatformHold ? "temporary-platform-hold" : "other",
         ])
         let nextAttempt = attempt + 1
         if self.canContinueRecoveryWatcher() {
@@ -720,8 +769,19 @@ final class MainaIOSNativeAudioCapture: NSObject, AVAudioRecorderDelegate, CXCal
           )
         } else {
           self.routeRecoveryActive = false
-          self.lastError = "Microphone recovery is paused safely. Reopen Maina to continue this recording."
-          self.appendJournal("capture-recovery-deferred", fields: ["reason": reason])
+          self.recoveryAwaitingPublicSignal = MainaIOSCallRecoveryPolicy.shouldRetainPendingGeneration(
+            disposition: disposition,
+            stopped: self.state == .idle || self.state == .finalizing,
+            manuallyPaused: self.deliberatelyPaused
+          )
+          if !self.recoveryAwaitingPublicSignal {
+            self.lastError = "Microphone recovery is paused safely. Reopen Maina to continue this recording."
+          }
+          self.appendJournal("capture-recovery-deferred", fields: [
+            "reason": reason,
+            "recoveryReasonCode": self.recoveryReasonCode ?? "other",
+            "awaitingPublicSignal": self.recoveryAwaitingPublicSignal,
+          ])
           self.endRecoveryBackgroundTask()
         }
       }
@@ -750,9 +810,18 @@ final class MainaIOSNativeAudioCapture: NSObject, AVAudioRecorderDelegate, CXCal
     let task: UIBackgroundTaskIdentifier = queue.sync {
       let current = recoveryBackgroundTask
       guard current != .invalid else { return .invalid }
-      appendJournal("capture-recovery-background-time-expired", fields: ["reason": reason])
+      let temporaryPlatformHold = recoveryReasonCode == "cannot-interrupt-others"
+      recoveryAwaitingPublicSignal = temporaryPlatformHold && state == .paused && interrupted && !deliberatelyPaused
+      appendJournal("capture-recovery-background-time-expired", fields: [
+        "reason": reason,
+        "awaitingPublicSignal": recoveryAwaitingPublicSignal,
+      ])
       routeRecoveryActive = false
-      lastError = "Microphone recovery is paused safely. Reopen Maina to continue this recording."
+      if !recoveryAwaitingPublicSignal {
+        lastError = "Microphone recovery is paused safely. Reopen Maina to continue this recording."
+      }
+      // Revoke any timer owned by the exhausted UIKit assertion while keeping
+      // exactly one pending recovery generation for the next public signal.
       recoveryGeneration += 1
       recoveryBackgroundTask = .invalid
       return current
@@ -787,6 +856,8 @@ final class MainaIOSNativeAudioCapture: NSObject, AVAudioRecorderDelegate, CXCal
     deliberatelyPaused = false
     interrupted = false
     routeRecoveryActive = false
+    recoveryAwaitingPublicSignal = false
+    recoveryReasonCode = nil
     endRecoveryBackgroundTask()
   }
 
@@ -798,6 +869,8 @@ final class MainaIOSNativeAudioCapture: NSObject, AVAudioRecorderDelegate, CXCal
     recoveryGeneration += 1
     recoveryStartedUptime = ProcessInfo.processInfo.systemUptime
     routeRecoveryActive = false
+    recoveryAwaitingPublicSignal = false
+    recoveryReasonCode = reason
     endRecoveryBackgroundTask()
     interrupted = true
     stopTimers()
@@ -810,6 +883,8 @@ final class MainaIOSNativeAudioCapture: NSObject, AVAudioRecorderDelegate, CXCal
   private func cancelSystemRecovery(reason: String) {
     recoveryGeneration += 1
     routeRecoveryActive = false
+    recoveryAwaitingPublicSignal = false
+    recoveryReasonCode = "cancelled"
     endRecoveryBackgroundTask()
     appendJournal("capture-recovery-cancelled", fields: ["reason": reason, "generation": recoveryGeneration])
   }
@@ -847,6 +922,8 @@ final class MainaIOSNativeAudioCapture: NSObject, AVAudioRecorderDelegate, CXCal
       return
     }
     guard state == .paused, interrupted, !deliberatelyPaused else { return }
+    recoverySignalCount += 1
+    recoveryReasonCode = "call-ended-signal"
     scheduleRecovery(reason: "call-observer-ended")
   }
 

@@ -53,6 +53,80 @@ let newlyObservedCall = MainaIOSCallRecoveryPolicy.refreshedCommunicationActive(
 )
 require(newlyObservedCall, "a currently observed call must still veto recovery")
 
+require(
+  MainaIOSCallRecoveryPolicy.manualResumeAction(
+    interrupted: true,
+    deliberatelyPaused: false,
+    communicationActive: true,
+    observerCallActive: true
+  ) == .queueSystemRecovery,
+  "Resume during a system pause must queue one recovery even while the call remains active"
+)
+require(
+  MainaIOSCallRecoveryPolicy.manualResumeAction(
+    interrupted: true,
+    deliberatelyPaused: true,
+    communicationActive: true,
+    observerCallActive: true
+  ) == .rejectCommunicationActive,
+  "a deliberate pause must not be converted into automatic system recovery"
+)
+require(
+  MainaIOSCallRecoveryPolicy.manualResumeAction(
+    interrupted: false,
+    deliberatelyPaused: true,
+    communicationActive: false,
+    observerCallActive: false
+  ) == .resumeDeliberatePause,
+  "a deliberate pause resumes only through the ordinary manual path"
+)
+
+require(
+  MainaIOSCallRecoveryPolicy.failureDisposition(
+    domain: NSOSStatusErrorDomain,
+    code: 560_557_684
+  ) == .temporaryPlatformHold,
+  "cannotInterruptOthers must remain a temporary platform hold"
+)
+require(
+  MainaIOSCallRecoveryPolicy.failureDisposition(
+    domain: NSOSStatusErrorDomain,
+    code: 560_557_685
+  ) == .other,
+  "a neighboring OSStatus must not be classified as cannotInterruptOthers"
+)
+require(
+  MainaIOSCallRecoveryPolicy.failureDisposition(
+    domain: "OtherDomain",
+    code: 560_557_684
+  ) == .other,
+  "the platform hold classification must bind both domain and code"
+)
+require(
+  MainaIOSCallRecoveryPolicy.shouldRetainPendingGeneration(
+    disposition: .temporaryPlatformHold,
+    stopped: false,
+    manuallyPaused: false
+  ),
+  "a live system pause must retain one pending recovery generation"
+)
+require(
+  !MainaIOSCallRecoveryPolicy.shouldRetainPendingGeneration(
+    disposition: .temporaryPlatformHold,
+    stopped: true,
+    manuallyPaused: false
+  ),
+  "Stop or save must revoke a pending platform hold"
+)
+require(
+  !MainaIOSCallRecoveryPolicy.shouldRetainPendingGeneration(
+    disposition: .temporaryPlatformHold,
+    stopped: false,
+    manuallyPaused: true
+  ),
+  "deliberate manual pause must revoke automatic recovery"
+)
+
 print("iOS call-recovery policy tests passed.")
   }
 }

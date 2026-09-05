@@ -24,6 +24,7 @@ const sherpaHeaders = path.join(moduleRoot, 'ios', 'vendor', 'sherpa-onnx.xcfram
 const config = JSON.parse(readFileSync(path.join(moduleRoot, 'expo-module.config.json'), 'utf8'));
 const appConfig = JSON.parse(readFileSync(path.join(project, 'app.json'), 'utf8'));
 const captureSource = readFileSync(capture, 'utf8');
+const callRecoveryPolicySource = readFileSync(callRecoveryPolicy, 'utf8');
 
 for (const file of [capture, module, podspec, qwen, continuedProcessing, continuedProcessingPolicy, continuedProcessingPolicyTests, callRecoveryPolicy, callRecoveryPolicyTests, pipelineWake, pipelineWakePolicy, pipelineWakePolicyTests, continuedProcessingPlugin]) {
   if (!existsSync(file) || readFileSync(file, 'utf8').trim().length === 0) {
@@ -73,6 +74,12 @@ for (const token of [
   'CXCallObserver',
   'capture-recovery-vetoed-by-call',
   'MainaIOSCallRecoveryPolicy.action',
+  'MainaIOSCallRecoveryPolicy.failureDisposition',
+  'MainaIOSCallRecoveryPolicy.manualResumeAction',
+  'recoveryAwaitingPublicSignal',
+  'manual-system-recovery-requested',
+  'awaitingPublicSignal',
+  'recoverySignalCount',
   'MainaIOSCallRecoveryPolicy.refreshedCommunicationActive',
   'refreshCommunicationActiveFromObserver()',
   'chunk-allocated',
@@ -80,6 +87,18 @@ for (const token of [
 ]) {
   if (!captureSource.includes(token)) {
     throw new Error(`iOS recorder reliability invariant missing: ${token}`);
+  }
+}
+for (const token of [
+  'cannotInterruptOthersDomain = NSOSStatusErrorDomain',
+  'cannotInterruptOthersCode = 560_557_684',
+  'domain == cannotInterruptOthersDomain && code == cannotInterruptOthersCode',
+  'case queueSystemRecovery',
+  'case resumeDeliberatePause',
+  'case rejectCommunicationActive',
+]) {
+  if (!callRecoveryPolicySource.includes(token)) {
+    throw new Error(`iOS call-recovery policy invariant missing: ${token}`);
   }
 }
 for (const token of [
@@ -201,6 +220,33 @@ const scheduledRecoveryEnd = captureSource.indexOf('private func beginRecoveryBa
 const scheduledRecoverySource = captureSource.slice(scheduledRecoveryStart, scheduledRecoveryEnd);
 if ((scheduledRecoverySource.match(/refreshCommunicationActiveFromObserver\(\)/g) ?? []).length < 2) {
   throw new Error('iOS scheduled recovery must refresh exact CallKit state both before scheduling and before microphone reacquisition.');
+}
+const manualResumeStart = captureSource.indexOf('func resume() throws');
+const manualResumeEnd = captureSource.indexOf('func stop()', manualResumeStart);
+const manualResumeSource = captureSource.slice(manualResumeStart, manualResumeEnd);
+for (const token of [
+  'case .queueSystemRecovery:',
+  'case .rejectCommunicationActive:',
+  'case .resumeDeliberatePause:',
+  'recoveryAwaitingPublicSignal = true',
+  'scheduleRecovery(reason: "manual-resume-request")',
+  '"waiting": state != .recording',
+]) {
+  if (!manualResumeSource.includes(token)) {
+    throw new Error(`iOS system-pause Resume invariant missing: ${token}`);
+  }
+}
+const backgroundExpiryStart = captureSource.indexOf('private func expireRecoveryBackgroundTaskSynchronously');
+const backgroundExpiryEnd = captureSource.indexOf('private func endRecoveryBackgroundTask', backgroundExpiryStart);
+const backgroundExpirySource = captureSource.slice(backgroundExpiryStart, backgroundExpiryEnd);
+for (const token of [
+  'recoveryReasonCode == "cannot-interrupt-others"',
+  'recoveryAwaitingPublicSignal = temporaryPlatformHold',
+  'recoveryGeneration += 1',
+]) {
+  if (!backgroundExpirySource.includes(token)) {
+    throw new Error(`iOS background-exhaustion pending-generation invariant missing: ${token}`);
+  }
 }
 
 // This is intentionally a macOS-only static gate; Linux CI still runs TS tests.

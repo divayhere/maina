@@ -76,6 +76,15 @@ export interface NativeCaptureStatus {
   peakDbfs?: number;
   freeStorageBytes?: number;
   storageReserveBytes?: number;
+  systemDraining?: boolean;
+  systemDrainReadCount?: number;
+  systemRetainedResumeCount?: number;
+  systemRecreationResumeCount?: number;
+  systemRecoveryReason?: string | null;
+  recoveryAwaitingPublicSignal?: boolean;
+  recoveryReasonCode?: string | null;
+  platformHoldCount?: number;
+  recoverySignalCount?: number;
 }
 
 export interface NativeCaptureDirectoryInspection {

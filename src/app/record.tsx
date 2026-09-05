@@ -1045,11 +1045,14 @@ export default function RecordScreen() {
         // the screen paused until the service proves AudioRecord ownership.
         const resumedStatus = await getNativeCaptureStatusAsync().catch(() => null);
         if (nativeCapturePresentation(resumedStatus?.state) === 'recording') {
+          showCaptureNote(null);
           pausedRef.current = false;
           setPaused(false);
           healthRef.current.pauseEnded(Date.now());
           listeningRef.current = true;
           setListening(true);
+        } else if (resumedStatus?.pauseReason === 'communication') {
+          showCaptureNote('Waiting for the phone to release the microphone. Maina will continue this meeting as soon as the system allows it.');
         }
         log.info('record', 'native resume requested', { nativeStatus: resumedStatus });
         return;
