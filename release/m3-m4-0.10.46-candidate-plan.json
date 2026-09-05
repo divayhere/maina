@@ -1,0 +1,195 @@
+{
+  "schemaVersion": "maina.release-plan.v1",
+  "releaseId": "maina-m3-m4-0.10.46",
+  "release": {
+    "version": "0.10.46",
+    "androidVersionCode": 72,
+    "iosBuildNumber": "28"
+  },
+  "sources": {
+    "android": {
+      "repository": "/Users/divay/Developer/MainaV2",
+      "branch": "codex/mobile-memory-m3-m4",
+      "productCommit": "9a11e9558437ea0128e77f9b800b2df108c7a8ab"
+    },
+    "ios": {
+      "repository": "/Users/divay/Developer/.worktrees/maina-ios-feasibility",
+      "branch": "codex/ios-mobile-memory-m3-m4",
+      "productCommit": "6f0a23a4321411e03146f423cedc24eabb75f989"
+    },
+    "coordinationCommit": "fb972b00571a1be29351da022521aabbc781ec4b",
+    "backendSourceCommit": "b879876506aaf7a18f4c2d26b9c5442629f68190",
+    "backendProductionDeployment": "c6b5f0ce-5631-48bf-a83b-c76a2f6c99d0"
+  },
+  "identity": {
+    "androidPackage": "com.divay.maina",
+    "iosBundleIdentifier": "com.divay.maina.staging",
+    "iosTeamId": "9X4X3R4KCN"
+  },
+  "artifactPolicy": {
+    "android": {
+      "signerCertificateSha256": "fac61745dc0903786fb9ede62a962b399f7348f0bb6f899b8332667591033b9c",
+      "permissions": [
+        "android.permission.ACCESS_NETWORK_STATE",
+        "android.permission.ACCESS_WIFI_STATE",
+        "android.permission.FOREGROUND_SERVICE",
+        "android.permission.FOREGROUND_SERVICE_MEDIA_PROCESSING",
+        "android.permission.FOREGROUND_SERVICE_MICROPHONE",
+        "android.permission.INTERNET",
+        "android.permission.POST_NOTIFICATIONS",
+        "android.permission.READ_EXTERNAL_STORAGE",
+        "android.permission.RECEIVE_BOOT_COMPLETED",
+        "android.permission.RECORD_AUDIO",
+        "android.permission.SYSTEM_ALERT_WINDOW",
+        "android.permission.USE_BIOMETRIC",
+        "android.permission.USE_FINGERPRINT",
+        "android.permission.VIBRATE",
+        "android.permission.WAKE_LOCK",
+        "android.permission.WRITE_EXTERNAL_STORAGE",
+        "com.divay.maina.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION"
+      ],
+      "components": [
+        { "type": "activity", "name": "com.divay.maina.MainActivity", "exported": "true", "permission": null, "process": null },
+        { "type": "activity", "name": "expo.modules.webbrowser.BrowserProxyActivity", "exported": "false", "permission": null, "process": null },
+        { "type": "provider", "name": "androidx.startup.InitializationProvider", "exported": "false", "permission": null, "process": null },
+        { "type": "provider", "name": "expo.modules.clipboard.ClipboardFileProvider", "exported": "false", "permission": null, "process": null },
+        { "type": "provider", "name": "expo.modules.filesystem.FileSystemFileProvider", "exported": "false", "permission": null, "process": null },
+        { "type": "provider", "name": "expo.modules.sharing.SharingFileProvider", "exported": "false", "permission": null, "process": null },
+        { "type": "provider", "name": "io.sentry.android.core.SentryInitProvider", "exported": "false", "permission": null, "process": null },
+        { "type": "provider", "name": "io.sentry.android.core.SentryPerformanceProvider", "exported": "false", "permission": null, "process": null },
+        { "type": "receiver", "name": "androidx.profileinstaller.ProfileInstallReceiver", "exported": "true", "permission": "android.permission.DUMP", "process": null },
+        { "type": "receiver", "name": "androidx.work.impl.background.systemalarm.ConstraintProxy$BatteryChargingProxy", "exported": "false", "permission": null, "process": null },
+        { "type": "receiver", "name": "androidx.work.impl.background.systemalarm.ConstraintProxy$BatteryNotLowProxy", "exported": "false", "permission": null, "process": null },
+        { "type": "receiver", "name": "androidx.work.impl.background.systemalarm.ConstraintProxy$NetworkStateProxy", "exported": "false", "permission": null, "process": null },
+        { "type": "receiver", "name": "androidx.work.impl.background.systemalarm.ConstraintProxy$StorageNotLowProxy", "exported": "false", "permission": null, "process": null },
+        { "type": "receiver", "name": "androidx.work.impl.background.systemalarm.ConstraintProxyUpdateReceiver", "exported": "false", "permission": null, "process": null },
+        { "type": "receiver", "name": "androidx.work.impl.background.systemalarm.RescheduleReceiver", "exported": "false", "permission": null, "process": null },
+        { "type": "receiver", "name": "androidx.work.impl.diagnostics.DiagnosticsReceiver", "exported": "true", "permission": "android.permission.DUMP", "process": null },
+        { "type": "receiver", "name": "androidx.work.impl.utils.ForceStopRunnable$BroadcastReceiver", "exported": "false", "permission": null, "process": null },
+        { "type": "receiver", "name": "com.divay.maina.recorder.MainaCommandReceiver", "exported": "true", "permission": null, "process": null },
+        { "type": "receiver", "name": "expo.modules.taskManager.TaskBroadcastReceiver", "exported": "false", "permission": null, "process": null },
+        { "type": "service", "name": "androidx.room.MultiInstanceInvalidationService", "exported": "false", "permission": null, "process": null },
+        { "type": "service", "name": "androidx.work.impl.background.systemalarm.SystemAlarmService", "exported": "false", "permission": null, "process": null },
+        { "type": "service", "name": "androidx.work.impl.background.systemjob.SystemJobService", "exported": "true", "permission": "android.permission.BIND_JOB_SERVICE", "process": null },
+        { "type": "service", "name": "androidx.work.impl.foreground.SystemForegroundService", "exported": "false", "permission": null, "process": null },
+        { "type": "service", "name": "com.divay.maina.recorder.MainaKeyAccessibilityService", "exported": "true", "permission": "android.permission.BIND_ACCESSIBILITY_SERVICE", "process": ":remote_control" },
+        { "type": "service", "name": "com.divay.maina.recorder.MainaPostProcessingService", "exported": "false", "permission": null, "process": ":asr" },
+        { "type": "service", "name": "com.divay.maina.recorder.MainaRecordingService", "exported": "false", "permission": null, "process": null },
+        { "type": "service", "name": "expo.modules.taskManager.TaskJobService", "exported": "false", "permission": "android.permission.BIND_JOB_SERVICE", "process": null }
+      ]
+    },
+    "ios": {
+      "designatedRequirement": "identifier \"com.divay.maina.staging\" and anchor apple generic and certificate leaf[subject.CN] = \"Apple Development: divayk@gmail.com (P58B74W27N)\" and certificate 1[field.1.2.840.113635.100.6.2.1] /* exists */",
+      "profileName": "iOS Team Provisioning Profile: com.divay.maina.staging",
+      "appEntitlements": {
+        "application-identifier": "9X4X3R4KCN.com.divay.maina.staging",
+        "com.apple.developer.team-identifier": "9X4X3R4KCN",
+        "get-task-allow": true
+      },
+      "profileEntitlements": {
+        "application-identifier": "9X4X3R4KCN.com.divay.maina.staging",
+        "com.apple.developer.team-identifier": "9X4X3R4KCN",
+        "get-task-allow": true,
+        "keychain-access-groups": ["9X4X3R4KCN.*"]
+      }
+    }
+  },
+  "toolchains": {
+    "nodeMajor": 24,
+    "expo": "~57.0.18",
+    "reactNative": "0.86.3",
+    "android": {
+      "jdkMajor": 17,
+      "gradle": "9.3.1",
+      "abi": "arm64-v8a",
+      "compileSdk": 36,
+      "targetSdk": 36
+    },
+    "ios": {
+      "cocoaPods": "1.17.0",
+      "minimumOs": "16.4",
+      "minimumProfileWindowHours": 48
+    }
+  },
+  "featureFlagDefaults": {
+    "mobileMemorySurfaceV1": false,
+    "mobileCloudMeetingsV1": false,
+    "mobileFrozenHandoffV1": false,
+    "mobileMemoryPulseV1": false,
+    "mobileSavedRecallsV1": false,
+    "mobileVerifiedLinksV1": false,
+    "pulseBackgroundPolling": false,
+    "smartRecallAutomaticExecution": false,
+    "pulseRefreshMode": "manual-only",
+    "smartRecallExecutionMode": "manual-only"
+  },
+  "provenancePolicy": {
+    "schema": "release/provenance-0.10.46.schema.json",
+    "initialApproval": { "status": "candidate", "approvedBy": null, "approvedAt": null },
+    "requiresBothExactArtifactsBeforeAuthorization": true,
+    "requiresFreshDualArtifactAndBuildLogRevalidation": true
+  },
+  "postInstallQualification": {
+    "drawerAccessibility": {
+      "sourceContract": "src/design/shell.accessibility.test.mjs",
+      "openMenuLabel": "Open menu",
+      "closeMenuLabel": "Close menu",
+      "requiredDefaultOffDestinationButtons": [
+        { "label": "Settings", "route": "/settings" },
+        { "label": "Privacy & storage", "route": "/settings" },
+        { "label": "Help", "route": "/help" },
+        { "label": "Send feedback", "route": "mailto:hello@maina.app?subject=Maina%20feedback" }
+      ],
+      "conditionalDestinationButtons": [
+        { "label": "Memory", "route": "/memory", "requiresFlag": "mobileMemorySurfaceV1" }
+      ],
+      "requiredSemantics": "every listed control is an exact accessibilityRole button with its exact accessibilityLabel; Settings must be both named and clickable in the installed accessibility tree",
+      "android": "public accessibility tree only; no private IDs, run-as, log inference, or persisted raw hierarchy",
+      "ios": "safe XCUITest accessibility surface only; no clipboard or credential action"
+    },
+    "androidCallInterruptionSafety": {
+      "sourceContract": "modules/maina-recorder/android/src/test/java/com/divay/maina/recorder/MainaCallInterruptionPolicyTest.kt",
+      "nativeVerifier": "scripts/verify-native-recorder.mjs",
+      "requiredInstalledTruths": {
+        "communicationActivePausesAndLatchesPcmPersistence": true,
+        "communicationClearAutoResumesSystemOwnedPause": true,
+        "manualPauseNeverAutoResumes": true,
+        "terminalStopOrAbortCancelsPendingResume": true,
+        "terminalTombstoneBlocksAutoResumeAfterProcessRestore": true,
+        "noCommunicationAudioPersisted": true
+      },
+      "physicalTest3Required": true
+    },
+    "iosCallInterruptionSafety": {
+      "sourceContract": "scripts/fixtures/MainaIOSCallRecoveryPolicyTests.swift",
+      "nativeVerifier": "scripts/verify-ios-native-recorder.mjs",
+      "requiredSourceTruths": {
+        "callKitObserverRefreshOverridesStaleCachedCommunicationState": true,
+        "activeObservedCallVetoesRecovery": true,
+        "endedOrRejectedCallStartsUnattendedRecovery": true,
+        "manualPauseNeverAutoResumes": true,
+        "duplicateRecoverySignalsCoalesce": true
+      },
+      "physicalTest3Required": true
+    },
+    "androidPublicIdentityLimitations": {
+      "stableVisibleMeetingJobSourceIdentities": "limited",
+      "logicalOutboxIdentity": "limited",
+      "reason": "The approved Android public accessibility surface exposes an existing clickable meeting card and Notes route, but not a stable meeting/job/source identifier."
+    }
+  },
+  "buildPolicy": {
+    "sequence": ["android", "admin-android-audit", "ios", "admin-ios-audit"],
+    "maximumBuildsPerPlatform": 1,
+    "cleanPrebuild": true,
+    "requireCleanHeadEqualsUpstream": true,
+    "requireExactGeneratedNativeMetadata": true,
+    "stopOn": [
+      "source-drift",
+      "enospc-or-io",
+      "signing-failure",
+      "uncontrolled-growth",
+      "evidence-failure"
+    ]
+  }
+}
