@@ -1,5 +1,6 @@
 package com.divay.maina.recorder
 
+import android.app.ActivityManager
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
@@ -206,11 +207,56 @@ class MainaRecorderModule : Module() {
             MainaPostProcessingOutbox.shared(requireContext()).read(meetingId)
         }
 
+        Function("isNativePostProcessingServiceRunning") {
+            val manager = requireContext().getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
+            @Suppress("DEPRECATION")
+            manager.getRunningServices(Int.MAX_VALUE).any {
+                it.service.className == MainaPostProcessingService::class.java.name
+            }
+        }
+
         AsyncFunction("acknowledgeNativePostProcessingResult") { meetingId: String, runId: String ->
             mapOf(
                 "acknowledged" to MainaPostProcessingOutbox.shared(requireContext())
                     .acknowledge(meetingId, runId),
             )
+        }
+
+        AsyncFunction("schedulePipelineWake") {
+                generation: Long,
+                requiresNetwork: Boolean,
+                notBeforeAt: Long,
+                scheduleRevision: Long,
+                previousWorkId: String?,
+                previousNotBeforeAt: Long?,
+                previousScheduleRevision: Long?,
+                schedulerProtocolVersion: Int,
+            ->
+            if (schedulerProtocolVersion != 2) {
+                return@AsyncFunction mapOf(
+                    "scheduled" to false,
+                    "workId" to previousWorkId,
+                    "errorCode" to "unsupported_scheduler_protocol",
+                )
+            }
+            val result = MainaPipelineWakeScheduler.enqueueShared(
+                requireContext(), generation, requiresNetwork, notBeforeAt,
+                scheduleRevision, previousWorkId, previousNotBeforeAt,
+                previousScheduleRevision,
+            )
+            mapOf(
+                "scheduled" to result.scheduled,
+                "workId" to result.workId,
+                "errorCode" to result.errorCode,
+            )
+        }
+
+        AsyncFunction("completePipelineWake") { attemptToken: String, succeeded: Boolean ->
+            mapOf("completed" to MainaPipelineWakeCompletion.complete(attemptToken, succeeded))
+        }
+
+        AsyncFunction("isPipelineWakeAttemptActive") { attemptToken: String ->
+            mapOf("active" to MainaPipelineWakeCompletion.isActive(attemptToken))
         }
 
         Function("getNativeCaptureStatus") {
