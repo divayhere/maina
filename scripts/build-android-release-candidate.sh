@@ -7,7 +7,7 @@ source "$PROJECT_DIR/scripts/maina-build-env.sh"
 "$PROJECT_DIR/scripts/restore-external-build-links.sh" dependencies
 
 EXPECTED_FINAL="${MAINA_EXPECTED_FINAL_COMMIT:?Set the exact Admin-reviewed final Android commit}"
-OUTPUT_DIR="${MAINA_RELEASE_OUTPUT_DIR:-$MAINA_RELEASE_OUTPUT_ROOT/android/Maina-0.10.45-71-candidate}"
+OUTPUT_DIR="${MAINA_RELEASE_OUTPUT_DIR:-$MAINA_RELEASE_OUTPUT_ROOT/android/Maina-0.10.46-72-candidate}"
 [[ "$OUTPUT_DIR" == /* ]] || { echo "MAINA_RELEASE_OUTPUT_DIR must be absolute." >&2; exit 2; }
 maina_require_storage_path "$OUTPUT_DIR" || exit $?
 case "$OUTPUT_DIR" in
@@ -67,9 +67,9 @@ fi
 
 APK="$MAINA_ANDROID_OUTPUT_ROOT/_app/outputs/apk/release/app-release.apk"
 [[ -n "$APK" && -f "$APK" ]] || { echo "Exact release APK was not produced." >&2; exit 1; }
-HELD_APK="$OUTPUT_DIR/Maina-0.10.45-71.apk"
+HELD_APK="$OUTPUT_DIR/Maina-0.10.46-72.apk"
 cp "$APK" "$HELD_APK"
-node scripts/inspect-exact-artifact.mjs android release/m3-m4-0.10.45-candidate-plan.json "$HELD_APK" \
+node scripts/inspect-exact-artifact.mjs android release/m3-m4-0.10.46-candidate-plan.json "$HELD_APK" \
   > "$OUTPUT_DIR/android-inspection.json"
 node scripts/verify-generated-native-release-metadata.mjs android
 node scripts/verify-build-source-state.mjs android "$EXPECTED_FINAL"
