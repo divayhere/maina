@@ -152,14 +152,29 @@ function runCommand(command, args, { input } = {}) {
   return Object.freeze({ ok: result.status === 0, stdout: result.stdout ?? '', stderr: result.stderr ?? '' });
 }
 
-function collectProvisioningProfiles({ env, run }) {
+export function collectProvisioningProfiles({
+  env,
+  run,
+  listProfilePaths = discoverProvisioningProfilePaths,
+}) {
+  const profiles = [];
+  for (const path of listProfilePaths(env)) {
+    const decoded = run('/usr/bin/security', ['cms', '-D', '-i', path]);
+    if (!decoded.ok) continue;
+    const profile = parseProvisioningProfile(decoded.stdout, run);
+    if (profile) profiles.push(profile);
+  }
+  return profiles;
+}
+
+function discoverProvisioningProfilePaths(env) {
   const directories = env.MAINA_IOS_PROVISIONING_PROFILE_DIRS
     ? env.MAINA_IOS_PROVISIONING_PROFILE_DIRS.split(delimiter).filter(Boolean)
     : [
         join(env.HOME ?? homedir(), 'Library', 'MobileDevice', 'Provisioning Profiles'),
         join(env.HOME ?? homedir(), 'Library', 'Developer', 'Xcode', 'UserData', 'Provisioning Profiles'),
       ];
-  const profiles = [];
+  const paths = [];
   for (const directory of directories) {
     let entries;
     try {
@@ -169,18 +184,85 @@ function collectProvisioningProfiles({ env, run }) {
     }
     for (const entry of entries) {
       if (!entry.isFile() || !/\.(?:mobileprovision|provisionprofile)$/.test(entry.name)) continue;
-      const decoded = run('/usr/bin/security', ['cms', '-D', '-i', join(directory, entry.name)]);
-      if (!decoded.ok) continue;
-      const converted = run('/usr/bin/plutil', ['-convert', 'json', '-o', '-', '-'], { input: decoded.stdout });
-      if (!converted.ok) continue;
-      try {
-        profiles.push(JSON.parse(converted.stdout));
-      } catch {
-        // A malformed profile is unavailable, not evidence for readiness.
-      }
+      paths.push(join(directory, entry.name));
     }
   }
-  return profiles;
+  return paths;
+}
+
+function parseProvisioningProfile(plist, run) {
+  const uniqueKeys = [
+    'Name',
+    'TeamIdentifier',
+    'ExpirationDate',
+    'DeveloperCertificates',
+    'Entitlements',
+    'application-identifier',
+    'com.apple.developer.team-identifier',
+    'get-task-allow',
+    'keychain-access-groups',
+  ];
+  if (!plist.startsWith('<?xml') || uniqueKeys.some((key) => countXmlKey(plist, key) !== 1)) return null;
+  try {
+    const name = extractPlistValue(run, plist, 'Name', 'raw');
+    const expirationDate = extractPlistValue(run, plist, 'ExpirationDate', 'raw');
+    const expirationMs = Date.parse(expirationDate);
+    if (!name || !Number.isFinite(expirationMs)) return null;
+
+    const teamCount = parseBoundedCount(extractPlistValue(run, plist, 'TeamIdentifier', 'raw'), 1);
+    if (teamCount !== 1) return null;
+    const teamIdentifier = extractPlistValue(run, plist, 'TeamIdentifier.0', 'raw');
+    if (!teamIdentifier) return null;
+
+    const certificateCount = parseBoundedCount(
+      extractPlistValue(run, plist, 'DeveloperCertificates', 'raw'),
+      16,
+    );
+    if (certificateCount < 1) return null;
+    const developerCertificates = Array.from({ length: certificateCount }, (_, index) => (
+      normalizeBase64Data(extractPlistValue(run, plist, `DeveloperCertificates.${index}`, 'raw'))
+    ));
+
+    const entitlements = JSON.parse(extractPlistValue(run, plist, 'Entitlements', 'json'));
+    if (!entitlements || Array.isArray(entitlements) || typeof entitlements !== 'object') return null;
+    return {
+      Name: name,
+      TeamIdentifier: [teamIdentifier],
+      Entitlements: entitlements,
+      DeveloperCertificates: developerCertificates,
+      ExpirationDate: new Date(expirationMs).toISOString(),
+    };
+  } catch {
+    return null;
+  }
+}
+
+function extractPlistValue(run, plist, keyPath, format) {
+  const extracted = run('/usr/bin/plutil', ['-extract', keyPath, format, '-o', '-', '-'], { input: plist });
+  if (!extracted.ok) throw new Error('PLIST_FIELD_UNAVAILABLE');
+  return extracted.stdout.trim();
+}
+
+function countXmlKey(plist, key) {
+  const escaped = key.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return (plist.match(new RegExp(`<key>${escaped}</key>`, 'g')) ?? []).length;
+}
+
+function parseBoundedCount(value, maximum) {
+  if (!/^[0-9]+$/.test(value)) throw new Error('PLIST_COUNT_INVALID');
+  const count = Number(value);
+  if (!Number.isSafeInteger(count) || count > maximum) throw new Error('PLIST_COUNT_INVALID');
+  return count;
+}
+
+function normalizeBase64Data(value) {
+  if (!value || value.length > 64 * 1024 || value.length % 4 !== 0
+    || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(value)) {
+    throw new Error('PLIST_DATA_INVALID');
+  }
+  const bytes = Buffer.from(value, 'base64');
+  if (bytes.length === 0 || bytes.toString('base64') !== value) throw new Error('PLIST_DATA_INVALID');
+  return value;
 }
 
 export function evaluateIosSigningReadiness({ plan, teamId, identityOutput, profiles, nowMs }) {
@@ -323,6 +405,38 @@ export async function selfTest() {
   assert.equal(signing({ profiles: [{ ...validProfile, ExpirationDate: new Date(nowMs + 48 * 60 * 60 * 1000).toISOString() }] }), false);
   assert.equal(signing({ profiles: [{ ...validProfile, DeveloperCertificates: [Buffer.from('wrong').toString('base64')] }] }), false);
 
+  const plistExpirationDate = validProfile.ExpirationDate.replace('.000Z', 'Z');
+  const productionProfilePlist = syntheticProvisioningProfilePlist({
+    plan,
+    expirationDate: plistExpirationDate,
+    certificates: [Buffer.from('unrelated-certificate'), certificate],
+  });
+  const collectSyntheticProfiles = (plist) => collectProvisioningProfiles({
+    env: syntheticEnv,
+    listProfilePaths: () => ['/synthetic/exact.mobileprovision'],
+    run: (command, args, options) => {
+      if (command === '/usr/bin/security') return result(plist);
+      if (command === '/usr/bin/plutil') return runCommand(command, args, options);
+      throw new Error(`UNEXPECTED_PROFILE_COMMAND:${command}`);
+    },
+  });
+  const collectedProfiles = collectSyntheticProfiles(productionProfilePlist);
+  assert.equal(collectedProfiles.length, 1);
+  assert.equal(collectedProfiles[0].DeveloperCertificates.length, 2);
+  assert.equal(signing({ profiles: collectedProfiles }), true);
+  assert.deepEqual(collectSyntheticProfiles(productionProfilePlist.replace(
+    `<data>${certificate.toString('base64')}</data>`,
+    '<data>***</data>',
+  )), []);
+  assert.deepEqual(collectSyntheticProfiles(productionProfilePlist.replace(
+    `<date>${plistExpirationDate}</date>`,
+    '<date>not-a-date</date>',
+  )), []);
+  assert.deepEqual(collectSyntheticProfiles(productionProfilePlist.replace(
+    `<key>Name</key><string>${plan.artifactPolicy.ios.profileName}</string>`,
+    `<key>Name</key><string>${plan.artifactPolicy.ios.profileName}</string><key>Name</key><string>Duplicate</string>`,
+  )), []);
+
   const passResults = expectedCapabilities.map((capability) => ({ capability, status: 'PASS' }));
   assert.equal(evaluateIosPreflight(passResults).state, 'PASS');
   const failedResults = passResults.map((result) => result.capability === 'ios_device_endpoint'
@@ -404,7 +518,25 @@ export async function selfTest() {
   assert.equal((installer.match(/device install app/g) ?? []).length, 1);
   assert.doesNotMatch(installer, /device=%s|bundle=%s|retained lock:|raw_exception/);
 
-  console.log('iOS qualification adapter self-tests passed (preflight 5, signing 9, observer 1, mutation 2, script boundaries 13).');
+  console.log('iOS qualification adapter self-tests passed (preflight 5, signing 9, native-plist collector 6, observer 1, mutation 2, script boundaries 13).');
+}
+
+function syntheticProvisioningProfilePlist({ plan, expirationDate, certificates }) {
+  const policy = plan.artifactPolicy.ios;
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>Name</key><string>${policy.profileName}</string>
+<key>TeamIdentifier</key><array><string>${plan.identity.iosTeamId}</string></array>
+<key>ExpirationDate</key><date>${expirationDate}</date>
+<key>DeveloperCertificates</key><array>${certificates.map((value) => `<data>${value.toString('base64')}</data>`).join('')}</array>
+<key>Entitlements</key><dict>
+<key>application-identifier</key><string>${policy.profileEntitlements['application-identifier']}</string>
+<key>com.apple.developer.team-identifier</key><string>${policy.profileEntitlements['com.apple.developer.team-identifier']}</string>
+<key>get-task-allow</key><true/>
+<key>keychain-access-groups</key><array><string>${policy.profileEntitlements['keychain-access-groups'][0]}</string></array>
+</dict>
+</dict></plist>`;
 }
 
 function result(stdout, { ok = true, stderr = '' } = {}) {
