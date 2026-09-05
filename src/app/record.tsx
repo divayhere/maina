@@ -417,7 +417,9 @@ export default function RecordScreen() {
           await updateMeeting(idRef.current, { lastError: message }).catch(() => {});
           setError('Recording could not restart. Your audio and transcript checkpoints were kept.');
           activeRef.current = false;
-          await stopRecordingForegroundService().catch(() => {});
+          if (CAPTURE_ENGINE !== 'native-qwen') {
+            await stopRecordingForegroundService().catch(() => {});
+          }
         });
     }, delay);
   };
@@ -721,7 +723,9 @@ export default function RecordScreen() {
         setError(message);
         activeRef.current = false;
         await updateMeeting(idRef.current, { status: 'interrupted', lastError: message }).catch(() => {});
-        await stopRecordingForegroundService().catch(() => {});
+        if (CAPTURE_ENGINE !== 'native-qwen') {
+          await stopRecordingForegroundService().catch(() => {});
+        }
         log.error('record', 'capture start failed', { err: message });
       }
     })();
@@ -732,9 +736,14 @@ export default function RecordScreen() {
       pausedRef.current = false;
       if (restartTimerRef.current) clearTimeout(restartTimerRef.current);
       void persist(true);
-      if (CAPTURE_ENGINE === 'native-qwen') void stopNativeCapture().catch(() => {});
-      else if (listeningRef.current || pausedRef.current) abortSession();
-      void stopRecordingForegroundService().catch(() => {});
+      if (CAPTURE_ENGINE === 'native-qwen') {
+        // STOP owns its own terminal lifecycle after this screen unmounts.
+        // Never race it with a JS presentation-idle command.
+        void stopNativeCapture().catch(() => {});
+      } else {
+        if (listeningRef.current || pausedRef.current) abortSession();
+        void stopRecordingForegroundService().catch(() => {});
+      }
     };
     // This effect owns one recording session lifecycle. Re-running it because
     // helper identities changed would restart capture mid-meeting.
@@ -1172,7 +1181,9 @@ export default function RecordScreen() {
       setError('Maina could not finish the database checkpoint. Your WAV files remain on the phone.');
       log.error('record', 'meeting save failed', { err: message });
       savingRef.current = false;
-      await setNativeCaptureState('idle').catch(() => {});
+      if (saveHandoff === 'legacy-js-presentation') {
+        await setNativeCaptureState('idle').catch(() => {});
+      }
     }
   };
 
@@ -1268,11 +1279,14 @@ export default function RecordScreen() {
     pausedRef.current = false;
     if (restartTimerRef.current) clearTimeout(restartTimerRef.current);
     if (CAPTURE_ENGINE === 'native-qwen') {
-      await abortNativeCapture()
-        .then(() => waitForNativeCaptureState(getNativeCaptureStatusAsync, 'idle', { timeoutMs: 20_000 }))
-        .catch((cause) => {
-          log.warn('record', 'native discard finalization was not acknowledged', { err: String(cause) });
-        });
+      try {
+        await abortNativeCapture();
+        await waitForNativeCaptureState(getNativeCaptureStatusAsync, 'idle', { timeoutMs: 20_000 });
+      } catch (cause) {
+        log.warn('record', 'native discard finalization was not acknowledged', { err: String(cause) });
+        setError('Maina could not confirm that native audio was discarded. Your data was left untouched.');
+        return;
+      }
     } else if (!savingRef.current && !pausedRef.current && listeningRef.current) {
       const audioEndPromise = waitForAudioEnd();
       abortSession();
@@ -1281,8 +1295,10 @@ export default function RecordScreen() {
       abortSession();
     }
     await artifactQueueRef.current.catch(() => {});
-    await setNativeCaptureState('idle').catch(() => {});
-    await stopRecordingForegroundService().catch(() => {});
+    if (CAPTURE_ENGINE !== 'native-qwen') {
+      await setNativeCaptureState('idle').catch(() => {});
+      await stopRecordingForegroundService().catch(() => {});
+    }
     await flushDiagnostics().catch(() => {});
     if (meetingCreatedRef.current) await deleteMeeting(idRef.current).catch(() => {});
     if (dirRef.current) await FileSystem.deleteAsync(dirRef.current, { idempotent: true }).catch(() => {});

@@ -265,11 +265,30 @@ class MainaRecordingService : Service() {
             MainaHardwareTrigger.emit(this, command, "notification")
         }
         if (intent?.action == ACTION_SET_STATE) {
+            val requestedState = intent.getStringExtra(EXTRA_CAPTURE_STATE)
+            val presentationAllowed = requestedState != null &&
+                MainaExternalCapturePresentationPolicy.allowed(
+                    requestedState = requestedState,
+                    controlState = controlState,
+                    activeOperation = activeCaptureOperation,
+                    nativeState = nativeCapture.snapshot().state,
+                    terminalPublication = terminalPublication,
+                )
             val previousState = captureState
-            captureState = intent.getStringExtra(EXTRA_CAPTURE_STATE)
-                ?.takeIf { it in setOf("idle", "recording", "paused") }
-                ?: captureState
-            if (captureState != previousState) {
+            if (presentationAllowed) captureState = requestedState!!
+            if (!presentationAllowed && requestedState != null) {
+                recordNativeEvent(
+                    level = "warn",
+                    category = "native-service",
+                    eventName = "external-capture-state-rejected",
+                    message = "External capture presentation was rejected while native state owns the session",
+                    payload = mapOf(
+                        "requestedState" to requestedState,
+                        "controlPhase" to controlState.phase.name.lowercase(),
+                        "terminalPublicationState" to terminalPublication.phase.wireValue,
+                    ),
+                )
+            } else if (captureState != previousState) {
                 vibrateTransition(previousState, captureState)
                 recordNativeEvent(
                     level = "info",
@@ -1332,7 +1351,10 @@ class MainaRecordingService : Service() {
             }
             MainaTerminalCompletionAuthority.ACCEPTED -> Unit
         }
-        val nativeStopped = outcome.error == null && outcome.snapshot.state == "idle"
+        val nativeStopped = outcome.error == null && MainaTerminalPublicationPolicy.nativeStopIsClean(
+            state = outcome.snapshot.state,
+            lastError = outcome.snapshot.lastError,
+        )
         if (!nativeStopped) {
             publishTerminalRecoveryRequired(outcome.operation, outcome.snapshot.asMap())
             return
