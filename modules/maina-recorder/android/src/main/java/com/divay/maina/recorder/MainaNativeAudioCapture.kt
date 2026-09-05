@@ -39,6 +39,10 @@ internal class MainaNativeAudioCapture(
     private val onEvent: (level: String, event: String, payload: Map<String, Any?>) -> Unit,
     private val onStatus: (payload: Map<String, Any?>) -> Unit = {},
 ) {
+    internal class SystemResumeWaitingException : IllegalStateException(
+        "Retained AudioRecord is still silenced or its configuration is unavailable",
+    )
+
     data class Options(
         val meetingId: String,
         val directory: String,
@@ -65,6 +69,11 @@ internal class MainaNativeAudioCapture(
         val captureGapMs: Long,
         val rmsDbfs: Double,
         val peakDbfs: Double,
+        val systemDraining: Boolean,
+        val systemDrainReadCount: Long,
+        val systemRetainedResumeCount: Int,
+        val systemRecreationResumeCount: Int,
+        val systemRecoveryReason: String?,
     ) {
         fun asMap(): Map<String, Any?> = mapOf(
             "state" to state,
@@ -85,6 +94,11 @@ internal class MainaNativeAudioCapture(
             "captureGapMs" to captureGapMs,
             "rmsDbfs" to rmsDbfs,
             "peakDbfs" to peakDbfs,
+            "systemDraining" to systemDraining,
+            "systemDrainReadCount" to systemDrainReadCount,
+            "systemRetainedResumeCount" to systemRetainedResumeCount,
+            "systemRecreationResumeCount" to systemRecreationResumeCount,
+            "systemRecoveryReason" to systemRecoveryReason,
         )
     }
 
@@ -107,6 +121,10 @@ internal class MainaNativeAudioCapture(
     private val running = AtomicBoolean(false)
     private val paused = AtomicBoolean(false)
     private val readEnabled = AtomicBoolean(false)
+    private val systemDraining = AtomicBoolean(false)
+    private val retainedRecorderInvalid = AtomicBoolean(false)
+    private val systemDrainCycle = AtomicLong(0L)
+    private val systemRecreationAttemptCycle = AtomicLong(-1L)
     private val routeRefreshRequested = AtomicBoolean(false)
     private val privacyLatchGeneration = AtomicLong(0L)
     private val lock = Any()
@@ -139,6 +157,10 @@ internal class MainaNativeAudioCapture(
     @Volatile private var pauseCheckpointLatch: CountDownLatch? = null
     @Volatile private var pauseStartedElapsedMs: Long? = null
     @Volatile private var ownershipPublicationPending: MainaAudioOwnershipPhase? = null
+    @Volatile private var systemDrainReadCount = 0L
+    @Volatile private var systemRetainedResumeCount = 0
+    @Volatile private var systemRecreationResumeCount = 0
+    @Volatile private var systemRecoveryReason: String? = null
     private var preparedChunk: ActiveChunk? = null
 
     private val routingListener = AudioRouting.OnRoutingChangedListener { routing ->
@@ -170,6 +192,11 @@ internal class MainaNativeAudioCapture(
         captureGapMs = captureGapMs,
         rmsDbfs = rmsDbfs,
         peakDbfs = peakDbfs,
+        systemDraining = systemDraining.get(),
+        systemDrainReadCount = systemDrainReadCount,
+        systemRetainedResumeCount = systemRetainedResumeCount,
+        systemRecreationResumeCount = systemRecreationResumeCount,
+        systemRecoveryReason = systemRecoveryReason,
     )
 
     fun privacyGenerationSnapshot(): Long = privacyLatchGeneration.get()
@@ -185,7 +212,7 @@ internal class MainaNativeAudioCapture(
         return synchronized(recorderLock) {
             val activeRecorder = recorder ?: return@synchronized false
             runCatching {
-                activeRecorder.activeRecordingConfiguration?.isClientSilenced ?: false
+                activeRecorder.activeRecordingConfiguration?.isClientSilenced
             }.getOrNull()
         }
     }
@@ -214,6 +241,14 @@ internal class MainaNativeAudioCapture(
         rmsDbfs = -90.0
         peakDbfs = -90.0
         routeRefreshRequested.set(false)
+        systemDraining.set(false)
+        retainedRecorderInvalid.set(false)
+        systemDrainCycle.set(0L)
+        systemRecreationAttemptCycle.set(-1L)
+        systemDrainReadCount = 0L
+        systemRetainedResumeCount = 0
+        systemRecreationResumeCount = 0
+        systemRecoveryReason = null
         routeRefreshReason = "initial"
 
         val minBuffer = AudioRecord.getMinBufferSize(SAMPLE_RATE_HZ, CHANNEL_CONFIG, AUDIO_FORMAT)
@@ -294,6 +329,11 @@ internal class MainaNativeAudioCapture(
         captureGapMs = priorCaptureGapMs.coerceAtLeast(0L)
         routeRefreshRequested.set(false)
         routeRecoveryActive = false
+        systemDraining.set(false)
+        retainedRecorderInvalid.set(true)
+        systemDrainCycle.incrementAndGet()
+        systemRecreationAttemptCycle.set(-1L)
+        systemRecoveryReason = "process-restored-without-recorder"
         pauseStartedElapsedMs = SystemClock.elapsedRealtime()
         pauseCheckpointLatch = null
         running.set(true)
@@ -333,6 +373,7 @@ internal class MainaNativeAudioCapture(
             readCommitBarrier.latch {
                 readEnabled.set(false)
                 paused.set(true)
+                systemDraining.set(false)
                 ownershipPublicationPending = null
                 privacyLatchGeneration.incrementAndGet()
             }
@@ -342,6 +383,59 @@ internal class MainaNativeAudioCapture(
         // recorderLock. Therefore either it linearizes before this latch and is
         // stopped here, or it observes the revoked generation and cannot start.
         runCatching { active?.stop() }
+    }
+
+    /**
+     * Communication-only privacy latch. It linearizes after any accepted PCM
+     * commit but deliberately leaves the exact AudioRecord running so Android
+     * can silence and later restore that client without a second microphone
+     * acquisition. The worker continues reads and discards every byte.
+     */
+    fun latchSystemDrainNow() {
+        synchronized(recorderLock) {
+            readCommitBarrier.latch {
+                readEnabled.set(false)
+                paused.set(true)
+                ownershipPublicationPending = null
+                if (systemDraining.compareAndSet(false, true)) {
+                    systemDrainCycle.incrementAndGet()
+                    systemRecoveryReason = "communication-draining"
+                    privacyLatchGeneration.incrementAndGet()
+                }
+            }
+        }
+    }
+
+    /** Revokes an in-flight system resume and opens one new bounded call cycle. */
+    fun revokeSystemResumeForCommunicationReentryNow() {
+        latchReadsOffNow()
+        systemDrainCycle.incrementAndGet()
+        systemRecreationAttemptCycle.set(-1L)
+        systemRecoveryReason = "communication-reentry-revoked"
+    }
+
+    fun pauseForCommunication(): Snapshot {
+        if (!running.get()) return snapshot()
+        val hasPreparedChunk = synchronized(chunkTransferLock) { preparedChunk != null }
+        if (!MainaNativePauseCheckpointPolicy.requiresCheckpoint(
+                workerPresent = worker != null,
+                recorderPresent = recorder != null,
+                preparedChunkPresent = hasPreparedChunk,
+            )
+        ) return snapshot()
+        val checkpoint = CountDownLatch(1)
+        pauseCheckpointLatch = checkpoint
+        pauseStartedElapsedMs = SystemClock.elapsedRealtime()
+        latchSystemDrainNow()
+        val checkpointReached = checkpoint.await(PAUSE_CHECKPOINT_TIMEOUT_MS, TimeUnit.MILLISECONDS)
+        if (pauseCheckpointLatch === checkpoint) pauseCheckpointLatch = null
+        check(checkpointReached) {
+            "Native capture did not finalize its active chunk before system drain"
+        }
+        currentOptions?.let { appendJournal(directoryFrom(it.directory), "system-draining", emptyMap()) }
+        onEvent("info", "native-capture-system-draining", snapshot().asMap())
+        publishStatus()
+        return snapshot()
     }
 
     fun pause(): Snapshot {
@@ -426,6 +520,92 @@ internal class MainaNativeAudioCapture(
         return snapshot()
     }
 
+    fun resumeAfterCommunication(expectedLatchGeneration: Long): Snapshot = synchronized(lock) {
+        check(running.get() && paused.get()) {
+            "System-paused capture is unavailable"
+        }
+        // A process-restored durable shell has no retained recorder to drain,
+        // but it still enters this exact system recovery path and recreates once.
+        if (!systemDraining.get()) {
+            check(recorder == null) { "System-draining authority is unavailable" }
+            systemDraining.set(true)
+        }
+        val options = currentOptions ?: error("Capture options are unavailable")
+        val directory = directoryFrom(options.directory)
+        appendJournal(directory, "system-resume-intent", mapOf("chunkIndex" to currentChunkIndex))
+
+        val retainedState = retainedRecorderState(expectedLatchGeneration)
+        if (retainedState == MainaRetainedRecorderState.WAITING) {
+            throw SystemResumeWaitingException()
+        }
+
+        val nextChunk = openChunk(directory)
+        var ownershipPhase = MainaAudioOwnershipPolicy.afterChunkPrepared(
+            MainaAudioOwnershipPolicy.afterIntent(MainaAudioOwnershipPhase.PAUSED),
+        )
+        val activeRecorder = if (retainedState == MainaRetainedRecorderState.READY) {
+            synchronized(recorderLock) { recorder }
+                ?: error("Retained AudioRecord disappeared before publication")
+        } else {
+            val drainCycle = systemDrainCycle.get()
+            check(MainaSystemDrainPolicy.recreationAllowed(
+                drainCycle = drainCycle,
+                attemptedCycle = systemRecreationAttemptCycle.get(),
+            )) { "System recorder recreation was already attempted for this communication drain" }
+            systemRecreationAttemptCycle.set(drainCycle)
+            retainedRecorderInvalid.set(true)
+            releaseRecorder()
+            runCatching { createAndStartRecorder(expectedLatchGeneration) }
+                .onFailure { closeChunk(nextChunk, directory, "system-resume-start-failed") }
+                .getOrThrow()
+        }
+
+        val activated = readCommitBarrier.commitIf(
+            allowed = {
+                privacyLatchGeneration.get() == expectedLatchGeneration &&
+                    running.get() && paused.get() && systemDraining.get() &&
+                    audioManager.mode == AudioManager.MODE_NORMAL &&
+                    activeRecorder.state == AudioRecord.STATE_INITIALIZED &&
+                    activeRecorder.recordingState == AudioRecord.RECORDSTATE_RECORDING &&
+                    (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q ||
+                        activeRecorder.activeRecordingConfiguration?.isClientSilenced == false)
+            },
+            commit = {
+                paused.set(false)
+                systemDraining.set(false)
+                readEnabled.set(false)
+            },
+        )
+        if (!activated) {
+            closeChunk(nextChunk, directory, "system-resume-revoked")
+            if (retainedState != MainaRetainedRecorderState.READY) releaseRecorder()
+            error("System resume authority changed before activation")
+        }
+
+        ownershipPhase = MainaAudioOwnershipPolicy.afterAudioOwned(ownershipPhase)
+        ownershipPublicationPending = ownershipPhase
+        synchronized(chunkTransferLock) { preparedChunk = nextChunk }
+        pauseStartedElapsedMs?.let { started ->
+            captureGapMs += max(0L, SystemClock.elapsedRealtime() - started)
+        }
+        pauseStartedElapsedMs = null
+        pauseCheckpointLatch = null
+        retainedRecorderInvalid.set(false)
+        if (retainedState == MainaRetainedRecorderState.READY) {
+            systemRetainedResumeCount += 1
+            systemRecoveryReason = "retained-recorder"
+        } else {
+            systemRecreationResumeCount += 1
+            systemRecoveryReason = "recreated-invalid-recorder"
+        }
+        updateRoutedDevice(activeRecorder)
+        appendJournal(directory, "system-resume-audio-owned", mapOf(
+            "chunkIndex" to nextChunk.index,
+            "recoveryReason" to systemRecoveryReason,
+        ))
+        snapshot()
+    }
+
     /**
      * Completes every throwable publication action while microphone reads remain
      * disabled. The service durably commits reducer authority before calling the
@@ -468,6 +648,7 @@ internal class MainaNativeAudioCapture(
         val wasRunning = running.getAndSet(false)
         if (!wasRunning && worker == null) return snapshot()
         paused.set(false)
+        systemDraining.set(false)
         val activeWorker = worker
         activeWorker?.join(STOP_JOIN_TIMEOUT_MS)
         check(activeWorker?.isAlive != true) {
@@ -503,6 +684,18 @@ internal class MainaNativeAudioCapture(
                         currentBytesWritten = 0L
                     }
                     pauseCheckpointLatch?.countDown()
+                    if (systemDraining.get()) {
+                        val drained = recorder?.read(buffer, 0, buffer.size, AudioRecord.READ_BLOCKING)
+                            ?: AudioRecord.ERROR_INVALID_OPERATION
+                        if (drained > 0) {
+                            systemDrainReadCount += 1
+                        } else if (drained < 0) {
+                            retainedRecorderInvalid.set(true)
+                            systemRecoveryReason = "retained-recorder-read-invalid"
+                            Thread.sleep(50)
+                        }
+                        continue
+                    }
                     Thread.sleep(50)
                     continue
                 }
@@ -543,6 +736,11 @@ internal class MainaNativeAudioCapture(
                 when {
                     read > 0 -> {
                         val chunkForCommit = requireNotNull(activeChunk)
+                        val communicationActive = MainaCallInterruptionPolicy.communicationActive(
+                            audioMode = audioManager.mode,
+                            clientSilenced = false,
+                        )
+                        val exactClientSilenced = ownClientSilenced() == true
                         val committed = readCommitBarrier.commitIf(
                             allowed = {
                                 MainaNativeReadSafetyPolicy.shouldPersistRead(
@@ -550,6 +748,11 @@ internal class MainaNativeAudioCapture(
                                     running = running.get(),
                                     paused = paused.get(),
                                     readEnabled = readEnabled.get(),
+                                ) && MainaSystemDrainPolicy.shouldPersistBuffer(
+                                    readBytes = read,
+                                    communicationActive = communicationActive,
+                                    clientSilenced = exactClientSilenced,
+                                    systemDraining = systemDraining.get(),
                                 )
                             },
                             commit = {
@@ -782,6 +985,28 @@ internal class MainaNativeAudioCapture(
             throw cause
         }
     }
+
+    private fun retainedRecorderState(expectedLatchGeneration: Long): MainaRetainedRecorderState =
+        synchronized(recorderLock) {
+            val active = recorder
+            val silencing = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && active != null) {
+                runCatching { active.activeRecordingConfiguration?.isClientSilenced }.getOrNull()
+            } else if (active != null) {
+                false
+            } else {
+                null
+            }
+            MainaSystemDrainPolicy.retainedRecorderState(
+                generationMatches = expectedLatchGeneration == privacyLatchGeneration.get(),
+                modeNormal = audioManager.mode == AudioManager.MODE_NORMAL,
+                recorderPresent = active != null,
+                recorderInitialized = active?.state == AudioRecord.STATE_INITIALIZED,
+                recorderRecording = active?.recordingState == AudioRecord.RECORDSTATE_RECORDING &&
+                    !retainedRecorderInvalid.get(),
+                silencingKnown = silencing != null,
+                clientSilenced = silencing == true,
+            )
+        }
 
     private fun releaseRecorder() {
         val active = synchronized(recorderLock) {

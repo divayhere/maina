@@ -191,6 +191,36 @@ internal object MainaNativePauseCheckpointPolicy {
     ): Boolean = workerPresent || recorderPresent || preparedChunkPresent
 }
 
+internal enum class MainaRetainedRecorderState { READY, WAITING, INVALID }
+
+/** Pure classification seam for the system-call drain owner. */
+internal object MainaSystemDrainPolicy {
+    fun retainedRecorderState(
+        generationMatches: Boolean,
+        modeNormal: Boolean,
+        recorderPresent: Boolean,
+        recorderInitialized: Boolean,
+        recorderRecording: Boolean,
+        silencingKnown: Boolean,
+        clientSilenced: Boolean,
+    ): MainaRetainedRecorderState = when {
+        !generationMatches || !recorderPresent || !recorderInitialized || !recorderRecording ->
+            MainaRetainedRecorderState.INVALID
+        !modeNormal || !silencingKnown || clientSilenced -> MainaRetainedRecorderState.WAITING
+        else -> MainaRetainedRecorderState.READY
+    }
+
+    fun recreationAllowed(drainCycle: Long, attemptedCycle: Long): Boolean =
+        drainCycle > 0L && attemptedCycle != drainCycle
+
+    fun shouldPersistBuffer(
+        readBytes: Int,
+        communicationActive: Boolean,
+        clientSilenced: Boolean,
+        systemDraining: Boolean,
+    ): Boolean = readBytes > 0 && !communicationActive && !clientSilenced && !systemDraining
+}
+
 /** Linearizes the final post-read predicate and PCM byte commit with the latch. */
 internal class MainaReadCommitBarrier {
     private val lock = Any()
@@ -313,8 +343,9 @@ internal object MainaCallInterruptionPolicy {
         if (state.phase == MainaCaptureControlPhase.PAUSED
             && state.pauseOwner == MainaCapturePauseOwner.SYSTEM
         ) {
-            return MainaCaptureControlDecision.StateOnly(
+            return MainaCaptureControlDecision.Pause(
                 state.copy(
+                    phase = MainaCaptureControlPhase.PAUSE_PENDING,
                     pauseOwner = MainaCapturePauseOwner.MANUAL,
                     generation = state.generation + 1L,
                 ),
@@ -340,7 +371,7 @@ internal object MainaCallInterruptionPolicy {
         return MainaCaptureControlDecision.Resume(
             state.copy(
                 phase = MainaCaptureControlPhase.RESUME_PENDING,
-                pauseOwner = MainaCapturePauseOwner.MANUAL,
+                pauseOwner = state.pauseOwner,
                 generation = state.generation + 1L,
             ),
         )

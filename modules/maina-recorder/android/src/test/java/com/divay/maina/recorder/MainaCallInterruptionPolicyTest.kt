@@ -991,4 +991,145 @@ class MainaCallInterruptionPolicyTest {
         assertEquals(terminal, completed.state)
         assertEquals(MainaCaptureControlPhase.TERMINAL, completed.state.phase)
     }
+
+    @Test
+    fun `system drain keeps exact recorder only when generation ownership and unsilenced state are proven`() {
+        assertEquals(
+            MainaRetainedRecorderState.READY,
+            MainaSystemDrainPolicy.retainedRecorderState(
+                generationMatches = true,
+                modeNormal = true,
+                recorderPresent = true,
+                recorderInitialized = true,
+                recorderRecording = true,
+                silencingKnown = true,
+                clientSilenced = false,
+            ),
+        )
+        assertEquals(
+            MainaRetainedRecorderState.WAITING,
+            MainaSystemDrainPolicy.retainedRecorderState(true, true, true, true, true, true, true),
+        )
+        assertEquals(
+            MainaRetainedRecorderState.WAITING,
+            MainaSystemDrainPolicy.retainedRecorderState(true, true, true, true, true, false, false),
+        )
+        assertEquals(
+            MainaRetainedRecorderState.INVALID,
+            MainaSystemDrainPolicy.retainedRecorderState(false, true, true, true, true, true, false),
+        )
+        assertEquals(
+            MainaRetainedRecorderState.INVALID,
+            MainaSystemDrainPolicy.retainedRecorderState(true, true, true, true, false, true, false),
+        )
+        assertEquals(
+            MainaRetainedRecorderState.INVALID,
+            MainaSystemDrainPolicy.retainedRecorderState(true, true, false, false, false, false, false),
+        )
+        assertEquals(
+            MainaRetainedRecorderState.WAITING,
+            MainaSystemDrainPolicy.retainedRecorderState(true, false, true, true, true, true, false),
+        )
+        assertTrue(MainaSystemDrainPolicy.recreationAllowed(drainCycle = 4, attemptedCycle = 3))
+        assertFalse(MainaSystemDrainPolicy.recreationAllowed(drainCycle = 4, attemptedCycle = 4))
+    }
+
+    @Test
+    fun `communication silencing and system drain discard every buffer`() {
+        assertTrue(MainaSystemDrainPolicy.shouldPersistBuffer(320, false, false, false))
+        assertFalse(MainaSystemDrainPolicy.shouldPersistBuffer(320, true, false, false))
+        assertFalse(MainaSystemDrainPolicy.shouldPersistBuffer(320, false, true, false))
+        assertFalse(MainaSystemDrainPolicy.shouldPersistBuffer(320, false, false, true))
+        assertFalse(MainaSystemDrainPolicy.shouldPersistBuffer(0, false, false, false))
+    }
+
+    @Test
+    fun `manual intent revokes system drain while a resume tap preserves system recovery ownership`() {
+        val systemPaused = MainaCaptureControlState(
+            phase = MainaCaptureControlPhase.PAUSED,
+            pauseOwner = MainaCapturePauseOwner.SYSTEM,
+            generation = 31,
+            communicationActive = false,
+        )
+        val manualPause = MainaCallInterruptionPolicy.onManualPause(systemPaused)
+            as MainaCaptureControlDecision.Pause
+        assertEquals(MainaCaptureControlPhase.PAUSE_PENDING, manualPause.state.phase)
+        assertEquals(MainaCapturePauseOwner.MANUAL, manualPause.state.pauseOwner)
+
+        val requestedRecovery = MainaCallInterruptionPolicy.onManualResume(systemPaused)
+            as MainaCaptureControlDecision.Resume
+        assertEquals(MainaCapturePauseOwner.SYSTEM, requestedRecovery.state.pauseOwner)
+        assertEquals(MainaCaptureControlPhase.RESUME_PENDING, requestedRecovery.state.phase)
+    }
+
+    @Test
+    fun `system call source path drains without stopping and resumes retained owner before recreation fallback`() {
+        val native = source(
+            "modules/maina-recorder/android/src/main/java/com/divay/maina/recorder/MainaNativeAudioCapture.kt",
+        )
+        val systemLatch = native.substring(
+            native.indexOf("fun latchSystemDrainNow"),
+            native.indexOf("fun pauseForCommunication"),
+        )
+        assertTrue(systemLatch.contains("readCommitBarrier.latch"))
+        assertTrue(systemLatch.contains("systemDraining.compareAndSet(false, true)"))
+        assertFalse(systemLatch.contains(".stop()"))
+        assertFalse(systemLatch.contains("releaseRecorder()"))
+
+        val reentryLatch = native.substring(
+            native.indexOf("fun revokeSystemResumeForCommunicationReentryNow"),
+            native.indexOf("fun pauseForCommunication"),
+        )
+        assertTrue(reentryLatch.contains("latchReadsOffNow()"))
+        assertTrue(reentryLatch.contains("systemDrainCycle.incrementAndGet()"))
+        assertTrue(reentryLatch.contains("systemRecreationAttemptCycle.set(-1L)"))
+
+        val systemPause = native.substring(
+            native.indexOf("fun pauseForCommunication"),
+            native.indexOf("fun pause(): Snapshot"),
+        )
+        assertTrue(systemPause.contains("latchSystemDrainNow()"))
+        assertTrue(systemPause.contains("checkpoint.await"))
+        assertFalse(systemPause.contains("releaseRecorder()"))
+
+        val systemResume = native.substring(
+            native.indexOf("fun resumeAfterCommunication"),
+            native.indexOf("fun prepareRecordingOwnershipPublication"),
+        )
+        assertTrue(systemResume.indexOf("retainedRecorderState") < systemResume.indexOf("openChunk(directory)"))
+        assertTrue(systemResume.contains("MainaRetainedRecorderState.READY"))
+        assertTrue(systemResume.contains("createAndStartRecorder(expectedLatchGeneration)"))
+        assertTrue(systemResume.contains("privacyLatchGeneration.get() == expectedLatchGeneration"))
+        assertTrue(systemResume.contains("audioManager.mode == AudioManager.MODE_NORMAL"))
+        assertTrue(systemResume.contains("activeRecordingConfiguration?.isClientSilenced == false"))
+        assertTrue(systemResume.contains("MainaSystemDrainPolicy.recreationAllowed"))
+        assertTrue(systemResume.contains("systemDraining.set(false)"))
+
+        val loop = native.substring(
+            native.indexOf("private fun recordLoop"),
+            native.indexOf("private fun updateLevels"),
+        )
+        assertTrue(loop.contains("if (systemDraining.get())"))
+        assertTrue(loop.contains("recorder?.read"))
+        assertTrue(loop.contains("MainaSystemDrainPolicy.shouldPersistBuffer"))
+        assertTrue(loop.contains("MainaCallInterruptionPolicy.communicationActive"))
+
+        val service = source(
+            "modules/maina-recorder/android/src/main/java/com/divay/maina/recorder/MainaRecordingService.kt",
+        )
+        val communication = service.substring(
+            service.indexOf("private fun reconcileCommunicationInterruption"),
+            service.indexOf("private fun scheduleCommunicationResume"),
+        )
+        assertTrue(communication.contains("latch = nativeCapture::latchSystemDrainNow"))
+        val dispatcher = service.substring(
+            service.indexOf("private fun dispatchNativePause"),
+            service.indexOf("private fun handlePauseOutcome"),
+        )
+        assertTrue(dispatcher.contains("nativeCapture.pauseForCommunication()"))
+        assertTrue(dispatcher.contains("nativeCapture.pause()"))
+        assertTrue(service.contains("nativeCapture.resumeAfterCommunication("))
+        assertTrue(service.contains("nativeCapture.revokeSystemResumeForCommunicationReentryNow()"))
+        assertTrue(service.contains("system-retained-recorder-waiting"))
+    }
 }

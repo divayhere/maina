@@ -26,7 +26,14 @@ Minimum owner actions:
 4. Stop and save both recordings normally after at least another minute.
 5. Unlock a phone only if the OS requires it.
 
-Pass evidence: each answered call creates a system pause, the call interval is excluded, the same meeting resumes, rejected calls do not terminate capture, manual pause never auto-resumes, and both meetings finish their durable pipelines without duplicate IDs.
+Pass evidence: each call creates a system pause, the call interval is excluded,
+manual pause never auto-resumes, and both meetings finish their durable pipelines
+without duplicate IDs. Android must resume the same meeting unattended after the
+exact retained recorder becomes unsilenced. On iOS, rejected and short calls must
+resume within the measured bounded recovery window while execution remains
+available; an answered locked call must preserve all pre-call audio and resume the
+same meeting on the first public OS-permitted wake. Do not claim a blanket
+five-second zero-touch iOS pass when the OS suspended Maina.
 
 ## Test 5 — offline-to-cloud recovery
 

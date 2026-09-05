@@ -430,6 +430,7 @@ class MainaRecordingService : Service() {
             }
             ACTION_RESUME_NATIVE_CAPTURE -> {
                 cancelCommunicationRetryTimer()
+                val resumingSystemPause = controlState.pauseOwner == MainaCapturePauseOwner.SYSTEM
                 when (val decision = MainaCallInterruptionPolicy.onManualResume(controlState)) {
                     is MainaCaptureControlDecision.Denied -> {
                         nativeCaptureStatus = nativeCapture.snapshot().asMap() + mapOf(
@@ -453,10 +454,13 @@ class MainaRecordingService : Service() {
                                 publicationEvent = "manual-resume-published",
                                 failureEvent = "manual-resume-failed",
                             ) {
-                                nativeCapture.resume(
-                                    operation.expectedPrivacyLatchGeneration
-                                        ?: error("Resume privacy authority is unavailable"),
-                                )
+                                val generation = operation.expectedPrivacyLatchGeneration
+                                    ?: error("Resume privacy authority is unavailable")
+                                if (resumingSystemPause) {
+                                    nativeCapture.resumeAfterCommunication(generation)
+                                } else {
+                                    nativeCapture.resume(generation)
+                                }
                             }
                         } else {
                             failClosedResumeDurability(MainaCapturePauseOwner.MANUAL)
@@ -571,6 +575,7 @@ class MainaRecordingService : Service() {
         val operation: MainaCaptureOperationToken,
         val snapshot: MainaNativeAudioCapture.Snapshot,
         val error: String? = null,
+        val errorCode: String? = null,
         val published: Boolean = false,
         val safeAfterPublication: Boolean = false,
     )
@@ -726,6 +731,11 @@ class MainaRecordingService : Service() {
                 operation = operation,
                 snapshot = result.getOrElse { nativeCapture.snapshot() },
                 error = result.exceptionOrNull()?.let { it.message ?: it.javaClass.simpleName },
+                errorCode = if (result.exceptionOrNull() is MainaNativeAudioCapture.SystemResumeWaitingException) {
+                    "system-retained-recorder-waiting"
+                } else {
+                    null
+                },
             )
             postMainOutcome {
                 handlePreparedCaptureOutcome(outcome, committedEvent, publicationEvent, failureEvent)
@@ -753,6 +763,23 @@ class MainaRecordingService : Service() {
     ) {
         requireMainReducer()
         if (outcome.error != null) {
+            if (outcome.errorCode == "system-retained-recorder-waiting" &&
+                outcome.operation.owner == MainaCapturePauseOwner.SYSTEM &&
+                accepts(outcome.operation)
+            ) {
+                activeCaptureOperation = null
+                val paused = MainaCallInterruptionPolicy.resumeFailed(controlState)
+                val persisted = updateControlState(paused, "system-retained-recorder-waiting")
+                nativeCaptureStatus = outcome.snapshot.asMap() + mapOf(
+                    "state" to "paused",
+                    "pauseReason" to "system",
+                    "recoveryReason" to outcome.errorCode,
+                    "operationId" to outcome.operation.operationId,
+                )
+                refreshForegroundUi()
+                if (persisted) scheduleCommunicationResume() else failClosedResumeDurability(MainaCapturePauseOwner.SYSTEM)
+                return
+            }
             nativeCaptureStatus = outcome.snapshot.asMap() + mapOf(
                 "state" to "error",
                 "lastError" to outcome.error,
@@ -982,7 +1009,11 @@ class MainaRecordingService : Service() {
         )
         var pause: MainaCaptureOperationToken? = null
         val persistenceFailure = MainaCaptureSafetySequencer.latchApplyPersistThenQueue(
-            latch = nativeCapture::latchReadsOffNow,
+            latch = if (communicationActive && operation.owner == MainaCapturePauseOwner.SYSTEM) {
+                nativeCapture::revokeSystemResumeForCommunicationReentryNow
+            } else {
+                nativeCapture::latchReadsOffNow
+            },
             apply = {
                 applyControlState(pending)
                 pause = issueCaptureOperation(
@@ -1060,7 +1091,13 @@ class MainaRecordingService : Service() {
             "operationId" to operation.operationId,
         )
         val enqueued = enqueueNativeWork {
-            val result = runCatching { nativeCapture.pause() }
+            val result = runCatching {
+                if (operation.owner == MainaCapturePauseOwner.SYSTEM) {
+                    nativeCapture.pauseForCommunication()
+                } else {
+                    nativeCapture.pause()
+                }
+            }
             val outcome = NativeOutcome(
                 operation = operation,
                 snapshot = result.getOrElse { nativeCapture.snapshot() },
@@ -1481,7 +1518,7 @@ class MainaRecordingService : Service() {
                 communicationResumeAttempts = 0
                 var operation: MainaCaptureOperationToken? = null
                 val persistenceFailure = MainaCaptureSafetySequencer.latchApplyPersistThenQueue(
-                    latch = nativeCapture::latchReadsOffNow,
+                        latch = nativeCapture::latchSystemDrainNow,
                     apply = {
                         applyControlState(decision.state)
                         operation = issueCaptureOperation(
@@ -1524,7 +1561,7 @@ class MainaRecordingService : Service() {
                 if (decision.state != previousState) {
                     val resumeWasInterrupted = nextCommunicationActive &&
                         previousState.phase == MainaCaptureControlPhase.RESUME_PENDING
-                    if (resumeWasInterrupted) nativeCapture.latchReadsOffNow()
+                    if (resumeWasInterrupted) nativeCapture.revokeSystemResumeForCommunicationReentryNow()
                     updateControlState(decision.state, "communication-observed")
                     cancelCommunicationRetryTimer()
                     if (nextCommunicationActive) {
@@ -1615,7 +1652,7 @@ class MainaRecordingService : Service() {
                 publicationEvent = "system-resume-published",
                 failureEvent = "system-resume-attempt-failed",
             ) {
-                nativeCapture.resume(
+                nativeCapture.resumeAfterCommunication(
                     operation.expectedPrivacyLatchGeneration
                         ?: error("Resume privacy authority is unavailable"),
                 )
