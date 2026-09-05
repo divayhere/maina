@@ -30,5 +30,5 @@ npm run ios:runtime
 npm run verify:ios-native
 npx expo prebuild --platform ios --no-install --clean
 "$PROJECT_DIR/scripts/restore-external-build-links.sh" ios
-(cd ios && pod install)
+(cd ios && PROJECT_ROOT="$PROJECT_DIR" pod install)
 "$PROJECT_DIR/scripts/configure-ios-ui-tests-guarded.sh"
