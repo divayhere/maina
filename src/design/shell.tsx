@@ -113,8 +113,14 @@ export function DrawerMenu() {
         }
       />
       <Modal animationType="fade" transparent visible={open} onRequestClose={() => setOpen(false)}>
-        <Pressable style={[styles.scrim, { backgroundColor: theme.overlay }]} onPress={() => setOpen(false)}>
+        <Pressable
+          accessible={false}
+          style={[styles.scrim, { backgroundColor: theme.overlay }]}
+          onPress={() => setOpen(false)}
+        >
           <Pressable
+            accessible={false}
+            accessibilityViewIsModal
             style={[
               styles.drawer,
               {
