@@ -1,8 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-MODE="${1:-preflight}"
-TEST_NAME="${2:-test3-call-interruption}"
+LANE="${1:-}"
+MODE="${2:-preflight}"
+TEST_NAME="${3:-test3-call-interruption}"
+case "$LANE" in
+  android|ios) ;;
+  *) echo "Usage: $0 <android|ios> preflight | arm <test3-call-interruption|test5-offline-recovery> | health | snapshot <label> | stop" >&2; exit 2 ;;
+esac
 PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 ANDROID_SERIAL="${MAINA_ANDROID_SERIAL:-adb-47011FDAP000VE-9s0wNO._adb-tls-connect._tcp}"
 IOS_COREDEVICE_ID="${MAINA_IOS_COREDEVICE_ID:-945E396B-87B0-5CB7-9A3D-A5E75CF9B4CD}"
@@ -19,14 +24,21 @@ IOS_BUNDLE_ID="${MAINA_IOS_BUNDLE_ID:-$PROVENANCE_IOS_BUNDLE_ID}"
 [[ "$IOS_BUNDLE_ID" == "$PROVENANCE_IOS_BUNDLE_ID" ]] || { echo "iOS bundle override conflicts with approved provenance." >&2; exit 1; }
 PMD="${MAINA_PMD:-/Users/divay/Developer/.tools/maina-pymobiledevice3/bin/pymobiledevice3}"
 ROOT="${MAINA_M0_EVIDENCE_ROOT:-$PROJECT_DIR/.artifacts/m0-replay}"
-CURRENT_FILE="$ROOT/current"
+CURRENT_FILE="$ROOT/current-$LANE"
 
 android() { adb -s "$ANDROID_SERIAL" "$@"; }
 
-active_run_exists() {
+current_output_dir() {
   test -s "$CURRENT_FILE" || return 1
+  local run_id
+  run_id="$(cat "$CURRENT_FILE")"
+  [[ "$run_id" =~ ^[0-9]{8}-[0-9]{6}-(android|ios)-(test3-call-interruption|test5-offline-recovery)$ ]] || return 1
+  printf '%s/%s\n' "$ROOT" "$run_id"
+}
+
+active_run_exists() {
   local previous_dir
-  previous_dir="$(cat "$CURRENT_FILE")"
+  previous_dir="$(current_output_dir)" || return 1
   test -d "$previous_dir" || return 1
   grep -q '^stopped_at=' "$previous_dir/metadata.txt" 2>/dev/null && return 1
   for pid_file in "$previous_dir"/*.pid; do
@@ -41,14 +53,42 @@ monitor_healthy() {
   test -s "$pid_file" || { echo "$label PID file is missing" >&2; return 1; }
   local pid
   pid="$(cat "$pid_file")"
-  kill -0 "$pid" 2>/dev/null || { echo "$label monitor is not alive (PID $pid)" >&2; return 1; }
+  kill -0 "$pid" 2>/dev/null || { echo "$label monitor is not alive" >&2; return 1; }
   test -s "$log_file" || { echo "$label log has not grown" >&2; return 1; }
+  tail -n 1 "$log_file" | grep -q 'observer_status=PASS$' \
+    || { echo "$label reports an unavailable endpoint" >&2; return 1; }
+}
+
+monitor_lane_health() {
+  local sample_count=0 status
+  while true; do
+    status="FAIL"
+    case "$LANE" in
+      android)
+        if android get-state >/dev/null 2>&1 \
+          && android shell pidof "$ANDROID_PACKAGE" >/dev/null 2>&1; then
+          status="PASS"
+        fi
+        ;;
+      ios)
+        if "$PMD" apps query "$IOS_BUNDLE_ID" --udid "$IOS_UDID" >/dev/null 2>&1; then
+          status="PASS"
+        fi
+        ;;
+    esac
+    printf '%s lane=%s observer_status=%s\n' "$(date -Iseconds)" "$LANE" "$status"
+    sample_count=$((sample_count + 1))
+    (( sample_count < 720 )) || return 3
+    sleep 5
+  done
 }
 
 verify_monitors() {
   local output_dir="$1"
-  monitor_healthy "$output_dir/android-logcat.pid" "$output_dir/android-logcat.txt" "Android logcat"
-  monitor_healthy "$output_dir/ios-syslog.pid" "$output_dir/ios-syslog.ndjson" "iOS syslog"
+  case "$LANE" in
+    android) monitor_healthy "$output_dir/android-observer.pid" "$output_dir/android-observer.log" "Android observer" ;;
+    ios) monitor_healthy "$output_dir/ios-observer.pid" "$output_dir/ios-observer.log" "iOS observer" ;;
+  esac
   printf '%s monitors_healthy\n' "$(date -Iseconds)" >> "$output_dir/monitor-supervisor.log"
 }
 
@@ -63,9 +103,8 @@ stop_monitors() {
   done
 }
 
-preflight() {
+preflight_android() {
   command -v adb >/dev/null
-  test -x "$PMD"
 
   [[ "$ANDROID_SERIAL" == *"._adb-tls-connect._tcp" ]] || {
     echo "M0 replay requires the pinned Wi-Fi ADB endpoint, not USB or an emulator." >&2
@@ -75,7 +114,7 @@ preflight() {
   matching_targets="$(adb devices | awk -v serial="$ANDROID_SERIAL" 'NR > 1 && $1 == serial && $2 == "device" { count += 1 } END { print count + 0 }')"
   test "$matching_targets" = "1"
   android get-state >/dev/null
-  local android_hardware android_model android_version android_code ios_devices ios_apps
+  local android_hardware android_model android_version android_code
   android_hardware="$(android shell getprop ro.serialno | tr -d '\r')"
   test "$android_hardware" = "47011FDAP000VE"
   android_model="$(android shell getprop ro.product.model | tr -d '\r')"
@@ -87,6 +126,12 @@ preflight() {
     return 1
   }
 
+  printf 'M0 Android replay preflight passed for the approved package and artifact identity.\n'
+}
+
+preflight_ios() {
+  test -x "$PMD"
+  local ios_devices ios_apps
   # CoreDevice can remain in a stale "connecting" state even while usbmux and
   # DeveloperTools services are healthy. Verify the exact physical USB device
   # and installed staging bundle through the same transport used for evidence.
@@ -106,22 +151,39 @@ preflight() {
       || app.CFBundleVersion !== process.env.PROVENANCE_IOS_BUILD) process.exit(1);
   '
 
-  printf 'M0 replay preflight passed\n'
-  printf 'Android: Wi-Fi Pixel %s (%s), Maina %s (%s)\n' "$android_hardware" "$ANDROID_SERIAL" "$android_version" "$android_code"
-  printf 'iOS: iPhone 15 serial %s, bundle %s\n' "$IOS_SERIAL" "$IOS_BUNDLE_ID"
+  printf 'M0 iOS replay preflight passed for the approved bundle and artifact identity.\n'
+}
+
+preflight() {
+  case "$LANE" in
+    android) preflight_android ;;
+    ios) preflight_ios ;;
+  esac
 }
 
 snapshot() {
   local output_dir="$1" label="$2"
+  [[ "$label" =~ ^[A-Za-z0-9._-]+$ && "$label" != *..* ]] || {
+    echo "Snapshot label is invalid." >&2
+    return 2
+  }
   mkdir -p "$output_dir/snapshots"
-  android shell dumpsys audio > "$output_dir/snapshots/${label}-android-audio.txt" 2>&1 || true
-  android shell dumpsys notification --noredact > "$output_dir/snapshots/${label}-android-notifications.txt" 2>&1 || true
-  android shell dumpsys activity services "$ANDROID_PACKAGE" > "$output_dir/snapshots/${label}-android-services.txt" 2>&1 || true
-  android shell screencap -p > "$output_dir/snapshots/${label}-android.png" 2>/dev/null || true
-  "$PMD" developer dvt screenshot "$output_dir/snapshots/${label}-ios.png" \
-    --native --udid "$IOS_UDID" > "$output_dir/snapshots/${label}-ios-screenshot.txt" 2>&1 || true
-  xcrun devicectl device info processes --device "$IOS_COREDEVICE_ID" --timeout 15 \
-    > "$output_dir/snapshots/${label}-ios-processes.txt" 2>&1 || true
+  local audio_status="FAIL" notification_status="FAIL" app_status="FAIL"
+  case "$LANE" in
+    android)
+      android shell dumpsys audio >/dev/null 2>&1 && audio_status="PASS"
+      android shell dumpsys notification >/dev/null 2>&1 && notification_status="PASS"
+      android shell pidof "$ANDROID_PACKAGE" >/dev/null 2>&1 && app_status="PASS"
+      printf 'schemaVersion=maina.m0-sanitized-snapshot.v1\nlane=android\naudio_probe=%s\nnotification_probe=%s\napp_process_probe=%s\n' \
+        "$audio_status" "$notification_status" "$app_status" \
+        > "$output_dir/snapshots/${label}-android-status.txt"
+      ;;
+    ios)
+      "$PMD" apps query "$IOS_BUNDLE_ID" --udid "$IOS_UDID" >/dev/null 2>&1 && app_status="PASS"
+      printf 'schemaVersion=maina.m0-sanitized-snapshot.v1\nlane=ios\napp_endpoint_probe=%s\n' \
+        "$app_status" > "$output_dir/snapshots/${label}-ios-status.txt"
+      ;;
+  esac
   date -u '+%Y-%m-%dT%H:%M:%SZ' > "$output_dir/snapshots/${label}-timestamp.txt"
 }
 
@@ -139,53 +201,57 @@ case "$MODE" in
       exit 1
     fi
     preflight
-    run_id="$(date '+%Y%m%d-%H%M%S')-$TEST_NAME"
+    run_id="$(date '+%Y%m%d-%H%M%S')-$LANE-$TEST_NAME"
     output_dir="$ROOT/$run_id"
     mkdir -p "$output_dir"
-    printf '%s\n' "$output_dir" > "$CURRENT_FILE"
-    printf 'test=%s\nstarted_at=%s\nandroid_serial=%s\nios_coredevice_id=%s\nios_udid=%s\n' \
-      "$TEST_NAME" "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$ANDROID_SERIAL" "$IOS_COREDEVICE_ID" "$IOS_UDID" \
-      > "$output_dir/metadata.txt"
-    {
-      printf '%s android_logcat_monitor_started\n' "$(date -Iseconds)"
-      exec adb -s "$ANDROID_SERIAL" logcat -v threadtime -T 1
-    } > "$output_dir/android-logcat.txt" 2>&1 &
-    echo $! > "$output_dir/android-logcat.pid"
-    {
-      printf '%s ios_syslog_monitor_started\n' "$(date -Iseconds)"
-      exec "$PMD" syslog live --native --udid "$IOS_UDID" --process-name Maina --format json
-    } > "$output_dir/ios-syslog.ndjson" 2>&1 &
-    echo $! > "$output_dir/ios-syslog.pid"
+    printf '%s\n' "$run_id" > "$CURRENT_FILE"
+    printf 'test=%s\nlane=%s\nstarted_at=%s\n' \
+      "$TEST_NAME" "$LANE" "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" > "$output_dir/metadata.txt"
+    case "$LANE" in
+      android)
+        {
+          printf '%s android_sanitized_observer_started\n' "$(date -Iseconds)"
+          monitor_lane_health
+        } > "$output_dir/android-observer.log" 2>/dev/null &
+        echo $! > "$output_dir/android-observer.pid"
+        ;;
+      ios)
+        {
+          printf '%s ios_sanitized_observer_started\n' "$(date -Iseconds)"
+          monitor_lane_health
+        } > "$output_dir/ios-observer.log" 2>/dev/null &
+        echo $! > "$output_dir/ios-observer.pid"
+        ;;
+    esac
     trap 'stop_monitors "$output_dir"' ERR INT TERM
     sleep 2
     verify_monitors "$output_dir"
     snapshot "$output_dir" "armed"
     trap - ERR INT TERM
-    printf 'Replay armed: %s\nEvidence: %s\n' "$TEST_NAME" "$output_dir"
+    printf 'Replay armed: %s\nEvidence run: %s\n' "$TEST_NAME" "$run_id"
     ;;
   health)
-    test -f "$CURRENT_FILE"
-    output_dir="$(cat "$CURRENT_FILE")"
+    output_dir="$(current_output_dir)"
     verify_monitors "$output_dir"
-    printf 'Replay monitors healthy: %s\n' "$output_dir"
+    printf 'Replay monitors healthy for lane: %s\n' "$LANE"
     ;;
   snapshot)
-    test -f "$CURRENT_FILE"
-    output_dir="$(cat "$CURRENT_FILE")"
+    output_dir="$(current_output_dir)"
     snapshot "$output_dir" "${TEST_NAME:-manual}-$(date '+%H%M%S')"
-    printf 'Snapshot saved: %s\n' "$output_dir"
+    printf 'Snapshot saved for lane: %s\n' "$LANE"
     ;;
   stop)
-    test -f "$CURRENT_FILE"
-    output_dir="$(cat "$CURRENT_FILE")"
-    verify_monitors "$output_dir"
-    snapshot "$output_dir" "final"
+    output_dir="$(current_output_dir)"
+    monitor_status=0
+    verify_monitors "$output_dir" || monitor_status=$?
+    snapshot "$output_dir" "final" || monitor_status=$?
     stop_monitors "$output_dir"
     printf 'stopped_at=%s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" >> "$output_dir/metadata.txt"
-    printf 'Replay evidence closed: %s\n' "$output_dir"
+    printf 'Replay evidence closed for lane: %s\n' "$LANE"
+    exit "$monitor_status"
     ;;
   *)
-    echo "Usage: $0 preflight | arm <test3-call-interruption|test5-offline-recovery> | health | snapshot <label> | stop" >&2
+    echo "Usage: $0 <android|ios> preflight | arm <test3-call-interruption|test5-offline-recovery> | health | snapshot <label> | stop" >&2
     exit 2
     ;;
 esac
