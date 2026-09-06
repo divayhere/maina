@@ -389,7 +389,13 @@ internal object MainaSystemDrainPolicy {
     ): MainaRetainedRecorderState = when {
         !generationMatches || !recorderPresent || !recorderInitialized || !recorderRecording ->
             MainaRetainedRecorderState.INVALID
-        !modeNormal || !silencingKnown || clientSilenced -> MainaRetainedRecorderState.WAITING
+        !modeNormal || !silencingKnown -> MainaRetainedRecorderState.WAITING
+        // Once Android has returned to MODE_NORMAL, a retained recorder that
+        // remains silenced is stale for this drain cycle. Treating it as
+        // WAITING makes the one permitted recreation path unreachable because
+        // only a fresh startInput can force policy to reevaluate silencing on
+        // affected devices.
+        clientSilenced -> MainaRetainedRecorderState.INVALID
         else -> MainaRetainedRecorderState.READY
     }
 
@@ -469,7 +475,7 @@ internal object MainaCallInterruptionPolicy {
     const val STABLE_NORMAL_MS = 750L
     const val RESUME_RETRY_BUDGET_MS = 30_000L
 
-    fun communicationActive(audioMode: Int, clientSilenced: Boolean): Boolean = clientSilenced || when (audioMode) {
+    fun hardCommunicationActive(audioMode: Int): Boolean = when (audioMode) {
         AudioManager.MODE_RINGTONE,
         AudioManager.MODE_IN_CALL,
         AudioManager.MODE_IN_COMMUNICATION,
@@ -478,6 +484,36 @@ internal object MainaCallInterruptionPolicy {
         AudioManager.MODE_COMMUNICATION_REDIRECT,
         -> true
         else -> false
+    }
+
+    /**
+     * Raw capture ownership used by the PCM discard barrier. Either a hard
+     * communication mode or exact-client silencing must keep bytes discarded.
+     */
+    fun communicationActive(audioMode: Int, clientSilenced: Boolean): Boolean =
+        clientSilenced || hardCommunicationActive(audioMode)
+
+    /**
+     * Reducer ownership is phase-aware. Exact-client silencing can initiate a
+     * system pause while recording, but after that pause owns the privacy latch
+     * a stable MODE_NORMAL must be allowed to enter bounded recovery. The
+     * retained-recorder classifier then either proves the old recorder ready or
+     * recreates a still-silenced recorder once. Reads remain disabled in both
+     * cases until native ownership is proven.
+     */
+    fun reducerCommunicationActive(
+        state: MainaCaptureControlState,
+        audioMode: Int,
+        clientSilenced: Boolean,
+    ): Boolean {
+        val hardActive = hardCommunicationActive(audioMode)
+        val systemOwnsPause = state.pauseOwner == MainaCapturePauseOwner.SYSTEM &&
+            state.phase in setOf(
+                MainaCaptureControlPhase.PAUSE_PENDING,
+                MainaCaptureControlPhase.PAUSED,
+                MainaCaptureControlPhase.RESUME_PENDING,
+            )
+        return hardActive || (!systemOwnsPause && clientSilenced)
     }
 
     /** A failed refresh preserves the last privacy-safe value; a fresh value replaces it. */

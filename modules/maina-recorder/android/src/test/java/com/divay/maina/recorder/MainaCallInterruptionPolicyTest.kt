@@ -691,6 +691,45 @@ class MainaCallInterruptionPolicyTest {
     }
 
     @Test
+    fun `system pause leaves stale retained silencing to bounded native recovery after mode normal`() {
+        val recording = MainaCaptureControlState(phase = MainaCaptureControlPhase.RECORDING)
+        assertTrue(
+            MainaCallInterruptionPolicy.reducerCommunicationActive(
+                recording,
+                AudioManager.MODE_NORMAL,
+                clientSilenced = true,
+            ),
+        )
+
+        val systemPaused = MainaCaptureControlState(
+            phase = MainaCaptureControlPhase.PAUSED,
+            pauseOwner = MainaCapturePauseOwner.SYSTEM,
+            communicationActive = true,
+        )
+        assertFalse(
+            MainaCallInterruptionPolicy.reducerCommunicationActive(
+                systemPaused,
+                AudioManager.MODE_NORMAL,
+                clientSilenced = true,
+            ),
+        )
+        assertTrue(
+            MainaCallInterruptionPolicy.reducerCommunicationActive(
+                systemPaused,
+                AudioManager.MODE_RINGTONE,
+                clientSilenced = true,
+            ),
+        )
+
+        val decision = MainaCallInterruptionPolicy.onCommunicationChanged(systemPaused, active = false)
+        assertTrue(decision is MainaCaptureControlDecision.Resume)
+        assertEquals(
+            MainaCaptureControlPhase.RESUME_PENDING,
+            (decision as MainaCaptureControlDecision.Resume).state.phase,
+        )
+    }
+
+    @Test
     fun `fresh recording configuration clears a missed silencing callback while refresh failure is fail closed`() {
         assertFalse(MainaCallInterruptionPolicy.refreshedClientSilenced(cached = true, observed = false))
         assertTrue(MainaCallInterruptionPolicy.refreshedClientSilenced(cached = true, observed = null))
@@ -1127,7 +1166,7 @@ class MainaCallInterruptionPolicyTest {
             ),
         )
         assertEquals(
-            MainaRetainedRecorderState.WAITING,
+            MainaRetainedRecorderState.INVALID,
             MainaSystemDrainPolicy.retainedRecorderState(true, true, true, true, true, true, true),
         )
         assertEquals(
@@ -1152,6 +1191,44 @@ class MainaCallInterruptionPolicyTest {
         )
         assertTrue(MainaSystemDrainPolicy.recreationAllowed(drainCycle = 4, attemptedCycle = 3))
         assertFalse(MainaSystemDrainPolicy.recreationAllowed(drainCycle = 4, attemptedCycle = 4))
+    }
+
+    @Test
+    fun `stably normal but silenced retained recorder recreates once and never publishes stale ownership`() {
+        assertEquals(
+            MainaRetainedRecorderState.INVALID,
+            MainaSystemDrainPolicy.retainedRecorderState(
+                generationMatches = true,
+                modeNormal = true,
+                recorderPresent = true,
+                recorderInitialized = true,
+                recorderRecording = true,
+                silencingKnown = true,
+                clientSilenced = true,
+            ),
+        )
+        assertTrue(MainaSystemDrainPolicy.recreationAllowed(drainCycle = 9, attemptedCycle = 8))
+        assertFalse(MainaSystemDrainPolicy.recreationAllowed(drainCycle = 9, attemptedCycle = 9))
+
+        val service = source(
+            "modules/maina-recorder/android/src/main/java/com/divay/maina/recorder/MainaRecordingService.kt",
+        )
+        val observer = service.substring(
+            service.indexOf("private fun observedCommunicationActive"),
+            service.indexOf("private fun reconcileCommunicationInterruption"),
+        )
+        assertTrue(observer.contains("reducerCommunicationActive"))
+
+        val native = source(
+            "modules/maina-recorder/android/src/main/java/com/divay/maina/recorder/MainaNativeAudioCapture.kt",
+        )
+        val resume = native.substring(
+            native.indexOf("fun resumeAfterCommunication"),
+            native.indexOf("fun prepareRecordingOwnershipPublication"),
+        )
+        assertTrue(resume.contains("recreationAllowed"))
+        assertTrue(resume.contains("activeRecordingConfiguration?.isClientSilenced == false"))
+        assertTrue(resume.indexOf("releaseRecorder()") < resume.indexOf("createAndStartRecorder"))
     }
 
     @Test

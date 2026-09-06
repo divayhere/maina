@@ -1675,7 +1675,8 @@ class MainaRecordingService : Service() {
     }
 
     private fun observedCommunicationActive(): Boolean {
-        return MainaCallInterruptionPolicy.communicationActive(
+        return MainaCallInterruptionPolicy.reducerCommunicationActive(
+            state = controlState,
             audioMode = audioManager.mode,
             clientSilenced = refreshedClientSilenced(),
         )
