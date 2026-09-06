@@ -10,7 +10,6 @@ fi
 # shellcheck source=maina-ios-env.sh
 source "$PROJECT_DIR/scripts/maina-ios-env.sh"
 
-IOS_UDID="${MAINA_IOS_UDID:-00008120-001E146611E2601E}"
 TEAM_ID="${MAINA_IOS_TEAM_ID:-9X4X3R4KCN}"
 VERSION="$("$MAINA_IOS_NODE_BIN/node" -p "require('$PROJECT_DIR/app.json').expo.version")"
 BUILD_NUMBER="$("$MAINA_IOS_NODE_BIN/node" -p "require('$PROJECT_DIR/app.json').expo.ios.buildNumber")"
@@ -45,7 +44,7 @@ exec "$PROJECT_DIR/scripts/external-bin/xcodebuild" \
   -workspace ios/Maina.xcworkspace \
   -scheme MainaUITests \
   -configuration Release \
-  -destination "platform=iOS,id=$IOS_UDID" \
+  -destination 'generic/platform=iOS' \
   -derivedDataPath "$BUILD_ROOT" \
   -allowProvisioningUpdates \
   DEVELOPMENT_TEAM="$TEAM_ID" \

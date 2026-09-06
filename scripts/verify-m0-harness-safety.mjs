@@ -63,8 +63,13 @@ if (iosUiConfigurator) {
   }
 }
 
-if (iosUiBuild && !iosUiBuild.includes('export SENTRY_DISABLE_AUTO_UPLOAD=true')) {
-  throw new Error('iOS UI-test build must disable qualification-only Sentry uploads.');
+if (iosUiBuild) {
+  if (!iosUiBuild.includes('export SENTRY_DISABLE_AUTO_UPLOAD=true')) {
+    throw new Error('iOS UI-test build must disable qualification-only Sentry uploads.');
+  }
+  if (!iosUiBuild.includes("-destination 'generic/platform=iOS'")) {
+    throw new Error('iOS UI-test products must build against the generic iOS destination.');
+  }
 }
 
 if (iosUiRun) {
