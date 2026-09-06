@@ -66,6 +66,11 @@ for (const token of [
   'capture-recovery-deferred',
   'beginBackgroundTask(withName: "Maina microphone recovery")',
   'capture-recovery-background-time-expired',
+  'capture-interruption-bridge-coalesced',
+  'beginInterruptionBridgeIfNeeded(reason: "system-interruption")',
+  'beginInterruptionBridgeIfNeeded(reason: "call-observer")',
+  'interruptionBridgeStartCount',
+  'interruptionBridgeExpirationCount',
   'capture-recovery-signal-coalesced',
   'backgroundTimeRemaining > 4',
   'expireRecoveryBackgroundTaskSynchronously',
@@ -97,6 +102,8 @@ for (const token of [
   'domain == cannotInterruptOthersDomain && code == cannotInterruptOthersCode',
   'static func recoveryMayRetry',
   'static func recoveryLoopStart',
+  'static func interruptionBridgeAction',
+  'static func shouldRetainAfterInterruptionBridgeExpiration',
   'case queueSystemRecovery',
   'case resumeDeliberatePause',
   'case rejectCommunicationActive',
@@ -244,14 +251,32 @@ const backgroundExpiryStart = captureSource.indexOf('private func expireRecovery
 const backgroundExpiryEnd = captureSource.indexOf('private func endRecoveryBackgroundTask', backgroundExpiryStart);
 const backgroundExpirySource = captureSource.slice(backgroundExpiryStart, backgroundExpiryEnd);
 for (const token of [
-  'recoveryReasonCode == "cannot-interrupt-others"',
-  'recoveryAwaitingPublicSignal = temporaryPlatformHold',
+  'MainaIOSCallRecoveryPolicy.shouldRetainAfterInterruptionBridgeExpiration',
+  'recoveryAwaitingPublicSignal = MainaIOSCallRecoveryPolicy',
+  'interruptionBridgeExpirationCount += 1',
+  '"interruption-bridge-expired"',
   'recoveryGeneration += 1',
   'recoveryLoopStartedUptime = nil',
 ]) {
   if (!backgroundExpirySource.includes(token)) {
     throw new Error(`iOS background-exhaustion pending-generation invariant missing: ${token}`);
   }
+}
+const interruptionStart = captureSource.indexOf('private func handleInterruption');
+const interruptionEnd = captureSource.indexOf('private func handleMediaServicesReset', interruptionStart);
+const interruptionSource = captureSource.slice(interruptionStart, interruptionEnd);
+if (interruptionSource.indexOf('beginSystemPause(reason: "system-interruption")') < 0 ||
+    interruptionSource.indexOf('beginSystemPause(reason: "system-interruption")') >=
+      interruptionSource.indexOf('beginInterruptionBridgeIfNeeded(reason: "system-interruption")')) {
+  throw new Error('iOS must acquire the finite interruption bridge immediately after the durable system pause begins.');
+}
+const callObserverStart = captureSource.indexOf('func callObserver(');
+const callObserverEnd = captureSource.indexOf('private func fail(', callObserverStart);
+const callObserverSource = captureSource.slice(callObserverStart, callObserverEnd);
+if (callObserverSource.indexOf('beginSystemPause(reason: "call-observer")') < 0 ||
+    callObserverSource.indexOf('beginSystemPause(reason: "call-observer")') >=
+      callObserverSource.indexOf('beginInterruptionBridgeIfNeeded(reason: "call-observer")')) {
+  throw new Error('iOS CallKit activation must acquire the same finite bridge only after the system pause owns state.');
 }
 const recoveryCatchStart = scheduledRecoverySource.indexOf('} catch {');
 const recoveryCatchSource = scheduledRecoverySource.slice(recoveryCatchStart);

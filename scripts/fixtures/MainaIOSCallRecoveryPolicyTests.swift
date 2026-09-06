@@ -177,6 +177,86 @@ let laterPublicSignalLoop = MainaIOSCallRecoveryPolicy.recoveryLoopStart(
 require(laterPublicSignalLoop == 240, "a later real public signal must start a fresh bounded loop")
 require(laterPublicSignalLoop != firstPostCallLoop, "separate public-signal loops must not share stale timing")
 
+require(
+  MainaIOSCallRecoveryPolicy.interruptionBridgeAction(
+    interrupted: true,
+    manuallyPaused: false,
+    terminal: false,
+    taskActive: false,
+    interruptionCycle: 4,
+    attemptedCycle: 3
+  ) == .acquire,
+  "a genuine interruption must acquire its finite bridge while the app still runs"
+)
+require(
+  MainaIOSCallRecoveryPolicy.interruptionBridgeAction(
+    interrupted: true,
+    manuallyPaused: false,
+    terminal: false,
+    taskActive: true,
+    interruptionCycle: 4,
+    attemptedCycle: 3
+  ) == .coalesce,
+  "duplicate CallKit and AVAudioSession begins must share one live bridge"
+)
+require(
+  MainaIOSCallRecoveryPolicy.interruptionBridgeAction(
+    interrupted: true,
+    manuallyPaused: false,
+    terminal: false,
+    taskActive: false,
+    interruptionCycle: 4,
+    attemptedCycle: 4
+  ) == .coalesce,
+  "an expired bridge must not be reacquired by a duplicate begin in the same cycle"
+)
+require(
+  MainaIOSCallRecoveryPolicy.interruptionBridgeAction(
+    interrupted: true,
+    manuallyPaused: false,
+    terminal: false,
+    taskActive: false,
+    interruptionCycle: 5,
+    attemptedCycle: 4
+  ) == .acquire,
+  "a real call re-entry owns a new finite bridge cycle"
+)
+require(
+  MainaIOSCallRecoveryPolicy.interruptionBridgeAction(
+    interrupted: true,
+    manuallyPaused: true,
+    terminal: false,
+    taskActive: false,
+    interruptionCycle: 5,
+    attemptedCycle: 4
+  ) == .ignore,
+  "manual pause must never acquire a system interruption bridge"
+)
+require(
+  MainaIOSCallRecoveryPolicy.shouldRetainAfterInterruptionBridgeExpiration(
+    interrupted: true,
+    stopped: false,
+    manuallyPaused: false
+  ),
+  "bridge expiration must preserve one system recovery generation for a real public wake"
+)
+require(
+  !MainaIOSCallRecoveryPolicy.shouldRetainAfterInterruptionBridgeExpiration(
+    interrupted: true,
+    stopped: true,
+    manuallyPaused: false
+  ),
+  "Stop must win over an expiring interruption bridge"
+)
+require(
+  !MainaIOSCallRecoveryPolicy.shouldRetainAfterInterruptionBridgeExpiration(
+    interrupted: true,
+    stopped: false,
+    manuallyPaused: true
+  ),
+  "manual pause must win over an expiring interruption bridge"
+)
+
 print("iOS call-recovery policy tests passed.")
   }
 }

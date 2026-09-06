@@ -23,6 +23,33 @@ enum MainaIOSCallRecoveryPolicy {
     case rejectCommunicationActive
   }
 
+  enum InterruptionBridgeAction: Equatable {
+    case acquire
+    case coalesce
+    case ignore
+  }
+
+  static func interruptionBridgeAction(
+    interrupted: Bool,
+    manuallyPaused: Bool,
+    terminal: Bool,
+    taskActive: Bool,
+    interruptionCycle: Int,
+    attemptedCycle: Int
+  ) -> InterruptionBridgeAction {
+    guard interrupted, !manuallyPaused, !terminal, interruptionCycle > 0 else { return .ignore }
+    if taskActive || attemptedCycle == interruptionCycle { return .coalesce }
+    return .acquire
+  }
+
+  static func shouldRetainAfterInterruptionBridgeExpiration(
+    interrupted: Bool,
+    stopped: Bool,
+    manuallyPaused: Bool
+  ) -> Bool {
+    interrupted && !stopped && !manuallyPaused
+  }
+
   static func manualResumeAction(
     interrupted: Bool,
     deliberatelyPaused: Bool,
