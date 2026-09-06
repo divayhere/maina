@@ -1173,6 +1173,54 @@ class MainaCallInterruptionPolicyTest {
     }
 
     @Test
+    fun `resume tap coalesces behind an in-flight native pause checkpoint`() {
+        val manualPending = MainaCaptureControlState(
+            phase = MainaCaptureControlPhase.PAUSE_PENDING,
+            pauseOwner = MainaCapturePauseOwner.MANUAL,
+            generation = 41,
+            communicationActive = false,
+        )
+        val manualResume = MainaCallInterruptionPolicy.onManualResume(manualPending)
+            as MainaCaptureControlDecision.Resume
+        assertEquals(MainaCaptureControlPhase.RESUME_PENDING, manualResume.state.phase)
+        assertEquals(MainaCapturePauseOwner.MANUAL, manualResume.state.pauseOwner)
+        assertEquals(42, manualResume.state.generation)
+
+        val systemPending = manualPending.copy(
+            pauseOwner = MainaCapturePauseOwner.SYSTEM,
+            generation = 51,
+        )
+        val systemResume = MainaCallInterruptionPolicy.onManualResume(systemPending)
+            as MainaCaptureControlDecision.Resume
+        assertEquals(MainaCaptureControlPhase.RESUME_PENDING, systemResume.state.phase)
+        assertEquals(MainaCapturePauseOwner.SYSTEM, systemResume.state.pauseOwner)
+        assertEquals(52, systemResume.state.generation)
+
+        assertTrue(
+            MainaCallInterruptionPolicy.onManualResume(
+                manualPending.copy(communicationActive = true),
+            ) is MainaCaptureControlDecision.Denied,
+        )
+    }
+
+    @Test
+    fun `record screen waits for native recording ownership before clearing paused UI`() {
+        val record = source("src/app/record.tsx")
+        val resume = record.substring(
+            record.indexOf("const resumeRecording = async"),
+            record.indexOf("const stopAndSave = async"),
+        )
+        assertTrue(resume.indexOf("resumeNativeCapture()") < resume.indexOf("waitForNativeCaptureState("))
+        assertTrue(resume.indexOf("waitForNativeCaptureState(") < resume.indexOf("pausedRef.current = false"))
+        assertTrue(resume.contains("'recording'"))
+        val deliveredCommand = resume.substring(
+            resume.indexOf("await resumeNativeCapture()"),
+            resume.indexOf("log.info('record', 'native resume requested'"),
+        )
+        assertFalse(deliveredCommand.contains("const resumedStatus = await getNativeCaptureStatusAsync"))
+    }
+
+    @Test
     fun `resume action coalesces system recovery and never publishes recording before reads`() {
         val service = source(
             "modules/maina-recorder/android/src/main/java/com/divay/maina/recorder/MainaRecordingService.kt",
