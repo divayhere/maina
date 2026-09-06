@@ -1137,6 +1137,42 @@ class MainaCallInterruptionPolicyTest {
     }
 
     @Test
+    fun `system resume persistence failure stays latched system owned and retry eligible`() {
+        val systemPaused = MainaCaptureControlState(
+            phase = MainaCaptureControlPhase.PAUSED,
+            pauseOwner = MainaCapturePauseOwner.SYSTEM,
+            generation = 37,
+            communicationActive = false,
+        )
+        val requestedRecovery = MainaCallInterruptionPolicy.onManualResume(systemPaused)
+            as MainaCaptureControlDecision.Resume
+        val operationOwner = MainaResumeRequestPolicy.operationOwner(requestedRecovery.state)
+        val failedClosed = requestedRecovery.state.copy(
+            phase = MainaCaptureControlPhase.PAUSED,
+            pauseOwner = operationOwner,
+        )
+
+        assertEquals(MainaCapturePauseOwner.SYSTEM, failedClosed.pauseOwner)
+        assertTrue(
+            MainaCallInterruptionPolicy.onCommunicationChanged(failedClosed, active = false)
+                is MainaCaptureControlDecision.Resume,
+        )
+
+        val service = source(
+            "modules/maina-recorder/android/src/main/java/com/divay/maina/recorder/MainaRecordingService.kt",
+        )
+        val failure = service.substring(
+            service.indexOf("private fun failClosedResumeDurability"),
+            service.indexOf("private fun dispatchNativePause"),
+        )
+        assertTrue(
+            failure.indexOf("nativeCapture.latchReadsOffNow()") <
+                failure.indexOf("phase = MainaCaptureControlPhase.PAUSED"),
+        )
+        assertTrue(failure.contains("pauseOwner = owner"))
+    }
+
+    @Test
     fun `resume action coalesces system recovery and never publishes recording before reads`() {
         val service = source(
             "modules/maina-recorder/android/src/main/java/com/divay/maina/recorder/MainaRecordingService.kt",
@@ -1148,6 +1184,12 @@ class MainaCallInterruptionPolicyTest {
         assertTrue(resumeAction.contains("preservesCommunicationRecovery(controlState)"))
         assertTrue(resumeAction.contains("if (!preservingSystemRecovery) cancelCommunicationRetryTimer()"))
         assertTrue(resumeAction.contains("owner = operationOwner"))
+        assertTrue(
+            resumeAction.indexOf("val operationOwner = MainaResumeRequestPolicy.operationOwner(decision.state)") <
+                resumeAction.indexOf("updateControlState(decision.state, \"manual-resume-pending\")"),
+        )
+        assertTrue(resumeAction.contains("failClosedResumeDurability(operationOwner)"))
+        assertFalse(resumeAction.contains("failClosedResumeDurability(MainaCapturePauseOwner.MANUAL)"))
         assertTrue(resumeAction.contains("if (systemRecovery)"))
         assertTrue(resumeAction.contains("nativeCapture.resumeAfterCommunication(generation)"))
         assertTrue(resumeAction.contains("shouldRearmCommunicationRecovery"))

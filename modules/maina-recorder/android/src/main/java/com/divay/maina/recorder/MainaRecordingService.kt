@@ -462,8 +462,8 @@ class MainaRecordingService : Service() {
                         refreshForegroundUi()
                     }
                     is MainaCaptureControlDecision.Resume -> {
+                        val operationOwner = MainaResumeRequestPolicy.operationOwner(decision.state)
                         if (updateControlState(decision.state, "manual-resume-pending")) {
-                            val operationOwner = MainaResumeRequestPolicy.operationOwner(decision.state)
                             val systemRecovery = operationOwner == MainaCapturePauseOwner.SYSTEM
                             val operation = issueCaptureOperation(
                                 kind = MainaCaptureOperationKind.RESUME,
@@ -494,7 +494,7 @@ class MainaRecordingService : Service() {
                                 }
                             }
                         } else {
-                            failClosedResumeDurability(MainaCapturePauseOwner.MANUAL)
+                            failClosedResumeDurability(operationOwner)
                         }
                     }
                     is MainaCaptureControlDecision.StateOnly -> {
