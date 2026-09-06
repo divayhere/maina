@@ -44,6 +44,7 @@ class SanitizedListener(XCUITestListener):
         self.plan_finished = False
         self.cases: dict[str, dict[str, object]] = {}
         self.failure_count = 0
+        self.failure_locations: list[dict[str, object]] = []
         self.initialization_failed = False
         self.result_directory = result_directory
         self.screenshots: list[dict[str, object]] = []
@@ -65,6 +66,21 @@ class SanitizedListener(XCUITestListener):
         self, test_class: str, method: str, message: str, file: str, line: int
     ) -> None:
         self.failure_count += 1
+        method_name = method.removesuffix("()")
+        source_name = Path(file).name
+        if (
+            method_name in {value.split("/", 1)[1] for value in ALLOWED_TESTS.values()}
+            and source_name == "MainaUITests.swift"
+            and isinstance(line, int)
+            and 1 <= line <= 10_000
+        ):
+            # Preserve only the bounded source location. Raw XCTest messages
+            # can contain device or application content and are never stored.
+            self.failure_locations.append({
+                "method": method_name,
+                "source": source_name,
+                "line": line,
+            })
 
     async def initialization_for_ui_testing_did_fail(self, error: object) -> None:
         self.initialization_failed = True
@@ -167,6 +183,7 @@ async def run(result_path: Path, requested: list[str]) -> int:
             "planStarted": listener.plan_started,
             "planFinished": listener.plan_finished,
             "failureCount": listener.failure_count,
+            "failureLocations": listener.failure_locations,
             "screenshots": listener.screenshots,
             "durationMs": round((time.monotonic() - started) * 1000),
             "rawDeviceOutputPersisted": False,
@@ -190,6 +207,7 @@ async def run(result_path: Path, requested: list[str]) -> int:
             "planStarted": listener.plan_started,
             "planFinished": listener.plan_finished,
             "failureCount": listener.failure_count,
+            "failureLocations": listener.failure_locations,
             "durationMs": round((time.monotonic() - started) * 1000),
             "rawDeviceOutputPersisted": False,
             "lifecycleMutationAttempts": 0,
