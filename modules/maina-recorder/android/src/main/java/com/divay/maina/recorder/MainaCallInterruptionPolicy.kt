@@ -6,6 +6,10 @@ internal enum class MainaCapturePauseOwner { NONE, MANUAL, SYSTEM }
 internal enum class MainaCaptureControlPhase {
     IDLE, RECORDING, PAUSE_PENDING, PAUSED, RESUME_PENDING, TERMINAL,
 }
+internal enum class MainaProcessDeathRecoveryDisposition {
+    PRESERVE_MANUAL_PAUSE,
+    FINALIZE_INTERRUPTED_CAPTURE,
+}
 
 internal data class MainaCaptureControlState(
     val phase: MainaCaptureControlPhase = MainaCaptureControlPhase.IDLE,
@@ -578,6 +582,27 @@ internal object MainaCallInterruptionPolicy {
 
     fun shouldRestoreAfterProcessDeath(state: MainaCaptureControlState): Boolean =
         state.phase !in setOf(MainaCaptureControlPhase.IDLE, MainaCaptureControlPhase.TERMINAL)
+
+    /**
+     * A service-process death destroys the exact AudioRecord owner. Only a
+     * completed or in-flight deliberate manual pause remains user-resumable;
+     * every other active phase is closed as an interrupted meeting so startup
+     * recovery can preserve its durable chunks without publishing a phantom
+     * paused/recording session.
+     */
+    fun processDeathRecoveryDisposition(
+        state: MainaCaptureControlState,
+    ): MainaProcessDeathRecoveryDisposition = if (
+        state.pauseOwner == MainaCapturePauseOwner.MANUAL &&
+        state.phase in setOf(
+            MainaCaptureControlPhase.PAUSE_PENDING,
+            MainaCaptureControlPhase.PAUSED,
+        )
+    ) {
+        MainaProcessDeathRecoveryDisposition.PRESERVE_MANUAL_PAUSE
+    } else {
+        MainaProcessDeathRecoveryDisposition.FINALIZE_INTERRUPTED_CAPTURE
+    }
 
     /** Process recreation never assumes microphone ownership survived. */
     fun restoreAfterProcessDeath(
