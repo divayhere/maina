@@ -1879,6 +1879,9 @@ class MainaRecordingService : Service() {
     private fun restoreDurableCaptureControl() {
         val restored = captureControlStore.read() ?: return
         if (!MainaCallInterruptionPolicy.shouldRestoreAfterProcessDeath(restored.reducerState())) return
+        val recoveryDisposition = MainaCallInterruptionPolicy.processDeathRecoveryDisposition(
+            restored.reducerState(),
+        )
         val processGapMs = (System.currentTimeMillis() - restored.updatedAtEpochMs).coerceAtLeast(0L)
         val snapshot = nativeCapture.restorePausedSession(
             MainaNativeAudioCapture.Options(
@@ -1916,6 +1919,7 @@ class MainaRecordingService : Service() {
             "state" to "paused",
             "pauseReason" to restoredState.pauseOwner.name.lowercase(),
             "restoredAfterProcessDeath" to true,
+            "processRecoveryDisposition" to recoveryDisposition.name.lowercase(),
         )
         recordNativeEvent(
             level = "warn",
@@ -1927,15 +1931,23 @@ class MainaRecordingService : Service() {
                 "phase" to restoredState.phase.name.lowercase(),
                 "pauseOwner" to restoredState.pauseOwner.name.lowercase(),
                 "generation" to restoredState.generation,
+                "recoveryDisposition" to recoveryDisposition.name.lowercase(),
             ),
         )
-        if (restorationPersisted && restoredState.pauseOwner == MainaCapturePauseOwner.SYSTEM && !communicationActive) {
-            val decision = MainaCallInterruptionPolicy.onCommunicationChanged(restoredState, active = false)
-            if (decision is MainaCaptureControlDecision.Resume) {
-                if (updateControlState(decision.state, "process-restored-resume-pending")) {
-                    scheduleCommunicationResume()
-                } else {
-                    failClosedResumeDurability(MainaCapturePauseOwner.SYSTEM)
+        if (restorationPersisted &&
+            recoveryDisposition == MainaProcessDeathRecoveryDisposition.FINALIZE_INTERRUPTED_CAPTURE
+        ) {
+            val expectedGeneration = restoredState.generation
+            postMainOutcome {
+                if (controlState.phase == MainaCaptureControlPhase.PAUSED &&
+                    controlState.generation == expectedGeneration &&
+                    activeCaptureOperation == null
+                ) {
+                    requestTerminalNativeStop(
+                        MainaCaptureOperationKind.STOP,
+                        "process-restored-finalize",
+                        abort = false,
+                    )
                 }
             }
         }

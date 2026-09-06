@@ -774,20 +774,67 @@ class MainaCallInterruptionPolicyTest {
             phase = MainaCaptureControlPhase.RECORDING,
             generation = 4,
         )
+        assertEquals(
+            MainaProcessDeathRecoveryDisposition.FINALIZE_INTERRUPTED_CAPTURE,
+            MainaCallInterruptionPolicy.processDeathRecoveryDisposition(recording),
+        )
         val recovered = MainaCallInterruptionPolicy.restoreAfterProcessDeath(recording, false)
         assertEquals(MainaCaptureControlPhase.PAUSED, recovered.phase)
         assertEquals(MainaCapturePauseOwner.SYSTEM, recovered.pauseOwner)
         assertEquals(5L, recovered.generation)
 
         val manual = MainaCallInterruptionPolicy.restoreAfterProcessDeath(
-            recording.copy(pauseOwner = MainaCapturePauseOwner.MANUAL),
+            recording.copy(
+                phase = MainaCaptureControlPhase.PAUSED,
+                pauseOwner = MainaCapturePauseOwner.MANUAL,
+            ),
             communicationActive = false,
+        )
+        assertEquals(
+            MainaProcessDeathRecoveryDisposition.PRESERVE_MANUAL_PAUSE,
+            MainaCallInterruptionPolicy.processDeathRecoveryDisposition(
+                recording.copy(
+                    phase = MainaCaptureControlPhase.PAUSED,
+                    pauseOwner = MainaCapturePauseOwner.MANUAL,
+                ),
+            ),
         )
         assertEquals(MainaCapturePauseOwner.MANUAL, manual.pauseOwner)
         assertTrue(
             MainaCallInterruptionPolicy.onCommunicationChanged(manual, false)
                 is MainaCaptureControlDecision.StateOnly,
         )
+    }
+
+    @Test
+    fun `process death finalizes every non-manual active phase and never auto resumes`() {
+        listOf(
+            MainaCaptureControlPhase.RECORDING,
+            MainaCaptureControlPhase.PAUSE_PENDING,
+            MainaCaptureControlPhase.PAUSED,
+            MainaCaptureControlPhase.RESUME_PENDING,
+        ).forEach { phase ->
+            assertEquals(
+                MainaProcessDeathRecoveryDisposition.FINALIZE_INTERRUPTED_CAPTURE,
+                MainaCallInterruptionPolicy.processDeathRecoveryDisposition(
+                    MainaCaptureControlState(
+                        phase = phase,
+                        pauseOwner = MainaCapturePauseOwner.SYSTEM,
+                    ),
+                ),
+            )
+        }
+
+        val service = source(
+            "modules/maina-recorder/android/src/main/java/com/divay/maina/recorder/MainaRecordingService.kt",
+        )
+        val restoration = service.substring(
+            service.indexOf("private fun restoreDurableCaptureControl"),
+            service.indexOf("private fun emitServiceHeartbeat"),
+        )
+        assertTrue(restoration.contains("process-restored-finalize"))
+        assertTrue(restoration.contains("requestTerminalNativeStop"))
+        assertFalse(restoration.contains("scheduleCommunicationResume"))
     }
 
     @Test
