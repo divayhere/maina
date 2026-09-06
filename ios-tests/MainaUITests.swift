@@ -145,7 +145,9 @@ final class MainaUITests: XCTestCase {
   func testDiscardRecordingLifecycle() throws {
     startFreshRecording()
     sleep(4)
-    app.buttons["Discard this recording"].tap()
+    let discard = app.staticTexts["Discard this recording"]
+    XCTAssertTrue(discard.waitForExistence(timeout: 5))
+    discard.tap()
     let destructive = app.alerts.buttons["Discard this recording"]
     XCTAssertTrue(destructive.waitForExistence(timeout: 5))
     destructive.tap()
