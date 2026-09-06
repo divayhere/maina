@@ -37,6 +37,10 @@ cd "$PROJECT_DIR"
 }
 
 maina_storage_mkdir "$BUILD_ROOT"
+# Qualification-only UI-test products are never distributed and must not
+# require or transmit Sentry upload credentials. Runtime Sentry integration in
+# the signed Maina app remains unchanged.
+export SENTRY_DISABLE_AUTO_UPLOAD=true
 exec "$PROJECT_DIR/scripts/external-bin/xcodebuild" \
   -workspace ios/Maina.xcworkspace \
   -scheme MainaUITests \

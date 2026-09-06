@@ -15,6 +15,7 @@ const stop = readIfPresent('scripts/stop-dual-device-soak.sh');
 const ui = readIfPresent('ios-tests/MainaUITests.swift');
 const adbTarget = readIfPresent('scripts/adb-target.sh');
 const iosUiConfigurator = readIfPresent('scripts/configure-ios-ui-tests.rb');
+const iosUiBuild = readIfPresent('scripts/build-ios-ui-test-products-guarded.sh');
 
 execFileSync('/bin/bash', ['-n', replayPath], { stdio: 'inherit' });
 
@@ -58,6 +59,10 @@ if (iosUiConfigurator) {
   if (!iosUiConfigurator.includes(`configuration.build_settings["PRODUCT_BUNDLE_IDENTIFIER"] = "${qualificationRunnerId}"`)) {
     throw new Error(`iOS UI-test configurator is not bound to ${qualificationRunnerId}.xctrunner`);
   }
+}
+
+if (iosUiBuild && !iosUiBuild.includes('export SENTRY_DISABLE_AUTO_UPLOAD=true')) {
+  throw new Error('iOS UI-test build must disable qualification-only Sentry uploads.');
 }
 
 console.log('M0 harness safety verification passed.');
