@@ -10,12 +10,12 @@
     "android": {
       "repository": "/Users/divay/Developer/MainaV2",
       "branch": "codex/mobile-memory-m3-m4",
-      "productCommit": "3dd4cf384d3ac7f306283098718970208ca65b2a"
+      "productCommit": "3dd4cf3c744389ec476399d6bd5506ad0dc7628f"
     },
     "ios": {
       "repository": "/Users/divay/Developer/.worktrees/maina-ios-feasibility",
       "branch": "codex/ios-mobile-memory-m3-m4",
-      "productCommit": "696d587a6060a9719bd56d5f95ef281f0d535ad0"
+      "productCommit": "696d5873c1eab15c95bb10f1f3a4ec6aa0c2fb72"
     },
     "coordinationCommit": "1b9c1c631adaba95d2a3f4a347b28db962e2ccc3",
     "backendSourceCommit": "b879876506aaf7a18f4c2d26b9c5442629f68190",

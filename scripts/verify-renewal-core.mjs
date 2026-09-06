@@ -94,7 +94,7 @@ const app = findInstalledIosApp({ result: { apps: [{
   bundleIdentifier: 'com.divay.maina.staging', version: '0.10.28', bundleVersion: 11,
 }] } }, 'com.divay.maina.staging');
 assert.deepEqual(app, { bundleId: 'com.divay.maina.staging', version: '0.10.28', build: '11' });
-const approvedIos = { bundleId: 'com.divay.maina.staging', version: '0.10.55', build: '37' };
+const approvedIos = { bundleId: 'com.divay.maina.staging', version: '0.10.56', build: '38' };
 assert.equal(validateInstalledIosArtifact(approvedIos, approvedIos), true);
 assert.throws(
   () => validateInstalledIosArtifact({ ...approvedIos, bundleId: 'com.divay.maina.other' }, approvedIos),

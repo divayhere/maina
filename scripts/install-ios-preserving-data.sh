@@ -16,12 +16,12 @@ umask 077
 
 cd "$PROJECT_DIR"
 if ! node scripts/release-provenance-cli.mjs authorize ios \
-  release/m3-m4-0.10.55-candidate-plan.json "$PROVENANCE" "$APP_ZIP" >/dev/null 2>&1; then
+  release/m3-m4-0.10.56-candidate-plan.json "$PROVENANCE" "$APP_ZIP" >/dev/null 2>&1; then
   echo "IOS_RELEASE_PROVENANCE_REJECTED" >&2
   exit 1
 fi
 IFS=$'\t' read -r _ _ _ EXPECTED_BUNDLE_ID EXPECTED_VERSION EXPECTED_BUILD \
-  <<< "$(node scripts/release-provenance-cli.mjs replay-config release/m3-m4-0.10.55-candidate-plan.json "$PROVENANCE")"
+  <<< "$(node scripts/release-provenance-cli.mjs replay-config release/m3-m4-0.10.56-candidate-plan.json "$PROVENANCE")"
 [[ "$BUNDLE_ID" == "$EXPECTED_BUNDLE_ID" ]] || {
   echo "iOS bundle override conflicts with the approved dual provenance." >&2
   exit 2

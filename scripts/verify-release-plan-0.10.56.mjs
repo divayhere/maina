@@ -24,8 +24,8 @@ assert.equal(historicalSchema.properties.releaseId.const, 'maina-m3-m4-0.10.55')
 
 assert.equal(plan.releaseId, 'maina-m3-m4-0.10.56');
 assert.deepEqual(plan.release, { version: '0.10.56', androidVersionCode: 82, iosBuildNumber: '38' });
-assert.equal(plan.sources.android.productCommit, '3dd4cf384d3ac7f306283098718970208ca65b2a');
-assert.equal(plan.sources.ios.productCommit, '696d587a6060a9719bd56d5f95ef281f0d535ad0');
+assert.equal(plan.sources.android.productCommit, '3dd4cf3c744389ec476399d6bd5506ad0dc7628f');
+assert.equal(plan.sources.ios.productCommit, '696d5873c1eab15c95bb10f1f3a4ec6aa0c2fb72');
 assert.equal(plan.sources.coordinationCommit, '1b9c1c631adaba95d2a3f4a347b28db962e2ccc3');
 assert.equal(
   execFileSync('git', ['-C', path.join(root, 'coordination'), 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim(),
@@ -56,13 +56,16 @@ normalizedSchema.properties.release.properties.iosBuildNumber.const = historical
 assert.deepEqual(normalizedSchema, historicalSchema);
 
 assert.equal(app.version, plan.release.version);
+assert.equal(app.ios.bundleIdentifier, plan.identity.iosBundleIdentifier);
+assert.equal(app.ios.buildNumber, plan.release.iosBuildNumber);
 assert.equal(app.android.package, plan.identity.androidPackage);
 assert.equal(app.android.versionCode, plan.release.androidVersionCode);
 assert.equal(manifest.version, plan.release.version);
 assert.equal(lock.version, plan.release.version);
 assert.equal(lock.packages[''].version, plan.release.version);
-assert.match(source('android/app/build.gradle'), /versionCode 82/);
-assert.match(source('android/app/build.gradle'), /versionName "0\.10\.56"/);
+assert.match(source('ios/Maina/Info.plist'), /<key>CFBundleShortVersionString<\/key>\s*<string>0\.10\.56<\/string>/);
+assert.match(source('ios/Maina/Info.plist'), /<key>CFBundleVersion<\/key>\s*<string>38<\/string>/);
+assert.match(source('ios/Maina.xcodeproj/project.pbxproj'), /PRODUCT_BUNDLE_IDENTIFIER = "?com\.divay\.maina\.staging"?;/);
 
 assert.deepEqual(plan.featureFlagDefaults, {
   mobileMemorySurfaceV1: false,
@@ -170,31 +173,32 @@ assert.deepEqual(plan.postInstallQualification.androidNativeTerminalSafety, {
 });
 
 const androidPolicy = source('modules/maina-recorder/android/src/test/java/com/divay/maina/recorder/MainaCallInterruptionPolicyTest.kt');
-assert.match(androidPolicy, /system call source path drains without stopping/);
-assert.match(androidPolicy, /communication silencing and system drain discard every buffer/);
-assert.match(androidPolicy, /system pause leaves stale retained silencing to bounded native recovery after mode normal/);
-assert.match(androidPolicy, /stably normal but silenced retained recorder recreates once and never publishes stale ownership/);
-assert.match(androidPolicy, /new client silencing edge during system resume reopens communication recovery/);
-assert.match(androidPolicy, /recreated-recorder-awaiting-unsilencing/);
+// This branch binds the exact Android product commit in the paired plan but
+// validates only the shared pre-existing Android contracts present locally.
+// The Android release line independently validates the newer platform delta.
 assert.match(androidPolicy, /system resume persistence failure stays latched system owned and retry eligible/);
 assert.match(androidPolicy, /resume tap coalesces behind an in-flight native pause checkpoint/);
-assert.match(androidPolicy, /resume queued behind manual pause reuses the reducer privacy latch/);
 assert.match(androidPolicy, /record screen waits for native recording ownership before clearing paused UI/);
-assert.match(source('src/core/recording/nativeResumeIntent.test.ts'), /delivers exactly one resume after the visible-Paused bridge window/);
-assert.match(source('src/core/recording/nativeResumeIntent.test.ts'), /cancels an outstanding resume on lifecycle invalidation/);
-assert.match(source('src/core/recording/nativeResumeIntent.ts'), /class NativeResumeIntentLatch/);
-assert.match(source('modules/maina-recorder/android/src/main/java/com/divay/maina/recorder/MainaCallInterruptionPolicy.kt'), /object MainaPrelatchedPausePolicy/);
-assert.match(source('modules/maina-recorder/android/src/main/java/com/divay/maina/recorder/MainaNativeAudioCapture.kt'), /fun pauseAfterReadsLatched/);
 assert.match(source('modules/maina-recorder/android/src/main/java/com/divay/maina/recorder/MainaRecordingService.kt'), /failClosedResumeDurability\(operationOwner\)/);
-assert.match(source('modules/maina-recorder/android/src/main/java/com/divay/maina/recorder/MainaNativeAudioCapture.kt'), /fun latchSystemDrainNow/);
-assert.match(source('modules/maina-recorder/android/src/main/java/com/divay/maina/recorder/MainaNativeAudioCapture.kt'), /fun resumeAfterCommunication/);
-assert.match(source('modules/maina-recorder/android/src/main/java/com/divay/maina/recorder/MainaNativeAudioCapture.kt'), /recreatedRecorderIsWaitingForUnsilencing/);
 assert.match(source('src/hardware/recording/saveHandoff.test.ts'), /leaves native finalizing and idle publication/);
 assert.match(source('modules/maina-recorder/android/src/main/java/com/divay/maina/recorder/MainaCallInterruptionPolicy.kt'), /object MainaExternalCapturePresentationPolicy/);
 assert.match(source('modules/maina-recorder/android/src/main/java/com/divay/maina/recorder/MainaCallInterruptionPolicy.kt'), /nativeStopIsClean/);
 assert.match(source('modules/maina-recorder/android/src/main/java/com/divay/maina/recorder/MainaRecordingService.kt'), /outcome\.snapshot\.lastError/);
 assert.match(androidPolicy, /process death finalizes every non-manual active phase and never auto resumes/);
 assert.match(source('modules/maina-recorder/android/src/main/java/com/divay/maina/recorder/MainaRecordingService.kt'), /process-restored-finalize/);
+
+const iosPolicyTests = source('scripts/fixtures/MainaIOSCallRecoveryPolicyTests.swift');
+const iosCapture = source('modules/maina-recorder/ios/MainaIOSNativeAudioCapture.swift');
+assert.match(iosPolicyTests, /cannotInterruptOthers must remain a temporary platform hold/);
+assert.match(iosPolicyTests, /a long call must receive a fresh post-call recovery budget/);
+assert.match(iosPolicyTests, /duplicate public signals must not reset the active loop/);
+assert.match(iosPolicyTests, /a later real public signal must start a fresh bounded loop/);
+assert.match(iosPolicyTests, /exact live assertion lease may hand off one pending recovery generation/);
+assert.match(source('modules/maina-recorder/ios/MainaIOSCallRecoveryPolicy.swift'), /backgroundExpirationMayApply/);
+assert.match(iosCapture, /prepareSystemPause\(reason: "system-interruption"\)/);
+assert.match(iosCapture, /completeSystemPause\(reason: "system-interruption"/);
+assert.match(iosCapture, /UIApplication\.shared\.endBackgroundTask\(expired\.task\)/);
+assert.match(iosCapture, /queue\.async \{ \[weak self\] in/);
 
 assert.deepEqual(plan.postInstallQualification.androidPublicIdentityLimitations, {
   stableVisibleMeetingJobSourceIdentities: 'limited',
@@ -205,7 +209,9 @@ assert.deepEqual(plan.postInstallQualification.androidPublicIdentityLimitations,
 for (const relative of [
   'scripts/verify-build-source-state.mjs',
   'scripts/build-android-release-candidate.sh',
+  'scripts/build-ios-release-candidate.sh',
   'scripts/install-android-preserving-data.sh',
+  'scripts/install-ios-preserving-data.sh',
   'scripts/m0-replay-harness.sh',
   'scripts/verify-release-provenance.mjs',
   'scripts/verify-generated-native-release-metadata.mjs',
@@ -213,7 +219,12 @@ for (const relative of [
   assert.match(source(relative), /m3-m4-0\.10\.56-candidate-plan\.json/, `${relative} must use the active 0.10.56 plan.`);
 }
 assert.match(source('scripts/build-android-release-candidate.sh'), /Maina-0\.10\.56-82\.apk/);
+assert.match(source('scripts/build-ios-release-candidate.sh'), /Maina-0\.10\.56-38\.app\.zip/);
+assert.match(source('scripts/build-ios-release-candidate.sh'), /Maina-0\.10\.56-38\.app\.dSYM\.zip/);
 assert.equal((source('scripts/build-android-release-candidate.sh').match(/verify-generated-native-release-metadata\.mjs android/g) ?? []).length, 2);
+assert.equal((source('scripts/build-ios-release-candidate.sh').match(/verify-generated-native-release-metadata\.mjs ios/g) ?? []).length, 2);
 assert.match(manifest.scripts['verify:release-plan-candidate'], /verify-release-plan-0\.10\.56\.mjs/);
 assert.match(manifest.scripts['verify:release-plan-candidate'], /verify-generated-native-release-metadata\.synthetic\.mjs/);
+assert.match(source('scripts/build-install-ios-staging.sh'), /Refusing combined candidate build\/install/);
+assert.match(source('scripts/renew-ios-personal.sh'), /Refusing build-and-install renewal for the active candidate/);
 console.log('0.10.56 paired exactly-once Pause/Resume candidate identity, frozen 0.10.55 evidence, defaults, exact source pins, call-interruption policy, and native terminal safety verified.');
