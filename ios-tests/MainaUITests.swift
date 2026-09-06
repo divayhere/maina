@@ -16,6 +16,10 @@ final class MainaUITests: XCTestCase {
     }
     app.launch()
     XCTAssertTrue(app.wait(for: .runningForeground, timeout: 15))
+    // A prior qualification case may legitimately leave Maina on a meeting
+    // detail screen. Normalize every standalone case back to Home before
+    // asserting the fresh-recording entry point.
+    tapTab(named: "Home", fallbackX: 0.18)
     XCTAssertTrue(app.buttons["Record a meeting"].waitForExistence(timeout: 15))
   }
 
