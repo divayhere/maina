@@ -124,11 +124,13 @@ async def run(result_path: Path, requested: list[str]) -> int:
     started = time.monotonic()
     listener = SanitizedListener(result_path.parent)
     rsd = None
+    failure_stage = "native_rsd"
     try:
         rsd = await establish_native_rsd(serial=DEVICE_UDID)
         if rsd.udid != DEVICE_UDID:
             raise RuntimeError("device identity mismatch")
 
+        failure_stage = "test_configuration"
         config = await TestConfig.create_for(rsd, RUNNER_BUNDLE_ID, TARGET_BUNDLE_ID)
         target = config.target_app_info or {}
         if target.get("CFBundleShortVersionString") != EXPECTED_VERSION:
@@ -138,6 +140,7 @@ async def run(result_path: Path, requested: list[str]) -> int:
 
         selected = [ALLOWED_TESTS[name] for name in requested]
         config.tests_to_run = selected
+        failure_stage = "test_execution"
         await XCUITestService(rsd).run(config, timeout=300.0, listener=listener)
 
         expected_methods = {value.split("/", 1)[1] for value in selected}
@@ -171,12 +174,17 @@ async def run(result_path: Path, requested: list[str]) -> int:
         }
         write_result(result_path, payload)
         return 0 if passed else 1
-    except Exception as error:
-        reason = "AUTOMATION_AUTHORIZATION_FAILED" if "author" in type(error).__name__.lower() else "DIRECT_XCUITEST_FAILED"
+    except Exception:
+        reason = {
+            "native_rsd": "DEVICE_TRANSPORT_UNAVAILABLE",
+            "test_configuration": "TEST_CONFIGURATION_FAILED",
+            "test_execution": "DIRECT_XCUITEST_FAILED",
+        }[failure_stage]
         write_result(result_path, {
             "schemaVersion": "maina.ios-direct-xcuitest-result.v1",
             "status": "failed_closed",
             "reasonCode": reason,
+            "failureStage": failure_stage,
             "device": "iphone15_usb_bound",
             "requestedTests": requested,
             "planStarted": listener.plan_started,

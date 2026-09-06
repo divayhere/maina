@@ -118,6 +118,9 @@ if (iosDirectUiRun) {
     'config.tests_to_run = selected',
     'os.O_EXCL',
     'hashlib.sha256(attachment.data).hexdigest()',
+    'DEVICE_TRANSPORT_UNAVAILABLE',
+    'TEST_CONFIGURATION_FAILED',
+    'failureStage',
   ]) {
     if (!iosDirectUiRun.includes(token)) throw new Error(`Direct iOS UI-test runner is missing bounded token: ${token}`);
   }
