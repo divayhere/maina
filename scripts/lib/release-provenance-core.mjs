@@ -1,9 +1,17 @@
 import { createHash } from 'node:crypto';
-import { readFileSync, statSync } from 'node:fs';
+import { lstatSync, readFileSync, statSync } from 'node:fs';
+import path from 'node:path';
 
 const GIT_SHA = /^[0-9a-f]{40}$/;
 const SHA256 = /^[0-9a-f]{64}$/;
 const UUID = /^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$/;
+export const OWNER_RELEASE_AUTHORIZATION_SCOPE = Object.freeze([
+  'release-provenance:approve',
+  'preserving-data-install:android',
+  'preserving-data-install:ios',
+  'automated-device-qualification:android',
+  'automated-device-qualification:ios',
+]);
 
 function fail(field, message) {
   throw new Error(`${field}: ${message}`);
@@ -11,6 +19,16 @@ function fail(field, message) {
 
 function object(value, field) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) fail(field, 'object is required');
+  return value;
+}
+
+function exactKeys(value, expected, field) {
+  value = object(value, field);
+  const actual = Object.keys(value).sort();
+  const wanted = [...expected].sort();
+  if (JSON.stringify(actual) !== JSON.stringify(wanted)) {
+    fail(field, `contains missing or unknown fields; expected ${JSON.stringify(wanted)}, found ${JSON.stringify(actual)}`);
+  }
   return value;
 }
 
@@ -55,7 +73,7 @@ function exactJson(actual, expected, field) {
 }
 
 function sourcePin(actual, planned, field) {
-  actual = object(actual, field);
+  actual = exactKeys(actual, ['repository', 'branch', 'productCommit', 'finalCommit', 'upstreamCommit'], field);
   exact(actual.repository, planned.repository, `${field}.repository`);
   exact(actual.branch, planned.branch, `${field}.branch`);
   exact(actual.productCommit, planned.productCommit, `${field}.productCommit`);
@@ -65,43 +83,42 @@ function sourcePin(actual, planned, field) {
 }
 
 function featureFlags(actual, planned) {
-  actual = object(actual, 'featureFlagDefaults');
+  actual = exactKeys(actual, Object.keys(planned), 'featureFlagDefaults');
   for (const [name, expected] of Object.entries(planned)) {
     exact(actual[name], expected, `featureFlagDefaults.${name}`);
   }
 }
 
-function toolchains(actual, planned, platforms) {
-  actual = object(actual, 'toolchains');
+function toolchains(actual, planned) {
+  actual = exactKeys(actual, ['node', 'expo', 'reactNative', 'android', 'ios'], 'toolchains');
   match(actual.node, /^v24\.[0-9]+\.[0-9]+$/, 'toolchains.node');
   exact(actual.expo, planned.expo.replace(/^~/, ''), 'toolchains.expo');
   exact(actual.reactNative, planned.reactNative, 'toolchains.reactNative');
-  if (platforms.includes('android')) {
-    const android = object(actual.android, 'toolchains.android');
-    match(android.jdk, /^17(?:\.|$)/, 'toolchains.android.jdk');
-    exact(android.gradle, planned.android.gradle, 'toolchains.android.gradle');
-    match(android.buildTools, /^[0-9]+(?:\.[0-9]+){2}$/, 'toolchains.android.buildTools');
-    exact(android.compileSdk, planned.android.compileSdk, 'toolchains.android.compileSdk');
-    exact(android.targetSdk, planned.android.targetSdk, 'toolchains.android.targetSdk');
-  }
-  if (platforms.includes('ios')) {
-    const ios = object(actual.ios, 'toolchains.ios');
-    string(ios.xcode, 'toolchains.ios.xcode');
-    exact(ios.cocoaPods, planned.ios.cocoaPods, 'toolchains.ios.cocoaPods');
-    string(ios.swift, 'toolchains.ios.swift');
-  }
+  const android = exactKeys(actual.android, ['jdk', 'gradle', 'buildTools', 'compileSdk', 'targetSdk'], 'toolchains.android');
+  match(android.jdk, /^17(?:\.|$)/, 'toolchains.android.jdk');
+  exact(android.gradle, planned.android.gradle, 'toolchains.android.gradle');
+  match(android.buildTools, /^[0-9]+(?:\.[0-9]+){2}$/, 'toolchains.android.buildTools');
+  exact(android.compileSdk, planned.android.compileSdk, 'toolchains.android.compileSdk');
+  exact(android.targetSdk, planned.android.targetSdk, 'toolchains.android.targetSdk');
+  const ios = exactKeys(actual.ios, ['xcode', 'cocoaPods', 'swift'], 'toolchains.ios');
+  string(ios.xcode, 'toolchains.ios.xcode');
+  exact(ios.cocoaPods, planned.ios.cocoaPods, 'toolchains.ios.cocoaPods');
+  string(ios.swift, 'toolchains.ios.swift');
 }
 
-function commonArtifact(actual, field) {
-  actual = object(actual, field);
+function commonArtifact(actual, field, platform) {
+  actual = exactKeys(actual, [
+    'path', 'sha256', 'bytes', 'buildLog', 'inspection', 'audit',
+    ...(platform === 'ios' ? ['debugSymbols'] : []),
+  ], field);
   string(actual.path, `${field}.path`);
   match(actual.sha256, SHA256, `${field}.sha256`);
   positiveInteger(actual.bytes, `${field}.bytes`);
-  const log = object(actual.buildLog, `${field}.buildLog`);
+  const log = exactKeys(actual.buildLog, ['path', 'sha256', 'bytes'], `${field}.buildLog`);
   string(log.path, `${field}.buildLog.path`);
   match(log.sha256, SHA256, `${field}.buildLog.sha256`);
   positiveInteger(log.bytes, `${field}.buildLog.bytes`);
-  const inspection = object(actual.inspection, `${field}.inspection`);
+  const inspection = exactKeys(actual.inspection, ['path', 'sha256', 'bytes', 'command'], `${field}.inspection`);
   string(inspection.path, `${field}.inspection.path`);
   match(inspection.sha256, SHA256, `${field}.inspection.sha256`);
   positiveInteger(inspection.bytes, `${field}.inspection.bytes`);
@@ -111,16 +128,17 @@ function commonArtifact(actual, field) {
 
 function validateInspectionFile(artifact, platform) {
   const inspection = JSON.parse(readFileSync(artifact.inspection.path, 'utf8'));
+  exactKeys(inspection, ['schemaVersion', 'platform', 'artifact', 'audit', ...(platform === 'ios' ? ['debugSymbols'] : [])], `artifacts.${platform}.inspection.file`);
   exact(artifact.inspection.bytes, statSync(artifact.inspection.path).size, `artifacts.${platform}.inspection.bytes`);
   exact(artifact.inspection.sha256, sha256File(artifact.inspection.path), `artifacts.${platform}.inspection.sha256`);
   exact(inspection.schemaVersion, 'maina.exact-artifact-inspection.v1', `artifacts.${platform}.inspection.schemaVersion`);
   exact(inspection.platform, platform, `artifacts.${platform}.inspection.platform`);
-  const inspectedArtifact = object(inspection.artifact, `artifacts.${platform}.inspection.artifact`);
+  const inspectedArtifact = exactKeys(inspection.artifact, ['path', 'sha256', 'bytes'], `artifacts.${platform}.inspection.artifact`);
   exact(inspectedArtifact.path, artifact.path, `artifacts.${platform}.inspection.artifact.path`);
   exact(inspectedArtifact.sha256, artifact.sha256, `artifacts.${platform}.inspection.artifact.sha256`);
   exact(inspectedArtifact.bytes, artifact.bytes, `artifacts.${platform}.inspection.artifact.bytes`);
   if (platform === 'ios') {
-    const inspectedSymbols = object(inspection.debugSymbols, 'artifacts.ios.inspection.debugSymbols');
+    const inspectedSymbols = exactKeys(inspection.debugSymbols, ['path', 'sha256', 'bytes'], 'artifacts.ios.inspection.debugSymbols');
     exact(inspectedSymbols.path, artifact.debugSymbols.path, 'artifacts.ios.inspection.debugSymbols.path');
     exact(inspectedSymbols.sha256, artifact.debugSymbols.sha256, 'artifacts.ios.inspection.debugSymbols.sha256');
     exact(inspectedSymbols.bytes, artifact.debugSymbols.bytes, 'artifacts.ios.inspection.debugSymbols.bytes');
@@ -133,7 +151,12 @@ function validateInspectionFile(artifact, platform) {
 }
 
 function androidAudit(actual, plan) {
-  const audit = object(actual.audit, 'artifacts.android.audit');
+  const audit = exactKeys(actual.audit, [
+    'packageName', 'versionName', 'versionCode', 'releaseSigned', 'signerCertificateSha256',
+    'debuggable', 'profileable', 'permissionsExact', 'componentsExact', 'exportedBoundariesExact',
+    'permissions', 'components', 'abis', 'jniLibraries', 'vadModelSha256', 'modelChecksums',
+    'contentsManifestSha256', 'inspectionTools',
+  ], 'artifacts.android.audit');
   exact(audit.packageName, plan.identity.androidPackage, 'artifacts.android.audit.packageName');
   exact(audit.versionName, plan.release.version, 'artifacts.android.audit.versionName');
   exact(audit.versionCode, plan.release.androidVersionCode, 'artifacts.android.audit.versionCode');
@@ -147,19 +170,25 @@ function androidAudit(actual, plan) {
   exactArray(audit.permissions, plan.artifactPolicy.android.permissions, 'artifacts.android.audit.permissions');
   exactJson(audit.components, plan.artifactPolicy.android.components, 'artifacts.android.audit.components');
   exactArray(audit.abis, [plan.toolchains.android.abi], 'artifacts.android.audit.abis');
-  const jni = object(audit.jniLibraries, 'artifacts.android.audit.jniLibraries');
+  const jni = exactKeys(audit.jniLibraries, ['libonnxruntime.so', 'libsherpa-onnx-jni.so'], 'artifacts.android.audit.jniLibraries');
   for (const library of ['libonnxruntime.so', 'libsherpa-onnx-jni.so']) {
     match(jni[library], SHA256, `artifacts.android.audit.jniLibraries.${library}`);
   }
   exact(audit.vadModelSha256, 'c36d490aff5ab924ca6c7aeec4d8f6bd3d22db6fa17611b9c5b17eae58ac3a20', 'artifacts.android.audit.vadModelSha256');
-  const models = object(audit.modelChecksums, 'artifacts.android.audit.modelChecksums');
-  if (Object.keys(models).length === 0) fail('artifacts.android.audit.modelChecksums', 'at least one exact model checksum is required');
+  const models = exactKeys(audit.modelChecksums, ['assets/silero_vad.int8.onnx'], 'artifacts.android.audit.modelChecksums');
   for (const [name, hash] of Object.entries(models)) match(hash, SHA256, `artifacts.android.audit.modelChecksums.${name}`);
   match(audit.contentsManifestSha256, SHA256, 'artifacts.android.audit.contentsManifestSha256');
+  const inspectionTools = exactKeys(audit.inspectionTools, ['aapt2', 'apksigner', 'unzip'], 'artifacts.android.audit.inspectionTools');
+  for (const [name, version] of Object.entries(inspectionTools)) string(version, `artifacts.android.audit.inspectionTools.${name}`);
 }
 
 function iosAudit(actual, plan) {
-  const audit = object(actual.audit, 'artifacts.ios.audit');
+  const audit = exactKeys(actual.audit, [
+    'bundleIdentifier', 'version', 'buildNumber', 'architectures', 'signatureValid', 'teamId',
+    'designatedRequirement', 'entitlementsExact', 'entitlementsSha256', 'entitlements',
+    'profileEntitlements', 'profile', 'appUuid', 'dsymUuid', 'appContentsManifestSha256',
+    'appBundleSha256', 'inspectionTools',
+  ], 'artifacts.ios.audit');
   exact(audit.bundleIdentifier, plan.identity.iosBundleIdentifier, 'artifacts.ios.audit.bundleIdentifier');
   exact(audit.version, plan.release.version, 'artifacts.ios.audit.version');
   exact(audit.buildNumber, plan.release.iosBuildNumber, 'artifacts.ios.audit.buildNumber');
@@ -171,7 +200,7 @@ function iosAudit(actual, plan) {
   exactJson(audit.entitlements, plan.artifactPolicy.ios.appEntitlements, 'artifacts.ios.audit.entitlements');
   exactJson(audit.profileEntitlements, plan.artifactPolicy.ios.profileEntitlements, 'artifacts.ios.audit.profileEntitlements');
   match(audit.entitlementsSha256, SHA256, 'artifacts.ios.audit.entitlementsSha256');
-  const profile = object(audit.profile, 'artifacts.ios.audit.profile');
+  const profile = exactKeys(audit.profile, ['uuid', 'name', 'teamId', 'expiresAt', 'sufficientWindow'], 'artifacts.ios.audit.profile');
   match(profile.uuid, UUID, 'artifacts.ios.audit.profile.uuid');
   exact(profile.name, plan.artifactPolicy.ios.profileName, 'artifacts.ios.audit.profile.name');
   exact(profile.teamId, plan.identity.iosTeamId, 'artifacts.ios.audit.profile.teamId');
@@ -182,6 +211,73 @@ function iosAudit(actual, plan) {
   exact(audit.dsymUuid.toLowerCase(), audit.appUuid.toLowerCase(), 'artifacts.ios.audit.dsymUuid');
   match(audit.appContentsManifestSha256, SHA256, 'artifacts.ios.audit.appContentsManifestSha256');
   match(audit.appBundleSha256, SHA256, 'artifacts.ios.audit.appBundleSha256');
+  const inspectionTools = exactKeys(audit.inspectionTools, ['codesign', 'security', 'dwarfdump', 'ditto'], 'artifacts.ios.audit.inspectionTools');
+  for (const [name, version] of Object.entries(inspectionTools)) string(version, `artifacts.ios.audit.inspectionTools.${name}`);
+}
+
+function sha256Text(value) {
+  return createHash('sha256').update(value, 'utf8').digest('hex');
+}
+
+function candidateSha256FromApproved(provenance) {
+  const candidate = structuredClone(provenance);
+  candidate.approval = { status: 'candidate', approvedBy: null, approvedAt: null };
+  return sha256Text(`${JSON.stringify(candidate, null, 2)}\n`);
+}
+
+function validateOwnerAuthorization(provenance, planSha256) {
+  match(planSha256, SHA256, 'planSha256');
+  const approval = provenance.approval;
+  const reference = exactKeys(approval.authorization, [
+    'path', 'sha256', 'bytes', 'authorizationId', 'directiveSha256', 'planSha256',
+    'candidateProvenanceSha256', 'androidArtifactSha256', 'iosArtifactSha256',
+    'scope', 'nonce', 'issuedAt',
+  ], 'approval.authorization');
+  string(reference.path, 'approval.authorization.path');
+  if (!path.isAbsolute(reference.path)) fail('approval.authorization.path', 'absolute path is required');
+  match(reference.sha256, SHA256, 'approval.authorization.sha256');
+  positiveInteger(reference.bytes, 'approval.authorization.bytes');
+  const authorizationStat = lstatSync(reference.path);
+  if (!authorizationStat.isFile() || authorizationStat.isSymbolicLink()) fail('approval.authorization.path', 'regular non-symlink file is required');
+  exact(authorizationStat.mode & 0o777, 0o600, 'approval.authorization.mode');
+  exact(reference.bytes, authorizationStat.size, 'approval.authorization.bytes');
+  exact(reference.sha256, sha256File(reference.path), 'approval.authorization.sha256');
+
+  const envelope = exactKeys(JSON.parse(readFileSync(reference.path, 'utf8')), [
+    'schemaVersion', 'authorizationId', 'authorizedBy', 'sourceThreadId', 'directive',
+    'directiveSha256', 'releaseId', 'planSha256', 'candidateProvenanceSha256',
+    'artifactSha256', 'scope', 'issuedAt', 'nonce',
+  ], 'ownerAuthorization');
+  exact(envelope.schemaVersion, 'maina.owner-release-authorization.v1', 'ownerAuthorization.schemaVersion');
+  string(envelope.authorizationId, 'ownerAuthorization.authorizationId');
+  if (envelope.authorizationId.length > 128) fail('ownerAuthorization.authorizationId', 'must be at most 128 characters');
+  exact(envelope.authorizedBy, 'owner-direct', 'ownerAuthorization.authorizedBy');
+  match(envelope.sourceThreadId, /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/, 'ownerAuthorization.sourceThreadId');
+  string(envelope.directive, 'ownerAuthorization.directive');
+  if (envelope.directive.length > 4096) fail('ownerAuthorization.directive', 'must be at most 4096 characters');
+  match(envelope.directiveSha256, SHA256, 'ownerAuthorization.directiveSha256');
+  exact(envelope.directiveSha256, sha256Text(envelope.directive), 'ownerAuthorization.directiveSha256');
+  exact(envelope.releaseId, provenance.releaseId, 'ownerAuthorization.releaseId');
+  exact(envelope.planSha256, planSha256, 'ownerAuthorization.planSha256');
+  exact(envelope.candidateProvenanceSha256, candidateSha256FromApproved(provenance), 'ownerAuthorization.candidateProvenanceSha256');
+  const artifactSha256 = exactKeys(envelope.artifactSha256, ['android', 'ios'], 'ownerAuthorization.artifactSha256');
+  exact(artifactSha256.android, provenance.artifacts.android.sha256, 'ownerAuthorization.artifactSha256.android');
+  exact(artifactSha256.ios, provenance.artifacts.ios.sha256, 'ownerAuthorization.artifactSha256.ios');
+  exactArray(envelope.scope, OWNER_RELEASE_AUTHORIZATION_SCOPE, 'ownerAuthorization.scope');
+  if (Number.isNaN(Date.parse(envelope.issuedAt))) fail('ownerAuthorization.issuedAt', 'ISO-8601 time is required');
+  match(envelope.nonce, UUID, 'ownerAuthorization.nonce');
+
+  exact(reference.authorizationId, envelope.authorizationId, 'approval.authorization.authorizationId');
+  exact(reference.directiveSha256, envelope.directiveSha256, 'approval.authorization.directiveSha256');
+  exact(reference.planSha256, envelope.planSha256, 'approval.authorization.planSha256');
+  exact(reference.candidateProvenanceSha256, envelope.candidateProvenanceSha256, 'approval.authorization.candidateProvenanceSha256');
+  exact(reference.androidArtifactSha256, artifactSha256.android, 'approval.authorization.androidArtifactSha256');
+  exact(reference.iosArtifactSha256, artifactSha256.ios, 'approval.authorization.iosArtifactSha256');
+  exactArray(reference.scope, envelope.scope, 'approval.authorization.scope');
+  exact(reference.nonce, envelope.nonce, 'approval.authorization.nonce');
+  exact(reference.issuedAt, envelope.issuedAt, 'approval.authorization.issuedAt');
+  exact(approval.approvedBy, envelope.authorizedBy, 'approval.approvedBy');
+  exact(approval.approvedAt, envelope.issuedAt, 'approval.approvedAt');
 }
 
 export function sha256File(path) {
@@ -192,26 +288,27 @@ export function validateReleaseProvenance(provenance, plan, options = {}) {
   const platform = options.platform ?? null;
   const requireBoth = options.requireBoth ?? false;
   const platforms = requireBoth ? ['android', 'ios'] : platform ? [platform] : ['android', 'ios'].filter((name) => provenance?.artifacts?.[name]);
+  provenance = exactKeys(provenance, ['schemaVersion', 'releaseId', 'release', 'sources', 'toolchains', 'featureFlagDefaults', 'artifacts', 'approval'], 'provenance');
   exact(provenance.schemaVersion, 'maina.release-provenance.v1', 'schemaVersion');
   exact(provenance.releaseId, plan.releaseId, 'releaseId');
-  const release = object(provenance.release, 'release');
+  const release = exactKeys(provenance.release, ['version', 'androidVersionCode', 'iosBuildNumber'], 'release');
   exact(release.version, plan.release.version, 'release.version');
   exact(release.androidVersionCode, plan.release.androidVersionCode, 'release.androidVersionCode');
   exact(release.iosBuildNumber, plan.release.iosBuildNumber, 'release.iosBuildNumber');
-  const sources = object(provenance.sources, 'sources');
+  const sources = exactKeys(provenance.sources, ['android', 'ios', 'coordinationCommit', 'backendSourceCommit', 'backendProductionDeployment'], 'sources');
   sourcePin(sources.android, plan.sources.android, 'sources.android');
   sourcePin(sources.ios, plan.sources.ios, 'sources.ios');
   exact(sources.coordinationCommit, plan.sources.coordinationCommit, 'sources.coordinationCommit');
   exact(sources.backendSourceCommit, plan.sources.backendSourceCommit, 'sources.backendSourceCommit');
   exact(sources.backendProductionDeployment, plan.sources.backendProductionDeployment, 'sources.backendProductionDeployment');
   featureFlags(provenance.featureFlagDefaults, plan.featureFlagDefaults);
-  toolchains(provenance.toolchains, plan.toolchains, platforms);
-  const artifacts = object(provenance.artifacts, 'artifacts');
+  toolchains(provenance.toolchains, plan.toolchains);
+  const artifacts = exactKeys(provenance.artifacts, ['android', 'ios'], 'artifacts');
   for (const name of platforms) {
-    const artifact = commonArtifact(artifacts[name], `artifacts.${name}`);
+    const artifact = commonArtifact(artifacts[name], `artifacts.${name}`, name);
     if (name === 'android') androidAudit(artifact, plan);
     else {
-      const symbols = object(artifact.debugSymbols, 'artifacts.ios.debugSymbols');
+      const symbols = exactKeys(artifact.debugSymbols, ['path', 'sha256', 'bytes', 'uuid'], 'artifacts.ios.debugSymbols');
       string(symbols.path, 'artifacts.ios.debugSymbols.path');
       match(symbols.sha256, SHA256, 'artifacts.ios.debugSymbols.sha256');
       positiveInteger(symbols.bytes, 'artifacts.ios.debugSymbols.bytes');
@@ -221,19 +318,29 @@ export function validateReleaseProvenance(provenance, plan, options = {}) {
     }
   }
   if (requireBoth && (!artifacts.android || !artifacts.ios)) fail('artifacts', 'both exact platform artifacts are required');
-  const approval = object(provenance.approval, 'approval');
+  const approvalStatus = provenance.approval?.status;
+  const approval = exactKeys(
+    provenance.approval,
+    approvalStatus === 'admin-approved' ? ['status', 'approvedBy', 'approvedAt', 'authorization'] : ['status', 'approvedBy', 'approvedAt'],
+    'approval',
+  );
   if (!['candidate', 'admin-approved'].includes(approval.status)) fail('approval.status', 'candidate or admin-approved is required');
+  if (approval.status === 'candidate') {
+    exact(approval.approvedBy, null, 'approval.approvedBy');
+    exact(approval.approvedAt, null, 'approval.approvedAt');
+  }
   if (options.requireApproval) {
     exact(approval.status, 'admin-approved', 'approval.status');
     string(approval.approvedBy, 'approval.approvedBy');
     if (Number.isNaN(Date.parse(approval.approvedAt))) fail('approval.approvedAt', 'ISO-8601 approval time is required');
+    validateOwnerAuthorization(provenance, options.planSha256);
   }
   return true;
 }
 
-export function qualifyExactArtifact({ provenance, plan, platform, artifactPath, buildLogPath }) {
+export function qualifyExactArtifact({ provenance, plan, platform, artifactPath, buildLogPath, planSha256 }) {
   if (!['android', 'ios'].includes(platform)) fail('platform', 'android or ios is required');
-  validateReleaseProvenance(provenance, plan, { platform });
+  validateReleaseProvenance(provenance, plan, { platform, planSha256 });
   const artifact = provenance.artifacts[platform];
   exact(artifact.path, artifactPath, `artifacts.${platform}.path`);
   exact(artifact.buildLog.path, buildLogPath, `artifacts.${platform}.buildLog.path`);
@@ -245,8 +352,8 @@ export function qualifyExactArtifact({ provenance, plan, platform, artifactPath,
   return true;
 }
 
-export function validateApprovedRelease(provenance, plan) {
-  validateReleaseProvenance(provenance, plan, { requireBoth: true, requireApproval: true });
+export function validateApprovedRelease(provenance, plan, options = {}) {
+  validateReleaseProvenance(provenance, plan, { requireBoth: true, requireApproval: true, planSha256: options.planSha256 });
   for (const platform of ['android', 'ios']) {
     const artifact = provenance.artifacts[platform];
     exact(artifact.bytes, statSync(artifact.path).size, `artifacts.${platform}.bytes`);
@@ -258,17 +365,17 @@ export function validateApprovedRelease(provenance, plan) {
   return true;
 }
 
-export function authorizeExactArtifact({ provenance, plan, platform, artifactPath }) {
+export function authorizeExactArtifact({ provenance, plan, platform, artifactPath, planSha256 }) {
   if (!['android', 'ios'].includes(platform)) fail('platform', 'android or ios is required');
-  validateApprovedRelease(provenance, plan);
+  validateApprovedRelease(provenance, plan, { planSha256 });
   exact(provenance.artifacts[platform].path, artifactPath, `artifacts.${platform}.path`);
   const buildLogPath = provenance.artifacts[platform].buildLog.path;
   qualifyExactArtifact({ provenance, plan, platform, artifactPath, buildLogPath });
   return true;
 }
 
-export function replayConfig(provenance, plan) {
-  validateApprovedRelease(provenance, plan);
+export function replayConfig(provenance, plan, options = {}) {
+  validateApprovedRelease(provenance, plan, { planSha256: options.planSha256 });
   return {
     androidPackage: provenance.artifacts.android.audit.packageName,
     androidVersion: provenance.artifacts.android.audit.versionName,
