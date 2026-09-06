@@ -78,6 +78,7 @@
     "ios:model:stage": "bash scripts/stage-ios-qwen-model.sh",
     "ios:ui-tests:configure": "bash scripts/configure-ios-ui-tests-guarded.sh",
     "ios:ui-tests:build": "bash scripts/build-ios-ui-test-products-guarded.sh",
+    "ios:ui-tests:run": "bash scripts/run-ios-ui-tests-guarded.sh",
     "ios:prepare": "bash scripts/prepare-ios-local.sh",
     "ios:build-candidate": "bash scripts/build-ios-release-candidate.sh",
     "ios:install-preserving": "bash scripts/install-ios-preserving-data.sh",

@@ -16,6 +16,7 @@ const ui = readIfPresent('ios-tests/MainaUITests.swift');
 const adbTarget = readIfPresent('scripts/adb-target.sh');
 const iosUiConfigurator = readIfPresent('scripts/configure-ios-ui-tests.rb');
 const iosUiBuild = readIfPresent('scripts/build-ios-ui-test-products-guarded.sh');
+const iosUiRun = readIfPresent('scripts/run-ios-ui-tests-guarded.sh');
 
 execFileSync('/bin/bash', ['-n', replayPath], { stdio: 'inherit' });
 
@@ -63,6 +64,30 @@ if (iosUiConfigurator) {
 
 if (iosUiBuild && !iosUiBuild.includes('export SENTRY_DISABLE_AUTO_UPLOAD=true')) {
   throw new Error('iOS UI-test build must disable qualification-only Sentry uploads.');
+}
+
+if (iosUiRun) {
+  for (const token of [
+    'source "$PROJECT_DIR/scripts/maina-ios-env.sh"',
+    'maina_require_storage_path "$PRODUCTS_ROOT"',
+    'maina_require_storage_path "$RESULT_ROOT"',
+    'test-without-building',
+    '00008120-001E146611E2601E',
+    'testNavigationAudit',
+    'testShortRecordingLifecycle',
+    '-resultBundlePath',
+  ]) {
+    if (!iosUiRun.includes(token)) throw new Error(`iOS UI-test runner is missing bounded token: ${token}`);
+  }
+  for (const token of ['testCloudPairingWithExternalApproval', 'testStopExistingRecording', 'testKeepInterruptedRecording']) {
+    if (iosUiRun.includes(token)) throw new Error(`iOS UI-test runner exposes unsafe or state-dependent test: ${token}`);
+  }
+  if (!iosUiRun.includes('if [[ -e "$RESULT_ROOT" ]]')) {
+    throw new Error('iOS UI-test runner does not reject a reused result root.');
+  }
+  if (!iosUiRun.includes('XCTESTRUN_CANDIDATES=("$PRODUCTS_ROOT"/Build/Products/MainaUITests_iphoneos*-arm64.xctestrun)')) {
+    throw new Error('iOS UI-test runner is not bound to exactly one physical-device xctestrun product.');
+  }
 }
 
 console.log('M0 harness safety verification passed.');
