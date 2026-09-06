@@ -1107,6 +1107,67 @@ class MainaCallInterruptionPolicyTest {
             as MainaCaptureControlDecision.Resume
         assertEquals(MainaCapturePauseOwner.SYSTEM, requestedRecovery.state.pauseOwner)
         assertEquals(MainaCaptureControlPhase.RESUME_PENDING, requestedRecovery.state.phase)
+
+        assertTrue(MainaResumeRequestPolicy.preservesCommunicationRecovery(systemPaused))
+        assertEquals(
+            MainaCapturePauseOwner.SYSTEM,
+            MainaResumeRequestPolicy.operationOwner(requestedRecovery.state),
+        )
+        assertTrue(
+            MainaResumeRequestPolicy.shouldRearmCommunicationRecovery(
+                requestedRecovery.state,
+                activeOperationPresent = false,
+            ),
+        )
+        assertFalse(
+            MainaResumeRequestPolicy.shouldRearmCommunicationRecovery(
+                requestedRecovery.state,
+                activeOperationPresent = true,
+            ),
+        )
+
+        val pendingTap = MainaCallInterruptionPolicy.onManualResume(requestedRecovery.state)
+            as MainaCaptureControlDecision.StateOnly
+        assertEquals(MainaCapturePauseOwner.SYSTEM, pendingTap.state.pauseOwner)
+        assertEquals(MainaCaptureControlPhase.RESUME_PENDING, pendingTap.state.phase)
+
+        val manualPaused = systemPaused.copy(pauseOwner = MainaCapturePauseOwner.MANUAL)
+        assertFalse(MainaResumeRequestPolicy.preservesCommunicationRecovery(manualPaused))
+        assertEquals(MainaCapturePauseOwner.MANUAL, MainaResumeRequestPolicy.operationOwner(manualPaused))
+    }
+
+    @Test
+    fun `resume action coalesces system recovery and never publishes recording before reads`() {
+        val service = source(
+            "modules/maina-recorder/android/src/main/java/com/divay/maina/recorder/MainaRecordingService.kt",
+        )
+        val resumeAction = service.substring(
+            service.indexOf("ACTION_RESUME_NATIVE_CAPTURE ->"),
+            service.indexOf("ACTION_STOP_NATIVE_CAPTURE ->"),
+        )
+        assertTrue(resumeAction.contains("preservesCommunicationRecovery(controlState)"))
+        assertTrue(resumeAction.contains("if (!preservingSystemRecovery) cancelCommunicationRetryTimer()"))
+        assertTrue(resumeAction.contains("owner = operationOwner"))
+        assertTrue(resumeAction.contains("if (systemRecovery)"))
+        assertTrue(resumeAction.contains("nativeCapture.resumeAfterCommunication(generation)"))
+        assertTrue(resumeAction.contains("shouldRearmCommunicationRecovery"))
+        assertTrue(resumeAction.contains("scheduleCommunicationResume()"))
+        assertFalse(resumeAction.contains("owner = MainaCapturePauseOwner.MANUAL"))
+
+        val publication = service.substring(
+            service.indexOf("private fun handlePublicationOutcome"),
+            service.indexOf("private fun rollbackCommittedPublication"),
+        )
+        assertTrue(
+            publication.indexOf("nativeCapture.enablePreparedReads()") <
+                publication.indexOf("setCaptureState(\"recording\")"),
+        )
+        assertTrue(
+            publication.indexOf("nativeCapture.enablePreparedReads()") <
+                publication.lastIndexOf("\"state\" to \"recording\""),
+        )
+        assertTrue(publication.contains("\"state\" to \"resuming\""))
+        assertTrue(publication.contains("ui-publication-failed"))
     }
 
     @Test
