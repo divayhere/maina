@@ -5,8 +5,8 @@ import {
   authorizeExactArtifact,
   qualifyExactArtifact,
   replayConfig,
+  sha256File,
   validateApprovedRelease,
-  validateReleaseProvenance,
 } from './lib/release-provenance-core.mjs';
 
 function json(path) {
@@ -15,7 +15,7 @@ function json(path) {
 
 const [command, ...args] = process.argv.slice(2);
 if (command === 'validate' && args.length === 2) {
-  validateApprovedRelease(json(args[1]), json(args[0]));
+  validateApprovedRelease(json(args[1]), json(args[0]), { planSha256: sha256File(args[0]) });
   console.log('Admin-approved dual-platform release provenance, structure, and pins verified.');
 } else if (command === 'qualify' && args.length === 5) {
   const [platform, planPath, provenancePath, artifactPath, buildLogPath] = args;
@@ -25,6 +25,7 @@ if (command === 'validate' && args.length === 2) {
     provenance: json(provenancePath),
     artifactPath,
     buildLogPath,
+    planSha256: sha256File(planPath),
   });
   console.log(`Exact ${platform} artifact hash, bytes, audit evidence, and build log qualified.`);
 } else if (command === 'authorize' && args.length === 4) {
@@ -34,10 +35,11 @@ if (command === 'validate' && args.length === 2) {
     plan: json(planPath),
     provenance: json(provenancePath),
     artifactPath,
+    planSha256: sha256File(planPath),
   });
   console.log(`Admin-approved dual-platform provenance authorizes this exact ${platform} artifact.`);
 } else if (command === 'replay-config' && args.length === 2) {
-  const config = replayConfig(json(args[1]), json(args[0]));
+  const config = replayConfig(json(args[1]), json(args[0]), { planSha256: sha256File(args[0]) });
   console.log([
     config.androidPackage,
     config.androidVersion,
