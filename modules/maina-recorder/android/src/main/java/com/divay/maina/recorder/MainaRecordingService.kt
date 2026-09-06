@@ -702,6 +702,7 @@ class MainaRecordingService : Service() {
             captureSessionId = lastCaptureMeetingId,
             expectedPrivacyLatchGeneration = if (kind in setOf(
                     MainaCaptureOperationKind.START,
+                    MainaCaptureOperationKind.PAUSE,
                     MainaCaptureOperationKind.RESUME,
                 )
             ) {
@@ -1200,7 +1201,10 @@ class MainaRecordingService : Service() {
                 if (operation.owner == MainaCapturePauseOwner.SYSTEM) {
                     nativeCapture.pauseForCommunication()
                 } else {
-                    nativeCapture.pause()
+                    nativeCapture.pauseAfterReadsLatched(
+                        operation.expectedPrivacyLatchGeneration
+                            ?: error("Pause privacy authority is unavailable"),
+                    )
                 }
             }
             val outcome = NativeOutcome(

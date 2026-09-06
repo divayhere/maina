@@ -431,6 +431,25 @@ internal object MainaResumeRequestPolicy {
             !activeOperationPresent
 }
 
+/**
+ * A manual pause is privacy-latched synchronously on the service reducer before
+ * its filesystem checkpoint is queued. Reusing that exact latch keeps a Resume
+ * queued behind the checkpoint bound to the same generation; relatching inside
+ * the worker would make the already-issued Resume stale for no privacy change.
+ */
+internal object MainaPrelatchedPausePolicy {
+    fun checkpointAllowed(
+        expectedLatchGeneration: Long,
+        currentLatchGeneration: Long,
+        paused: Boolean,
+        readEnabled: Boolean,
+        systemDraining: Boolean,
+    ): Boolean = expectedLatchGeneration == currentLatchGeneration &&
+        paused &&
+        !readEnabled &&
+        !systemDraining
+}
+
 /** Linearizes the final post-read predicate and PCM byte commit with the latch. */
 internal class MainaReadCommitBarrier {
     private val lock = Any()

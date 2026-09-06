@@ -438,7 +438,12 @@ internal class MainaNativeAudioCapture(
         return snapshot()
     }
 
-    fun pause(): Snapshot {
+    fun pause(): Snapshot = pauseInternal(expectedPrelatchedGeneration = null)
+
+    fun pauseAfterReadsLatched(expectedLatchGeneration: Long): Snapshot =
+        pauseInternal(expectedPrelatchedGeneration = expectedLatchGeneration)
+
+    private fun pauseInternal(expectedPrelatchedGeneration: Long?): Snapshot {
         if (!running.get()) return snapshot()
         val hasPreparedChunk = synchronized(chunkTransferLock) { preparedChunk != null }
         if (!MainaNativePauseCheckpointPolicy.requiresCheckpoint(
@@ -450,7 +455,25 @@ internal class MainaNativeAudioCapture(
         val checkpoint = CountDownLatch(1)
         pauseCheckpointLatch = checkpoint
         pauseStartedElapsedMs = SystemClock.elapsedRealtime()
-        latchReadsOffNow()
+        if (expectedPrelatchedGeneration == null) {
+            latchReadsOffNow()
+        } else {
+            val existingLatchIsCurrent = readCommitBarrier.commitIf(
+                allowed = {
+                    MainaPrelatchedPausePolicy.checkpointAllowed(
+                        expectedLatchGeneration = expectedPrelatchedGeneration,
+                        currentLatchGeneration = privacyLatchGeneration.get(),
+                        paused = paused.get(),
+                        readEnabled = readEnabled.get(),
+                        systemDraining = systemDraining.get(),
+                    )
+                },
+                commit = {},
+            )
+            check(existingLatchIsCurrent) {
+                "Manual pause privacy latch changed before its native checkpoint"
+            }
+        }
         val checkpointReached = checkpoint.await(PAUSE_CHECKPOINT_TIMEOUT_MS, TimeUnit.MILLISECONDS)
         if (pauseCheckpointLatch === checkpoint) pauseCheckpointLatch = null
         // Recorder ownership is released even when the worker did not acknowledge

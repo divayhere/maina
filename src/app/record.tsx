@@ -26,6 +26,7 @@ import {
   shouldPreserveTerminalNativeMeeting,
 } from '@/core/recording/nativeCaptureReconciliation';
 import { nativeCapturePresentation } from '@/core/recording/nativeCapturePresentation';
+import { NativeResumeIntentLatch } from '@/core/recording/nativeResumeIntent';
 import { openNewlySavedMeetingRoute } from '@/core/navigation/navigationPolicy';
 import {
   commitTranscriptFinalBlocks,
@@ -200,6 +201,8 @@ export default function RecordScreen() {
   const sessionErrorRef = useRef<string | undefined>(undefined);
   const pausedRef = useRef(false);
   const controlBusyRef = useRef(false);
+  const nativePauseCommandPendingRef = useRef(false);
+  const nativeResumeIntentRef = useRef(new NativeResumeIntentLatch());
   const detectedLanguageRef = useRef('en-IN');
   const captureNoteTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const nativeStallReportedRef = useRef(false);
@@ -601,6 +604,7 @@ export default function RecordScreen() {
   });
 
   useEffect(() => {
+    const nativeResumeIntent = nativeResumeIntentRef.current;
     (async () => {
       if (startingRef.current) return;
       startingRef.current = true;
@@ -734,6 +738,8 @@ export default function RecordScreen() {
       if (captureNoteTimerRef.current) clearTimeout(captureNoteTimerRef.current);
       activeRef.current = false;
       pausedRef.current = false;
+      nativePauseCommandPendingRef.current = false;
+      nativeResumeIntent.cancel();
       if (restartTimerRef.current) clearTimeout(restartTimerRef.current);
       void persist(true);
       if (CAPTURE_ENGINE === 'native-qwen') {
@@ -993,6 +999,7 @@ export default function RecordScreen() {
     setPaused(true);
     healthRef.current.pauseStarted(Date.now());
     if (CAPTURE_ENGINE === 'native-qwen') {
+      nativePauseCommandPendingRef.current = true;
       try {
         await pauseNativeCapture();
         listeningRef.current = false;
@@ -1009,7 +1016,17 @@ export default function RecordScreen() {
         healthRef.current.pauseEnded(Date.now());
         log.error('record', 'native pause failed', { err: String(cause) });
       } finally {
+        nativePauseCommandPendingRef.current = false;
         controlBusyRef.current = false;
+        if (nativeResumeIntentRef.current.takeAfterPauseBridge({
+          active: activeRef.current,
+          paused: pausedRef.current,
+          saving: savingRef.current,
+          controlBusy: controlBusyRef.current,
+          pauseCommandPending: nativePauseCommandPendingRef.current,
+        })) {
+          void resumeRef.current();
+        }
       }
       return;
     }
@@ -1037,6 +1054,13 @@ export default function RecordScreen() {
   };
 
   const resumeRecording = async () => {
+    if (CAPTURE_ENGINE === 'native-qwen' && nativeResumeIntentRef.current.requestDuringPauseBridge({
+      active: activeRef.current,
+      paused: pausedRef.current,
+      saving: savingRef.current,
+      controlBusy: controlBusyRef.current,
+      pauseCommandPending: nativePauseCommandPendingRef.current,
+    })) return;
     const nativeStatus = CAPTURE_ENGINE === 'native-qwen'
       ? await getNativeCaptureStatusAsync().catch(() => null)
       : null;
@@ -1088,6 +1112,7 @@ export default function RecordScreen() {
   const stopAndSave = async () => {
     if (savingRef.current || !meetingCreatedRef.current) return;
     savingRef.current = true;
+    nativeResumeIntentRef.current.cancel();
     // The native service publishes finalizing only after it has issued a real
     // STOP token. Legacy capture keeps this presentation in savingRef instead
     // of creating an orphaned native notification if JS is interrupted here.
@@ -1278,6 +1303,7 @@ export default function RecordScreen() {
   const cancel = async () => {
     activeRef.current = false;
     pausedRef.current = false;
+    nativeResumeIntentRef.current.cancel();
     if (restartTimerRef.current) clearTimeout(restartTimerRef.current);
     if (CAPTURE_ENGINE === 'native-qwen') {
       try {

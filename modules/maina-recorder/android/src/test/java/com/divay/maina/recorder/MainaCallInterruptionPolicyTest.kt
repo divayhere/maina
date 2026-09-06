@@ -124,6 +124,7 @@ class MainaCallInterruptionPolicyTest {
         )
         assertTrue(issueOperation.contains("expectedPrivacyLatchGeneration"))
         assertTrue(issueOperation.contains("nativeCapture.privacyGenerationSnapshot()"))
+        assertTrue(issueOperation.contains("MainaCaptureOperationKind.PAUSE"))
         val preparedDispatch = service.substring(
             service.indexOf("private fun dispatchPreparedCapture"),
             service.indexOf("private fun handlePreparedCaptureOutcome"),
@@ -155,7 +156,8 @@ class MainaCallInterruptionPolicyTest {
         assertTrue(detachedPause.contains("val result = runCatching"))
         assertTrue(detachedPause.contains("postMainOutcome { handleDetachedPauseFailure"))
         assertTrue(detachedPause.contains("requestTerminalNativeStop("))
-        assertEquals(2, Regex("nativeCapture\\.pause\\(\\)").findAll(service).count())
+        assertEquals(1, Regex("nativeCapture\\.pause\\(\\)").findAll(service).count())
+        assertEquals(1, Regex("nativeCapture\\.pauseAfterReadsLatched\\(").findAll(service).count())
     }
 
     @Test
@@ -282,6 +284,77 @@ class MainaCallInterruptionPolicyTest {
                 acceptingWork = true,
             ),
         )
+    }
+
+    @Test
+    fun `resume queued behind manual pause reuses the reducer privacy latch`() {
+        assertTrue(
+            MainaPrelatchedPausePolicy.checkpointAllowed(
+                expectedLatchGeneration = 18,
+                currentLatchGeneration = 18,
+                paused = true,
+                readEnabled = false,
+                systemDraining = false,
+            ),
+        )
+        assertFalse(
+            MainaPrelatchedPausePolicy.checkpointAllowed(
+                expectedLatchGeneration = 18,
+                currentLatchGeneration = 19,
+                paused = true,
+                readEnabled = false,
+                systemDraining = false,
+            ),
+        )
+        assertFalse(
+            MainaPrelatchedPausePolicy.checkpointAllowed(
+                expectedLatchGeneration = 18,
+                currentLatchGeneration = 18,
+                paused = false,
+                readEnabled = false,
+                systemDraining = false,
+            ),
+        )
+        assertFalse(
+            MainaPrelatchedPausePolicy.checkpointAllowed(
+                expectedLatchGeneration = 18,
+                currentLatchGeneration = 18,
+                paused = true,
+                readEnabled = true,
+                systemDraining = false,
+            ),
+        )
+        assertFalse(
+            MainaPrelatchedPausePolicy.checkpointAllowed(
+                expectedLatchGeneration = 18,
+                currentLatchGeneration = 18,
+                paused = true,
+                readEnabled = false,
+                systemDraining = true,
+            ),
+        )
+
+        val native = source(
+            "modules/maina-recorder/android/src/main/java/com/divay/maina/recorder/MainaNativeAudioCapture.kt",
+        )
+        val prelatchedPause = native.substring(
+            native.indexOf("fun pauseAfterReadsLatched"),
+            native.indexOf("fun resume(expectedLatchGeneration"),
+        )
+        assertTrue(prelatchedPause.contains("MainaPrelatchedPausePolicy.checkpointAllowed"))
+        assertTrue(prelatchedPause.contains("expectedPrelatchedGeneration == null"))
+        assertTrue(prelatchedPause.contains("latchReadsOffNow()"))
+
+        val service = source(
+            "modules/maina-recorder/android/src/main/java/com/divay/maina/recorder/MainaRecordingService.kt",
+        )
+        val pauseDispatch = service.substring(
+            service.indexOf("private fun dispatchNativePause"),
+            service.indexOf("private fun handlePauseOutcome"),
+        )
+        assertTrue(pauseDispatch.contains("nativeCapture.pauseAfterReadsLatched("))
+        assertTrue(pauseDispatch.contains("operation.expectedPrivacyLatchGeneration"))
+        assertFalse(pauseDispatch.contains("nativeCapture.pause()"))
     }
 
     @Test
@@ -1325,7 +1398,7 @@ class MainaCallInterruptionPolicyTest {
             service.indexOf("private fun handlePauseOutcome"),
         )
         assertTrue(dispatcher.contains("nativeCapture.pauseForCommunication()"))
-        assertTrue(dispatcher.contains("nativeCapture.pause()"))
+        assertTrue(dispatcher.contains("nativeCapture.pauseAfterReadsLatched("))
         assertTrue(service.contains("nativeCapture.resumeAfterCommunication("))
         assertTrue(service.contains("nativeCapture.revokeSystemResumeForCommunicationReentryNow()"))
         assertTrue(service.contains("system-retained-recorder-waiting"))
