@@ -100,7 +100,6 @@ class MainaRecordingService : Service() {
             }
             if (signature == lastRecordingSignature) return
             lastRecordingSignature = signature
-            refreshedClientSilenced()
             reconcileCommunicationInterruption()
             candidates.forEach { config -> reportActiveRecording(config) }
         }
@@ -1675,10 +1674,13 @@ class MainaRecordingService : Service() {
     }
 
     private fun observedCommunicationActive(): Boolean {
+        val previouslySilenced = clientSilenced
+        val nowSilenced = refreshedClientSilenced()
         return MainaCallInterruptionPolicy.reducerCommunicationActive(
             state = controlState,
             audioMode = audioManager.mode,
-            clientSilenced = refreshedClientSilenced(),
+            clientSilenced = nowSilenced,
+            clientSilencingBegan = !previouslySilenced && nowSilenced,
         )
     }
 

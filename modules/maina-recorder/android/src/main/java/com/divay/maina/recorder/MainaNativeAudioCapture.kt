@@ -581,6 +581,7 @@ internal class MainaNativeAudioCapture(
             runCatching { createAndStartRecorder(expectedLatchGeneration) }
                 .onFailure { closeChunk(nextChunk, directory, "system-resume-start-failed") }
                 .getOrThrow()
+                .also { retainedRecorderInvalid.set(false) }
         }
 
         val activated = readCommitBarrier.commitIf(
@@ -601,6 +602,20 @@ internal class MainaNativeAudioCapture(
         )
         if (!activated) {
             closeChunk(nextChunk, directory, "system-resume-revoked")
+            val recreatedRecorderIsWaitingForUnsilencing =
+                retainedState == MainaRetainedRecorderState.INVALID &&
+                    audioManager.mode == AudioManager.MODE_NORMAL &&
+                    activeRecorder.state == AudioRecord.STATE_INITIALIZED &&
+                    activeRecorder.recordingState == AudioRecord.RECORDSTATE_RECORDING &&
+                    Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q &&
+                    activeRecorder.activeRecordingConfiguration?.isClientSilenced != false
+            if (recreatedRecorderIsWaitingForUnsilencing) {
+                // Keep this single fresh startInput alive, read-disabled and
+                // draining. A later exact unsilencing callback can prove it
+                // READY without consuming a second recreation in this cycle.
+                systemRecoveryReason = "recreated-recorder-awaiting-unsilencing"
+                throw SystemResumeWaitingException()
+            }
             if (retainedState != MainaRetainedRecorderState.READY) releaseRecorder()
             error("System resume authority changed before activation")
         }
@@ -1028,6 +1043,7 @@ internal class MainaNativeAudioCapture(
                     !retainedRecorderInvalid.get(),
                 silencingKnown = silencing != null,
                 clientSilenced = silencing == true,
+                recreationAlreadyAttempted = systemRecreationAttemptCycle.get() == systemDrainCycle.get(),
             )
         }
 

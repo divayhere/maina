@@ -386,6 +386,7 @@ internal object MainaSystemDrainPolicy {
         recorderRecording: Boolean,
         silencingKnown: Boolean,
         clientSilenced: Boolean,
+        recreationAlreadyAttempted: Boolean = false,
     ): MainaRetainedRecorderState = when {
         !generationMatches || !recorderPresent || !recorderInitialized || !recorderRecording ->
             MainaRetainedRecorderState.INVALID
@@ -395,6 +396,7 @@ internal object MainaSystemDrainPolicy {
         // WAITING makes the one permitted recreation path unreachable because
         // only a fresh startInput can force policy to reevaluate silencing on
         // affected devices.
+        clientSilenced && recreationAlreadyAttempted -> MainaRetainedRecorderState.WAITING
         clientSilenced -> MainaRetainedRecorderState.INVALID
         else -> MainaRetainedRecorderState.READY
     }
@@ -505,6 +507,7 @@ internal object MainaCallInterruptionPolicy {
         state: MainaCaptureControlState,
         audioMode: Int,
         clientSilenced: Boolean,
+        clientSilencingBegan: Boolean = false,
     ): Boolean {
         val hardActive = hardCommunicationActive(audioMode)
         val systemOwnsPause = state.pauseOwner == MainaCapturePauseOwner.SYSTEM &&
@@ -513,7 +516,7 @@ internal object MainaCallInterruptionPolicy {
                 MainaCaptureControlPhase.PAUSED,
                 MainaCaptureControlPhase.RESUME_PENDING,
             )
-        return hardActive || (!systemOwnsPause && clientSilenced)
+        return hardActive || if (systemOwnsPause) clientSilencingBegan else clientSilenced
     }
 
     /** A failed refresh preserves the last privacy-safe value; a fresh value replaces it. */
