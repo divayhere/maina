@@ -17,6 +17,7 @@ const adbTarget = readIfPresent('scripts/adb-target.sh');
 const iosUiConfigurator = readIfPresent('scripts/configure-ios-ui-tests.rb');
 const iosUiBuild = readIfPresent('scripts/build-ios-ui-test-products-guarded.sh');
 const iosUiRun = readIfPresent('scripts/run-ios-ui-tests-guarded.sh');
+const iosDirectUiRun = readIfPresent('scripts/run-ios-xcuitest-direct.py');
 
 execFileSync('/bin/bash', ['-n', replayPath], { stdio: 'inherit' });
 
@@ -87,6 +88,23 @@ if (iosUiRun) {
   }
   if (!iosUiRun.includes('XCTESTRUN_CANDIDATES=("$PRODUCTS_ROOT"/Build/Products/MainaUITests_iphoneos*-arm64.xctestrun)')) {
     throw new Error('iOS UI-test runner is not bound to exactly one physical-device xctestrun product.');
+  }
+}
+
+if (iosDirectUiRun) {
+  for (const token of [
+    '00008120-001E146611E2601E',
+    'com.divay.maina.staging.qualify1048.uitests.xctrunner',
+    'com.divay.maina.staging',
+    'MainaUITests/testNavigationAudit',
+    'MainaUITests/testShortRecordingLifecycle',
+    'config.tests_to_run = selected',
+    'os.O_EXCL',
+  ]) {
+    if (!iosDirectUiRun.includes(token)) throw new Error(`Direct iOS UI-test runner is missing bounded token: ${token}`);
+  }
+  for (const token of ['testCloudPairingWithExternalApproval', 'testStopExistingRecording', 'testKeepInterruptedRecording']) {
+    if (iosDirectUiRun.includes(token)) throw new Error(`Direct iOS UI-test runner exposes unsafe or state-dependent test: ${token}`);
   }
 }
 

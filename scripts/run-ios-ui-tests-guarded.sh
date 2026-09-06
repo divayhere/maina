@@ -15,6 +15,7 @@ VERSION="$("$MAINA_IOS_NODE_BIN/node" -p "require('$PROJECT_DIR/app.json').expo.
 BUILD_NUMBER="$("$MAINA_IOS_NODE_BIN/node" -p "require('$PROJECT_DIR/app.json').expo.ios.buildNumber")"
 PRODUCTS_ATTEMPT="${MAINA_IOS_UI_TEST_PRODUCTS_ATTEMPT:?set the already-built UI-test products attempt}"
 RUN_ATTEMPT="${MAINA_IOS_UI_TEST_RUN_ATTEMPT:?set a fresh UI-test run attempt}"
+TRANSPORT="${MAINA_IOS_UI_TEST_TRANSPORT:-xcode}"
 PRODUCTS_ROOT="$MAINA_IOS_DERIVED_DATA_ROOT/ui-tests-$VERSION-$BUILD_NUMBER-$PRODUCTS_ATTEMPT"
 RESULT_ROOT="$MAINA_IOS_DERIVED_DATA_ROOT/ui-test-results-$VERSION-$BUILD_NUMBER-$RUN_ATTEMPT"
 
@@ -43,13 +44,16 @@ if [[ -e "$RESULT_ROOT" ]]; then
 fi
 
 declare -a selected_tests=()
+declare -a direct_tests=()
 for requested_test in "$@"; do
   case "$requested_test" in
     navigation-audit)
       selected_tests+=("-only-testing:MainaUITests/MainaUITests/testNavigationAudit")
+      direct_tests+=("navigation-audit")
       ;;
     short-recording-lifecycle)
       selected_tests+=("-only-testing:MainaUITests/MainaUITests/testShortRecordingLifecycle")
+      direct_tests+=("short-recording-lifecycle")
       ;;
     *)
       echo "Unsupported iOS UI-test case: $requested_test" >&2
@@ -63,6 +67,14 @@ if (( ${#selected_tests[@]} == 0 )); then
 fi
 
 maina_storage_mkdir "$RESULT_ROOT"
+if [[ "$TRANSPORT" == 'direct' ]]; then
+  PYTHON="/Users/divay/Developer/.tools/maina-pymobiledevice3/bin/python"
+  [[ -x "$PYTHON" ]] || { echo "Pinned iOS automation Python is unavailable." >&2; exit 78; }
+  exec "$PYTHON" "$PROJECT_DIR/scripts/run-ios-xcuitest-direct.py" \
+    "$RESULT_ROOT/direct-xcuitest-result.json" \
+    "${direct_tests[@]}"
+fi
+[[ "$TRANSPORT" == 'xcode' ]] || { echo "Unsupported iOS UI-test transport." >&2; exit 64; }
 exec "$PROJECT_DIR/scripts/external-bin/xcodebuild" \
   test-without-building \
   -xctestrun "$XCTESTRUN" \
