@@ -26,7 +26,7 @@ assert.equal(plan.releaseId, 'maina-m3-m4-0.10.54');
 assert.deepEqual(plan.release, { version: '0.10.54', androidVersionCode: 80, iosBuildNumber: '36' });
 assert.equal(plan.sources.android.productCommit, '2c33b08cadd6c9a2435da8ae782cd7e1e88e7c39');
 assert.equal(plan.sources.ios.productCommit, 'a62548a72c0a53d56b2123447d5fb57a7840c454');
-assert.equal(plan.sources.coordinationCommit, '29f5e5aeb55a9165342b250cec1844aacca725e1');
+assert.equal(plan.sources.coordinationCommit, '66553b66106c1470c37223ea8df535813981c71e');
 assert.equal(
   execFileSync('git', ['-C', path.join(root, 'coordination'), 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim(),
   plan.sources.coordinationCommit,
