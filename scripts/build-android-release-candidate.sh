@@ -12,7 +12,7 @@ STORAGE_GUARD_SHA256="e8efcaa346ca46ed746970f7739f1346f25442719961f1c8e3d884b3d5
 STORAGE_ROOT="$($STORAGE_GUARD)" || exit $?
 [[ "$STORAGE_ROOT" == "/Volumes/DivaySSD/MainaBuild" ]] || { echo "Canonical Maina storage root was rejected." >&2; exit 78; }
 MAINA_RELEASE_OUTPUT_ROOT="${MAINA_RELEASE_OUTPUT_ROOT:-$STORAGE_ROOT/artifacts/apps/android-main}"
-OUTPUT_DIR="${MAINA_RELEASE_OUTPUT_DIR:-$MAINA_RELEASE_OUTPUT_ROOT/android/Maina-0.10.55-81-candidate}"
+OUTPUT_DIR="${MAINA_RELEASE_OUTPUT_DIR:-$MAINA_RELEASE_OUTPUT_ROOT/android/Maina-0.10.56-82-candidate}"
 [[ "$OUTPUT_DIR" == /* ]] || { echo "MAINA_RELEASE_OUTPUT_DIR must be absolute." >&2; exit 2; }
 case "$OUTPUT_DIR" in
   "$STORAGE_ROOT"/*) ;;
@@ -127,9 +127,9 @@ fi
 
 APK="$MAINA_ANDROID_OUTPUT_ROOT/_app/outputs/apk/release/app-release.apk"
 [[ -n "$APK" && -f "$APK" ]] || fail_terminal "ANDROID_BUILD_ARTIFACT_MISSING" 1
-HELD_APK="$OUTPUT_DIR/Maina-0.10.55-81.apk"
+HELD_APK="$OUTPUT_DIR/Maina-0.10.56-82.apk"
 cp "$APK" "$HELD_APK"
-node scripts/inspect-exact-artifact.mjs android release/m3-m4-0.10.55-candidate-plan.json "$HELD_APK" \
+node scripts/inspect-exact-artifact.mjs android release/m3-m4-0.10.56-candidate-plan.json "$HELD_APK" \
   > "$OUTPUT_DIR/android-inspection.json"
 node scripts/verify-generated-native-release-metadata.mjs android
 node scripts/verify-build-source-state.mjs android "$EXPECTED_FINAL"
