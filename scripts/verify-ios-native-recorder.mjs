@@ -104,6 +104,7 @@ for (const token of [
   'static func recoveryLoopStart',
   'static func interruptionBridgeAction',
   'static func shouldRetainAfterInterruptionBridgeExpiration',
+  'static func backgroundExpirationMayApply',
   'case queueSystemRecovery',
   'case resumeDeliberatePause',
   'case rejectCommunicationActive',
@@ -262,21 +263,55 @@ for (const token of [
     throw new Error(`iOS background-exhaustion pending-generation invariant missing: ${token}`);
   }
 }
+if (backgroundExpirySource.includes('queue.sync')) {
+  throw new Error('iOS background-task expiration must never block the main thread on the capture queue.');
+}
+if (backgroundExpirySource.indexOf('UIApplication.shared.endBackgroundTask(expired.task)') < 0 ||
+    backgroundExpirySource.indexOf('UIApplication.shared.endBackgroundTask(expired.task)') >=
+      backgroundExpirySource.indexOf('queue.async')) {
+  throw new Error('iOS background-task expiration must return the UIKit assertion before asynchronous state or journal work.');
+}
+const expiryBeforeAsync = backgroundExpirySource.slice(0, backgroundExpirySource.indexOf('queue.async'));
+if (expiryBeforeAsync.includes('appendJournal(') || expiryBeforeAsync.includes('synchronize()')) {
+  throw new Error('iOS background-task expiration must perform no journal or filesystem sync before returning the assertion.');
+}
 const interruptionStart = captureSource.indexOf('private func handleInterruption');
 const interruptionEnd = captureSource.indexOf('private func handleMediaServicesReset', interruptionStart);
 const interruptionSource = captureSource.slice(interruptionStart, interruptionEnd);
-if (interruptionSource.indexOf('beginSystemPause(reason: "system-interruption")') < 0 ||
-    interruptionSource.indexOf('beginSystemPause(reason: "system-interruption")') >=
-      interruptionSource.indexOf('beginInterruptionBridgeIfNeeded(reason: "system-interruption")')) {
-  throw new Error('iOS must acquire the finite interruption bridge immediately after the durable system pause begins.');
+const interruptionPrepare = interruptionSource.indexOf('prepareSystemPause(reason: "system-interruption")');
+const interruptionBridge = interruptionSource.indexOf('beginInterruptionBridgeIfNeeded(reason: "system-interruption")');
+const interruptionComplete = interruptionSource.indexOf('completeSystemPause(reason: "system-interruption"');
+if (interruptionPrepare < 0 || interruptionBridge <= interruptionPrepare || interruptionComplete <= interruptionBridge) {
+  throw new Error('iOS must latch system-pause authority, acquire the finite bridge, then finalize the chunk.');
 }
 const callObserverStart = captureSource.indexOf('func callObserver(');
 const callObserverEnd = captureSource.indexOf('private func fail(', callObserverStart);
 const callObserverSource = captureSource.slice(callObserverStart, callObserverEnd);
-if (callObserverSource.indexOf('beginSystemPause(reason: "call-observer")') < 0 ||
-    callObserverSource.indexOf('beginSystemPause(reason: "call-observer")') >=
-      callObserverSource.indexOf('beginInterruptionBridgeIfNeeded(reason: "call-observer")')) {
-  throw new Error('iOS CallKit activation must acquire the same finite bridge only after the system pause owns state.');
+const callPrepare = callObserverSource.indexOf('prepareSystemPause(reason: "call-observer")');
+const callBridge = callObserverSource.indexOf('beginInterruptionBridgeIfNeeded(reason: "call-observer")');
+const callComplete = callObserverSource.indexOf('completeSystemPause(reason: "call-observer"');
+if (callPrepare < 0 || callBridge <= callPrepare || callComplete <= callBridge) {
+  throw new Error('iOS CallKit activation must latch pause authority, acquire the same bridge, then finalize the chunk.');
+}
+const pausePrepareStart = captureSource.indexOf('private func prepareSystemPause');
+const pauseCompleteStart = captureSource.indexOf('private func completeSystemPause', pausePrepareStart);
+const pausePrepareSource = captureSource.slice(pausePrepareStart, pauseCompleteStart);
+for (const token of ['interrupted = true', 'stopTimers()', 'state = .pausing']) {
+  if (!pausePrepareSource.includes(token)) {
+    throw new Error(`iOS early interruption latch is incomplete: ${token}`);
+  }
+}
+for (const forbidden of ['closeActiveChunk(', 'appendJournal(']) {
+  if (pausePrepareSource.includes(forbidden)) {
+    throw new Error(`iOS early interruption latch must avoid pre-assertion file work: ${forbidden}`);
+  }
+}
+const pauseCompleteEnd = captureSource.indexOf('private func beginSystemPause', pauseCompleteStart);
+const pauseCompleteSource = captureSource.slice(pauseCompleteStart, pauseCompleteEnd);
+for (const token of ['closeActiveChunk(reason: reason, preserve: true)', 'state = .paused', 'appendJournal("system-paused"']) {
+  if (!pauseCompleteSource.includes(token)) {
+    throw new Error(`iOS protected system-pause finalization is incomplete: ${token}`);
+  }
 }
 const recoveryCatchStart = scheduledRecoverySource.indexOf('} catch {');
 const recoveryCatchSource = scheduledRecoverySource.slice(recoveryCatchStart);

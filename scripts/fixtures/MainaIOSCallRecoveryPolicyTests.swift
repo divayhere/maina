@@ -256,6 +256,33 @@ require(
   ),
   "manual pause must win over an expiring interruption bridge"
 )
+require(
+  MainaIOSCallRecoveryPolicy.backgroundExpirationMayApply(
+    expectedGeneration: 12,
+    currentGeneration: 12,
+    expectedInterruptionCycle: 4,
+    currentInterruptionCycle: 4
+  ),
+  "the exact live assertion lease may hand off one pending recovery generation"
+)
+require(
+  !MainaIOSCallRecoveryPolicy.backgroundExpirationMayApply(
+    expectedGeneration: 12,
+    currentGeneration: 13,
+    expectedInterruptionCycle: 4,
+    currentInterruptionCycle: 4
+  ),
+  "Stop, manual pause, or a newer recovery generation must defeat stale expiration"
+)
+require(
+  !MainaIOSCallRecoveryPolicy.backgroundExpirationMayApply(
+    expectedGeneration: 12,
+    currentGeneration: 12,
+    expectedInterruptionCycle: 4,
+    currentInterruptionCycle: 5
+  ),
+  "call re-entry must defeat an older interruption bridge expiration"
+)
 
 print("iOS call-recovery policy tests passed.")
   }

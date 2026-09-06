@@ -52,7 +52,11 @@ final class MainaIOSNativeAudioCapture: NSObject, AVAudioRecorderDelegate, CXCal
   private var interrupted = false
   private var communicationActive = false
   private var recoveryGeneration = 0
+  private let recoveryBackgroundTaskLock = NSLock()
   private var recoveryBackgroundTask: UIBackgroundTaskIdentifier = .invalid
+  private var recoveryBackgroundTaskLeaseId: UUID?
+  private var recoveryBackgroundTaskGeneration = 0
+  private var recoveryBackgroundTaskInterruptionCycle = 0
   private var interruptionCycle = 0
   private var interruptionBridgeAttemptedCycle = 0
   private var interruptionBridgeStartCount = 0
@@ -644,8 +648,9 @@ final class MainaIOSNativeAudioCapture: NSObject, AVAudioRecorderDelegate, CXCal
     case .began:
       communicationActive = communicationActive || callObserver.calls.contains(where: { !$0.hasEnded })
       if routeRecoveryActive { suspendRecoveryForActiveCall(reason: "interruption-began") }
-      beginSystemPause(reason: "system-interruption")
+      let preparedGeneration = prepareSystemPause(reason: "system-interruption")
       beginInterruptionBridgeIfNeeded(reason: "system-interruption")
+      completeSystemPause(reason: "system-interruption", preparedGeneration: preparedGeneration)
       appendJournal("interruption-began", fields: ["communicationActive": communicationActive])
     case .ended:
       let optionsValue = notification.userInfo?[AVAudioSessionInterruptionOptionKey] as? UInt ?? 0
@@ -830,18 +835,31 @@ final class MainaIOSNativeAudioCapture: NSObject, AVAudioRecorderDelegate, CXCal
   private func canContinueRecoveryWatcher() -> Bool {
     if refreshCommunicationActiveFromObserver() { return false }
     if UIApplication.shared.applicationState == .active { return true }
-    guard recoveryBackgroundTask != .invalid else { return false }
+    guard recoveryBackgroundTaskIsActive() else { return false }
     return UIApplication.shared.backgroundTimeRemaining > 4
   }
 
   private func beginRecoveryBackgroundTaskIfNeeded(reason: String) {
-    guard recoveryBackgroundTask == .invalid else { return }
-    recoveryBackgroundTask = UIApplication.shared.beginBackgroundTask(withName: "Maina microphone recovery") { [weak self] in
-      self?.expireRecoveryBackgroundTaskSynchronously(reason: reason)
+    let leaseId = UUID()
+    let generation = recoveryGeneration
+    let cycle = interruptionCycle
+    guard reserveRecoveryBackgroundTask(
+      leaseId: leaseId,
+      generation: generation,
+      interruptionCycle: cycle
+    ) else { return }
+    let task = UIApplication.shared.beginBackgroundTask(withName: "Maina microphone recovery") { [weak self] in
+      self?.expireRecoveryBackgroundTaskSynchronously(leaseId: leaseId, reason: reason)
+    }
+    let granted = activateRecoveryBackgroundTask(leaseId: leaseId, task: task)
+    if !granted, task != .invalid {
+      // Expiration may race the return from beginBackgroundTask. If its lease
+      // was already revoked, return the just-issued assertion immediately.
+      UIApplication.shared.endBackgroundTask(task)
     }
     appendJournal("capture-recovery-background-time-began", fields: [
       "reason": reason,
-      "granted": recoveryBackgroundTask != .invalid,
+      "granted": granted,
     ])
   }
 
@@ -850,7 +868,7 @@ final class MainaIOSNativeAudioCapture: NSObject, AVAudioRecorderDelegate, CXCal
       interrupted: interrupted,
       manuallyPaused: deliberatelyPaused,
       terminal: state == .idle || state == .finalizing || state == .error,
-      taskActive: recoveryBackgroundTask != .invalid,
+      taskActive: recoveryBackgroundTaskIsActive(),
       interruptionCycle: interruptionCycle,
       attemptedCycle: interruptionBridgeAttemptedCycle
     )
@@ -858,7 +876,7 @@ final class MainaIOSNativeAudioCapture: NSObject, AVAudioRecorderDelegate, CXCal
     case .acquire:
       interruptionBridgeAttemptedCycle = interruptionCycle
       beginRecoveryBackgroundTaskIfNeeded(reason: "interruption-bridge-\(reason)")
-      if recoveryBackgroundTask != .invalid { interruptionBridgeStartCount += 1 }
+      if recoveryBackgroundTaskIsActive() { interruptionBridgeStartCount += 1 }
     case .coalesce:
       appendJournal("capture-interruption-bridge-coalesced", fields: [
         "reason": reason,
@@ -869,44 +887,105 @@ final class MainaIOSNativeAudioCapture: NSObject, AVAudioRecorderDelegate, CXCal
     }
   }
 
-  private func expireRecoveryBackgroundTaskSynchronously(reason: String) {
-    let task: UIBackgroundTaskIdentifier = queue.sync {
-      let current = recoveryBackgroundTask
-      guard current != .invalid else { return .invalid }
-      recoveryAwaitingPublicSignal = MainaIOSCallRecoveryPolicy.shouldRetainAfterInterruptionBridgeExpiration(
-        interrupted: interrupted,
-        stopped: state == .idle || state == .finalizing,
-        manuallyPaused: deliberatelyPaused
+  private func expireRecoveryBackgroundTaskSynchronously(leaseId: UUID, reason: String) {
+    guard let expired = takeRecoveryBackgroundTask(expectedLeaseId: leaseId) else { return }
+    if expired.task != .invalid {
+      // UIKit runs this handler synchronously on the main thread. Return the
+      // assertion before queueing state reconciliation or any journal I/O.
+      UIApplication.shared.endBackgroundTask(expired.task)
+    }
+    queue.async { [weak self] in
+      guard let self, MainaIOSCallRecoveryPolicy.backgroundExpirationMayApply(
+        expectedGeneration: expired.generation,
+        currentGeneration: self.recoveryGeneration,
+        expectedInterruptionCycle: expired.interruptionCycle,
+        currentInterruptionCycle: self.interruptionCycle
       )
-      interruptionBridgeExpirationCount += 1
-      recoveryReasonCode = recoveryAwaitingPublicSignal
+      else { return }
+      self.recoveryAwaitingPublicSignal = MainaIOSCallRecoveryPolicy.shouldRetainAfterInterruptionBridgeExpiration(
+        interrupted: self.interrupted,
+        stopped: self.state == .idle || self.state == .finalizing,
+        manuallyPaused: self.deliberatelyPaused
+      )
+      self.interruptionBridgeExpirationCount += 1
+      self.recoveryReasonCode = self.recoveryAwaitingPublicSignal
         ? "interruption-bridge-expired"
         : "interruption-bridge-cancelled"
-      appendJournal("capture-recovery-background-time-expired", fields: [
+      self.appendJournal("capture-recovery-background-time-expired", fields: [
         "reason": reason,
-        "awaitingPublicSignal": recoveryAwaitingPublicSignal,
+        "awaitingPublicSignal": self.recoveryAwaitingPublicSignal,
       ])
-      routeRecoveryActive = false
-      if !recoveryAwaitingPublicSignal {
-        lastError = "Microphone recovery is paused safely. Reopen Maina to continue this recording."
+      self.routeRecoveryActive = false
+      if !self.recoveryAwaitingPublicSignal {
+        self.lastError = "Microphone recovery is paused safely. Reopen Maina to continue this recording."
       }
       // Revoke any timer owned by the exhausted UIKit assertion while keeping
       // exactly one pending recovery generation for the next public signal.
-      recoveryGeneration += 1
-      recoveryLoopStartedUptime = nil
-      recoveryBackgroundTask = .invalid
-      return current
-    }
-    if task != .invalid {
-      UIApplication.shared.endBackgroundTask(task)
+      self.recoveryGeneration += 1
+      self.recoveryLoopStartedUptime = nil
     }
   }
 
   private func endRecoveryBackgroundTask() {
-    let task = recoveryBackgroundTask
-    guard task != .invalid else { return }
+    guard let ended = takeRecoveryBackgroundTask(expectedLeaseId: nil) else { return }
+    if ended.task != .invalid {
+      UIApplication.shared.endBackgroundTask(ended.task)
+    }
+  }
+
+  private func recoveryBackgroundTaskIsActive() -> Bool {
+    recoveryBackgroundTaskLock.lock()
+    defer { recoveryBackgroundTaskLock.unlock() }
+    return recoveryBackgroundTask != .invalid
+  }
+
+  private func reserveRecoveryBackgroundTask(
+    leaseId: UUID,
+    generation: Int,
+    interruptionCycle: Int
+  ) -> Bool {
+    recoveryBackgroundTaskLock.lock()
+    defer { recoveryBackgroundTaskLock.unlock() }
+    guard recoveryBackgroundTaskLeaseId == nil else { return false }
+    recoveryBackgroundTaskLeaseId = leaseId
+    recoveryBackgroundTaskGeneration = generation
+    recoveryBackgroundTaskInterruptionCycle = interruptionCycle
     recoveryBackgroundTask = .invalid
-    UIApplication.shared.endBackgroundTask(task)
+    return true
+  }
+
+  private func activateRecoveryBackgroundTask(
+    leaseId: UUID,
+    task: UIBackgroundTaskIdentifier
+  ) -> Bool {
+    recoveryBackgroundTaskLock.lock()
+    defer { recoveryBackgroundTaskLock.unlock() }
+    guard recoveryBackgroundTaskLeaseId == leaseId, task != .invalid else {
+      if recoveryBackgroundTaskLeaseId == leaseId {
+        recoveryBackgroundTaskLeaseId = nil
+      }
+      return false
+    }
+    recoveryBackgroundTask = task
+    return true
+  }
+
+  private func takeRecoveryBackgroundTask(
+    expectedLeaseId: UUID?
+  ) -> (task: UIBackgroundTaskIdentifier, generation: Int, interruptionCycle: Int)? {
+    recoveryBackgroundTaskLock.lock()
+    defer { recoveryBackgroundTaskLock.unlock() }
+    guard let activeLeaseId = recoveryBackgroundTaskLeaseId,
+      expectedLeaseId == nil || expectedLeaseId == activeLeaseId
+    else { return nil }
+    let result = (
+      task: recoveryBackgroundTask,
+      generation: recoveryBackgroundTaskGeneration,
+      interruptionCycle: recoveryBackgroundTaskInterruptionCycle
+    )
+    recoveryBackgroundTask = .invalid
+    recoveryBackgroundTaskLeaseId = nil
+    return result
   }
 
   private func tearDownSession() {
@@ -933,10 +1012,11 @@ final class MainaIOSNativeAudioCapture: NSObject, AVAudioRecorderDelegate, CXCal
     endRecoveryBackgroundTask()
   }
 
-  private func beginSystemPause(reason: String) {
+  @discardableResult
+  private func prepareSystemPause(reason: String) -> Int? {
     guard state == .recording else {
       if state == .paused, !deliberatelyPaused { interrupted = true }
-      return
+      return nil
     }
     recoveryGeneration += 1
     interruptionCycle += 1
@@ -948,10 +1028,24 @@ final class MainaIOSNativeAudioCapture: NSObject, AVAudioRecorderDelegate, CXCal
     endRecoveryBackgroundTask()
     interrupted = true
     stopTimers()
+    state = .pausing
+    return recoveryGeneration
+  }
+
+  private func completeSystemPause(reason: String, preparedGeneration: Int?) {
+    guard let preparedGeneration,
+      recoveryGeneration == preparedGeneration,
+      state == .pausing
+    else { return }
     closeActiveChunk(reason: reason, preserve: true)
     chunkIndex += 1
     state = .paused
     appendJournal("system-paused", fields: ["reason": reason, "generation": recoveryGeneration])
+  }
+
+  private func beginSystemPause(reason: String) {
+    let preparedGeneration = prepareSystemPause(reason: reason)
+    completeSystemPause(reason: reason, preparedGeneration: preparedGeneration)
   }
 
   private func cancelSystemRecovery(reason: String) {
@@ -1000,8 +1094,9 @@ final class MainaIOSNativeAudioCapture: NSObject, AVAudioRecorderDelegate, CXCal
     appendJournal("call-state-changed", fields: ["active": active])
     if active {
       suspendRecoveryForActiveCall(reason: "call-observer-active")
-      beginSystemPause(reason: "call-observer")
+      let preparedGeneration = prepareSystemPause(reason: "call-observer")
       beginInterruptionBridgeIfNeeded(reason: "call-observer")
+      completeSystemPause(reason: "call-observer", preparedGeneration: preparedGeneration)
       return
     }
     guard state == .paused, interrupted, !deliberatelyPaused else { return }

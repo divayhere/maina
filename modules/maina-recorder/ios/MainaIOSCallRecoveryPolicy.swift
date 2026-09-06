@@ -50,6 +50,16 @@ enum MainaIOSCallRecoveryPolicy {
     interrupted && !stopped && !manuallyPaused
   }
 
+  static func backgroundExpirationMayApply(
+    expectedGeneration: Int,
+    currentGeneration: Int,
+    expectedInterruptionCycle: Int,
+    currentInterruptionCycle: Int
+  ) -> Bool {
+    expectedGeneration == currentGeneration &&
+      expectedInterruptionCycle == currentInterruptionCycle
+  }
+
   static func manualResumeAction(
     interrupted: Bool,
     deliberatelyPaused: Bool,
