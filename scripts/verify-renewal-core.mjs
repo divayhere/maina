@@ -39,6 +39,19 @@ assert.throws(
   /did not succeed/,
 );
 assert.equal(findQualifiedIosDevice(disconnectedPayload, { ...expectedDevice, nowMs: proofNow }, capabilityProof).identifier, 'device');
+const localNetworkPayload = { result: { devices: [{
+  ...devicePayload.result.devices[0],
+  connectionProperties: { ...devicePayload.result.devices[0].connectionProperties, transportType: 'localNetwork' },
+}] } };
+assert.throws(
+  () => findQualifiedIosDevice(localNetworkPayload, { ...expectedDevice, nowMs: proofNow }),
+  /capability proof/,
+);
+assert.throws(
+  () => findQualifiedIosDevice(localNetworkPayload, { ...expectedDevice, nowMs: proofNow }, { ...capabilityProof, exitCode: 1 }),
+  /did not succeed/,
+);
+assert.equal(findQualifiedIosDevice(localNetworkPayload, { ...expectedDevice, nowMs: proofNow }, capabilityProof).identifier, 'device');
 assert.throws(
   () => findQualifiedIosDevice(disconnectedPayload, { ...expectedDevice, nowMs: proofNow }, { ...capabilityProof, deviceId: 'other-device' }),
   /proof device mismatch/,
@@ -61,7 +74,7 @@ for (const [label, mutate, pattern] of [
   ['UDID', (device) => { device.hardwareProperties.udid = 'wrong'; }, /UDID/],
   ['model', (device) => { device.hardwareProperties.marketingName = 'Other'; }, /model/],
   ['physical', (device) => { device.hardwareProperties.reality = 'simulator'; }, /physical/],
-  ['transport', (device) => { device.connectionProperties.transportType = 'wireless'; }, /USB/],
+  ['transport', (device) => { device.connectionProperties.transportType = 'wireless'; }, /transport is not approved/],
   ['pairing', (device) => { device.connectionProperties.pairingState = 'unpaired'; }, /paired/],
   ['developer mode', (device) => { device.deviceProperties.developerModeStatus = 'disabled'; }, /Developer Mode/],
 ]) {
@@ -74,7 +87,7 @@ assert.throws(
     ...devicePayload.result.devices[0],
     connectionProperties: { ...devicePayload.result.devices[0].connectionProperties, transportType: 'wireless' },
   }] } }, expectedDevice),
-  /USB/,
+  /transport is not approved/,
 );
 
 const app = findInstalledIosApp({ result: { apps: [{

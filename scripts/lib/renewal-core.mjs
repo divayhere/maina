@@ -41,12 +41,13 @@ export function findQualifiedIosDevice(payload, expected, capabilityProof = null
   if (device.hardwareProperties?.udid !== expected.udid) throw new Error('iOS UDID mismatch.');
   if (device.hardwareProperties?.marketingName !== expected.marketingName) throw new Error('iOS model mismatch.');
   if (device.hardwareProperties?.reality !== 'physical') throw new Error('iOS target is not physical.');
-  if (device.connectionProperties?.transportType !== 'wired') throw new Error('iOS target is not connected by USB.');
+  const transportType = device.connectionProperties?.transportType;
+  if (!['wired', 'localNetwork'].includes(transportType)) throw new Error('iOS target transport is not approved.');
   if (device.connectionProperties?.pairingState !== 'paired') throw new Error('iOS device is not paired.');
   if (device.deviceProperties?.developerModeStatus !== 'enabled') throw new Error('iOS Developer Mode is disabled.');
   const tunnelState = device.connectionProperties?.tunnelState;
   if (!['connected', 'disconnected'].includes(tunnelState)) throw new Error('iOS device tunnel state is invalid.');
-  if (tunnelState === 'disconnected') {
+  if (transportType === 'localNetwork' || tunnelState === 'disconnected') {
     validateIosCoreDeviceCapabilityProof(capabilityProof, expected);
   }
   return device;
