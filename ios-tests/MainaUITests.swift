@@ -100,6 +100,95 @@ final class MainaUITests: XCTestCase {
     attach("recording-saved")
   }
 
+  func testRapidPauseResumeFirstTap() throws {
+    startFreshRecording()
+    app.buttons["Pause"].tap()
+    let resume = app.buttons["Resume"]
+    XCTAssertTrue(resume.waitForExistence(timeout: 5), "Resume did not become available after the first Pause tap.")
+    resume.tap()
+    XCTAssertTrue(app.staticTexts["Recording"].waitForExistence(timeout: 8), "The first Resume tap was not accepted.")
+    attach("rapid-first-tap-resumed")
+    stopCurrentRecording()
+  }
+
+  func testPausedStatePersistsUntilResume() throws {
+    startFreshRecording()
+    app.buttons["Pause"].tap()
+    XCTAssertTrue(app.staticTexts["Paused"].waitForExistence(timeout: 5))
+    sleep(5)
+    XCTAssertTrue(app.staticTexts["Paused"].exists, "Recording left Paused without an explicit Resume.")
+    XCTAssertTrue(app.buttons["Resume"].exists)
+    attach("paused-state-held")
+    app.buttons["Resume"].tap()
+    XCTAssertTrue(app.staticTexts["Recording"].waitForExistence(timeout: 8))
+    stopCurrentRecording()
+  }
+
+  func testBackgroundForegroundRecording() throws {
+    startFreshRecording()
+    sleep(5)
+    attach("background-recording-before-home")
+    XCUIDevice.shared.press(.home)
+    sleep(12)
+    app.activate()
+    XCTAssertTrue(app.wait(for: .runningForeground, timeout: 15))
+    XCTAssertTrue(app.staticTexts["Recording"].waitForExistence(timeout: 8), "Recording did not survive foreground restoration.")
+    XCTAssertTrue(app.buttons["Stop and save"].exists)
+    attach("background-recording-restored")
+    stopCurrentRecording()
+  }
+
+  func testDiscardRecordingLifecycle() throws {
+    startFreshRecording()
+    sleep(4)
+    app.buttons["Discard this recording"].tap()
+    let destructive = app.alerts.buttons["Discard this recording"]
+    XCTAssertTrue(destructive.waitForExistence(timeout: 5))
+    destructive.tap()
+    XCTAssertTrue(app.buttons["Record a meeting"].waitForExistence(timeout: 20))
+    attach("recording-discarded")
+  }
+
+  func testProcessDeathRecovery() throws {
+    startFreshRecording()
+    sleep(8)
+    attach("process-recovery-before-termination")
+    app.terminate()
+    sleep(3)
+    app.launch()
+    XCTAssertTrue(app.wait(for: .runningForeground, timeout: 15))
+    let keep = app.buttons["Keep this recording"]
+    if keep.waitForExistence(timeout: 12) {
+      keep.tap()
+      XCTAssertFalse(keep.waitForExistence(timeout: 15))
+    }
+    XCTAssertTrue(
+      app.staticTexts.matching(NSPredicate(
+        format: "label CONTAINS[c] 'Notes' OR label CONTAINS[c] 'Transcript' OR label CONTAINS[c] 'Recent'"
+      )).firstMatch.waitForExistence(timeout: 25),
+      "Maina did not recover to a durable meeting or home surface after process death."
+    )
+    attach("process-recovery-complete")
+  }
+
+  func testLongRecordingWithBackgroundAndPauses() throws {
+    startFreshRecording()
+    sleep(30)
+    attach("long-recording-foreground")
+    XCUIDevice.shared.press(.home)
+    sleep(15)
+    app.activate()
+    XCTAssertTrue(app.staticTexts["Recording"].waitForExistence(timeout: 10))
+    app.buttons["Pause"].tap()
+    XCTAssertTrue(app.staticTexts["Paused"].waitForExistence(timeout: 5))
+    sleep(10)
+    app.buttons["Resume"].tap()
+    XCTAssertTrue(app.staticTexts["Recording"].waitForExistence(timeout: 8))
+    sleep(35)
+    attach("long-recording-after-resume")
+    stopCurrentRecording()
+  }
+
   func testCloudPairingWithExternalApproval() throws {
     openSettings()
 
@@ -138,6 +227,26 @@ final class MainaUITests: XCTestCase {
     sleep(1)
     app.coordinate(withNormalizedOffset: .init(dx: 0.22, dy: 0.23)).tap()
     XCTAssertTrue(app.staticTexts["MAINA CLOUD"].waitForExistence(timeout: 8))
+  }
+
+  private func startFreshRecording() {
+    tapTab(named: "Home", fallbackX: 0.18)
+    let record = app.buttons["Record a meeting"]
+    XCTAssertTrue(record.waitForExistence(timeout: 8))
+    record.tap()
+    XCTAssertTrue(app.staticTexts["Recording"].waitForExistence(timeout: 12))
+  }
+
+  private func stopCurrentRecording() {
+    let stop = app.buttons["Stop and save"]
+    XCTAssertTrue(stop.waitForExistence(timeout: 8))
+    stop.tap()
+    XCTAssertTrue(
+      app.staticTexts.matching(NSPredicate(
+        format: "label CONTAINS[c] 'Recent' OR label CONTAINS[c] 'recording' OR label CONTAINS[c] 'transcrib'"
+      )).firstMatch.waitForExistence(timeout: 30),
+      "Maina did not publish a durable post-recording state."
+    )
   }
 
   private func tapTab(named name: String, fallbackX: CGFloat) {

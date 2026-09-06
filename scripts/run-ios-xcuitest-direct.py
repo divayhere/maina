@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -17,6 +18,7 @@ from pymobiledevice3.services.dvt.testmanaged.dtx_services import (
     XCTestCaseResult,
 )
 from pymobiledevice3.services.dvt.testmanaged.xcuitest import TestConfig, XCUITestService
+from pymobiledevice3.services.dvt.testmanaged.xctest_types import XCActivityRecord, XCTAttachment
 
 
 DEVICE_UDID = "00008120-001E146611E2601E"
@@ -27,16 +29,24 @@ EXPECTED_BUILD = "37"
 ALLOWED_TESTS = {
     "navigation-audit": "MainaUITests/testNavigationAudit",
     "short-recording-lifecycle": "MainaUITests/testShortRecordingLifecycle",
+    "rapid-pause-resume": "MainaUITests/testRapidPauseResumeFirstTap",
+    "paused-state": "MainaUITests/testPausedStatePersistsUntilResume",
+    "background-recording": "MainaUITests/testBackgroundForegroundRecording",
+    "discard-recording": "MainaUITests/testDiscardRecordingLifecycle",
+    "process-death-recovery": "MainaUITests/testProcessDeathRecovery",
+    "long-recording": "MainaUITests/testLongRecordingWithBackgroundAndPauses",
 }
 
 
 class SanitizedListener(XCUITestListener):
-    def __init__(self) -> None:
+    def __init__(self, result_directory: Path) -> None:
         self.plan_started = False
         self.plan_finished = False
         self.cases: dict[str, dict[str, object]] = {}
         self.failure_count = 0
         self.initialization_failed = False
+        self.result_directory = result_directory
+        self.screenshots: list[dict[str, object]] = []
 
     async def did_begin_executing_test_plan(self) -> None:
         self.plan_started = True
@@ -62,6 +72,33 @@ class SanitizedListener(XCUITestListener):
     async def did_fail_to_bootstrap(self, error: object) -> None:
         self.initialization_failed = True
 
+    async def test_case_did_finish_activity(
+        self, test_class: str, method: str, activity: XCActivityRecord
+    ) -> None:
+        for attachment in activity.attachments:
+            if not isinstance(attachment, XCTAttachment) or attachment.data is None:
+                continue
+            if attachment.uniformTypeIdentifier not in {"public.png", "public.jpeg", "public.image"}:
+                continue
+            safe_name = "".join(
+                character.lower() if character.isalnum() else "-"
+                for character in attachment.name
+            ).strip("-")[:64] or "screenshot"
+            suffix = ".jpg" if attachment.uniformTypeIdentifier == "public.jpeg" else ".png"
+            filename = f"{len(self.screenshots) + 1:02d}-{safe_name}{suffix}"
+            output = self.result_directory / filename
+            descriptor = os.open(output, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            try:
+                os.write(descriptor, attachment.data)
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+            self.screenshots.append({
+                "file": filename,
+                "bytes": len(attachment.data),
+                "sha256": hashlib.sha256(attachment.data).hexdigest(),
+            })
+
 
 def write_result(path: Path, payload: dict[str, object]) -> None:
     encoded = (json.dumps(payload, sort_keys=True, indent=2) + "\n").encode()
@@ -85,7 +122,7 @@ async def run(result_path: Path, requested: list[str]) -> int:
         return 64
 
     started = time.monotonic()
-    listener = SanitizedListener()
+    listener = SanitizedListener(result_path.parent)
     rsd = None
     try:
         rsd = await establish_native_rsd(serial=DEVICE_UDID)
@@ -127,6 +164,7 @@ async def run(result_path: Path, requested: list[str]) -> int:
             "planStarted": listener.plan_started,
             "planFinished": listener.plan_finished,
             "failureCount": listener.failure_count,
+            "screenshots": listener.screenshots,
             "durationMs": round((time.monotonic() - started) * 1000),
             "rawDeviceOutputPersisted": False,
             "lifecycleMutationAttempts": 0,

@@ -55,6 +55,30 @@ for requested_test in "$@"; do
       selected_tests+=("-only-testing:MainaUITests/MainaUITests/testShortRecordingLifecycle")
       direct_tests+=("short-recording-lifecycle")
       ;;
+    rapid-pause-resume)
+      selected_tests+=("-only-testing:MainaUITests/MainaUITests/testRapidPauseResumeFirstTap")
+      direct_tests+=("rapid-pause-resume")
+      ;;
+    paused-state)
+      selected_tests+=("-only-testing:MainaUITests/MainaUITests/testPausedStatePersistsUntilResume")
+      direct_tests+=("paused-state")
+      ;;
+    background-recording)
+      selected_tests+=("-only-testing:MainaUITests/MainaUITests/testBackgroundForegroundRecording")
+      direct_tests+=("background-recording")
+      ;;
+    discard-recording)
+      selected_tests+=("-only-testing:MainaUITests/MainaUITests/testDiscardRecordingLifecycle")
+      direct_tests+=("discard-recording")
+      ;;
+    process-death-recovery)
+      selected_tests+=("-only-testing:MainaUITests/MainaUITests/testProcessDeathRecovery")
+      direct_tests+=("process-death-recovery")
+      ;;
+    long-recording)
+      selected_tests+=("-only-testing:MainaUITests/MainaUITests/testLongRecordingWithBackgroundAndPauses")
+      direct_tests+=("long-recording")
+      ;;
     *)
       echo "Unsupported iOS UI-test case: $requested_test" >&2
       exit 64
@@ -67,6 +91,7 @@ if (( ${#selected_tests[@]} == 0 )); then
 fi
 
 maina_storage_mkdir "$RESULT_ROOT"
+chmod 0700 "$RESULT_ROOT"
 if [[ "$TRANSPORT" == 'direct' ]]; then
   PYTHON="/Users/divay/Developer/.tools/maina-pymobiledevice3/bin/python"
   [[ -x "$PYTHON" ]] || { echo "Pinned iOS automation Python is unavailable." >&2; exit 78; }

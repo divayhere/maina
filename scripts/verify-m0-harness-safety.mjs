@@ -76,6 +76,12 @@ if (iosUiRun) {
     '00008120-001E146611E2601E',
     'testNavigationAudit',
     'testShortRecordingLifecycle',
+    'testRapidPauseResumeFirstTap',
+    'testPausedStatePersistsUntilResume',
+    'testBackgroundForegroundRecording',
+    'testDiscardRecordingLifecycle',
+    'testProcessDeathRecovery',
+    'testLongRecordingWithBackgroundAndPauses',
     '-resultBundlePath',
   ]) {
     if (!iosUiRun.includes(token)) throw new Error(`iOS UI-test runner is missing bounded token: ${token}`);
@@ -98,8 +104,15 @@ if (iosDirectUiRun) {
     'com.divay.maina.staging',
     'MainaUITests/testNavigationAudit',
     'MainaUITests/testShortRecordingLifecycle',
+    'MainaUITests/testRapidPauseResumeFirstTap',
+    'MainaUITests/testPausedStatePersistsUntilResume',
+    'MainaUITests/testBackgroundForegroundRecording',
+    'MainaUITests/testDiscardRecordingLifecycle',
+    'MainaUITests/testProcessDeathRecovery',
+    'MainaUITests/testLongRecordingWithBackgroundAndPauses',
     'config.tests_to_run = selected',
     'os.O_EXCL',
+    'hashlib.sha256(attachment.data).hexdigest()',
   ]) {
     if (!iosDirectUiRun.includes(token)) throw new Error(`Direct iOS UI-test runner is missing bounded token: ${token}`);
   }
