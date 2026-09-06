@@ -1051,19 +1051,20 @@ export default function RecordScreen() {
       await artifactQueueRef.current.catch(() => {});
       if (CAPTURE_ENGINE === 'native-qwen') {
         await resumeNativeCapture();
-        // Resume can be denied while a call still owns the microphone. Keep
-        // the screen paused until the service proves AudioRecord ownership.
-        const resumedStatus = await getNativeCaptureStatusAsync().catch(() => null);
-        if (nativeCapturePresentation(resumedStatus?.state) === 'recording') {
-          showCaptureNote(null);
-          pausedRef.current = false;
-          setPaused(false);
-          healthRef.current.pauseEnded(Date.now());
-          listeningRef.current = true;
-          setListening(true);
-        } else if (resumedStatus?.pauseReason === 'communication') {
-          showCaptureNote('Waiting for the phone to release the microphone. Maina will continue this meeting as soon as the system allows it.');
-        }
+        // The bridge confirms command delivery, not AudioRecord ownership.
+        // Keep Pause visible until the service has completed any in-flight
+        // pause checkpoint and has durably re-enabled recorder reads.
+        const resumedStatus = await waitForNativeCaptureState(
+          getNativeCaptureStatusAsync,
+          'recording',
+          { timeoutMs: 15_000 },
+        );
+        showCaptureNote(null);
+        pausedRef.current = false;
+        setPaused(false);
+        healthRef.current.pauseEnded(Date.now());
+        listeningRef.current = true;
+        setListening(true);
         log.info('record', 'native resume requested', { nativeStatus: resumedStatus });
         return;
       }

@@ -575,7 +575,11 @@ internal object MainaCallInterruptionPolicy {
 
     fun onManualResume(state: MainaCaptureControlState): MainaCaptureControlDecision {
         if (state.communicationActive) return MainaCaptureControlDecision.Denied(state)
-        if (state.phase != MainaCaptureControlPhase.PAUSED) {
+        if (state.phase !in setOf(
+                MainaCaptureControlPhase.PAUSE_PENDING,
+                MainaCaptureControlPhase.PAUSED,
+            )
+        ) {
             return MainaCaptureControlDecision.StateOnly(state)
         }
         return MainaCaptureControlDecision.Resume(
