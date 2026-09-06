@@ -3,7 +3,7 @@
     "name": "Maina",
     "slug": "maina",
     "owner": "divayheres-team",
-    "version": "0.10.55",
+    "version": "0.10.56",
     "orientation": "portrait",
     "icon": "./assets/images/icon.png",
     "scheme": "maina",
@@ -26,7 +26,7 @@
     },
     "android": {
       "package": "com.divay.maina",
-      "versionCode": 81,
+      "versionCode": 82,
       "allowBackup": false,
       "permissions": [
         "RECORD_AUDIO",

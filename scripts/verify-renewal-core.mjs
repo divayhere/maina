@@ -181,7 +181,7 @@ const installedAndroid = {
   candidateSha256: 'hash', installedSha256: 'hash',
   candidateSigner: 'signer', installedSigner: 'signer',
   candidateVersionCode: '70', installedVersionCode: '70',
-  candidateVersionName: '0.10.55', installedVersionName: '0.10.55',
+  candidateVersionName: '0.10.56', installedVersionName: '0.10.56',
 };
 assert.equal(validateInstalledAndroidArtifact(installedAndroid), true);
 assert.throws(() => validateInstalledAndroidArtifact({ ...installedAndroid, installedSha256: 'different' }), /hash/);
