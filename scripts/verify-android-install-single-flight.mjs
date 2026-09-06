@@ -73,8 +73,8 @@ case "\${1:-}:\${2:-}:\${3:-}" in
     : > "$state/install-started"
     while [[ ! -f "$state/release-install" ]]; do sleep 0.02; done
     cp "$3" "$state/installed.apk"
-    printf '78' > "$state/version-code"
-    printf '0.10.52' > "$state/version-name"
+    printf '79' > "$state/version-code"
+    printf '0.10.53' > "$state/version-name"
     printf 'Performing Streamed Install\\nSuccess\\n'
     ;;
   *)
@@ -93,7 +93,7 @@ chmodSync(apksigner, 0o755);
 
 const aapt = join(tools, 'aapt');
 writeFileSync(aapt, `#!/usr/bin/env bash
-printf "package: name='com.divay.maina' versionCode='78' versionName='0.10.52' platformBuildVersionName=''\\n"
+printf "package: name='com.divay.maina' versionCode='79' versionName='0.10.53' platformBuildVersionName=''\\n"
 `);
 chmodSync(aapt, 0o755);
 
@@ -118,8 +118,8 @@ function resetInstalled({ identical = false } = {}) {
   }
   if (identical) {
     copyFileSync(candidate, join(state, 'installed.apk'));
-    writeFileSync(join(state, 'version-code'), '78');
-    writeFileSync(join(state, 'version-name'), '0.10.52');
+    writeFileSync(join(state, 'version-code'), '79');
+    writeFileSync(join(state, 'version-name'), '0.10.53');
   } else {
     writeFileSync(join(state, 'installed.apk'), 'previous-installed-apk');
     writeFileSync(join(state, 'version-code'), '67');
