@@ -14,6 +14,7 @@ const replay = read('scripts/m0-replay-harness.sh');
 const stop = readIfPresent('scripts/stop-dual-device-soak.sh');
 const ui = readIfPresent('ios-tests/MainaUITests.swift');
 const adbTarget = readIfPresent('scripts/adb-target.sh');
+const iosUiConfigurator = readIfPresent('scripts/configure-ios-ui-tests.rb');
 
 execFileSync('/bin/bash', ['-n', replayPath], { stdio: 'inherit' });
 
@@ -50,6 +51,13 @@ if (stop && ui) {
   }
   const attachBranch = ui.slice(ui.indexOf('if attachesToRunningApp'), ui.indexOf('app.launch()'));
   if (!attachBranch.includes('return')) throw new Error('Attach-only setup does not return before app.launch().');
+}
+
+if (iosUiConfigurator) {
+  const qualificationRunnerId = 'com.divay.maina.staging.qualify1048.uitests';
+  if (!iosUiConfigurator.includes(`configuration.build_settings["PRODUCT_BUNDLE_IDENTIFIER"] = "${qualificationRunnerId}"`)) {
+    throw new Error(`iOS UI-test configurator is not bound to ${qualificationRunnerId}.xctrunner`);
+  }
 }
 
 console.log('M0 harness safety verification passed.');

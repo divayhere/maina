@@ -39,7 +39,9 @@ end
 
 target.add_dependency(app) unless target.dependencies.any? { |dependency| dependency.target == app }
 target.build_configurations.each do |configuration|
-  configuration.build_settings["PRODUCT_BUNDLE_IDENTIFIER"] = "com.divay.maina.staging.uitests"
+  # Keep the qualification runner on the pre-provisioned device-only identity.
+  # Xcode appends `.xctrunner` when it signs the UI-test runner application.
+  configuration.build_settings["PRODUCT_BUNDLE_IDENTIFIER"] = "com.divay.maina.staging.qualify1048.uitests"
   configuration.build_settings["PRODUCT_NAME"] = "MainaUITests"
   configuration.build_settings["TEST_TARGET_NAME"] = "Maina"
   configuration.build_settings["DEVELOPMENT_TEAM"] = team_id
