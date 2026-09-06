@@ -404,6 +404,33 @@ internal object MainaSystemDrainPolicy {
     ): Boolean = readBytes > 0 && !communicationActive && !clientSilenced && !systemDraining
 }
 
+/** Keeps a Resume tap from stealing or cancelling system-owned call recovery. */
+internal object MainaResumeRequestPolicy {
+    fun preservesCommunicationRecovery(state: MainaCaptureControlState): Boolean =
+        state.pauseOwner == MainaCapturePauseOwner.SYSTEM &&
+            state.phase in setOf(
+                MainaCaptureControlPhase.PAUSE_PENDING,
+                MainaCaptureControlPhase.PAUSED,
+                MainaCaptureControlPhase.RESUME_PENDING,
+            )
+
+    fun operationOwner(state: MainaCaptureControlState): MainaCapturePauseOwner =
+        if (preservesCommunicationRecovery(state)) {
+            MainaCapturePauseOwner.SYSTEM
+        } else {
+            MainaCapturePauseOwner.MANUAL
+        }
+
+    fun shouldRearmCommunicationRecovery(
+        state: MainaCaptureControlState,
+        activeOperationPresent: Boolean,
+    ): Boolean =
+        !state.communicationActive &&
+            state.phase == MainaCaptureControlPhase.RESUME_PENDING &&
+            state.pauseOwner == MainaCapturePauseOwner.SYSTEM &&
+            !activeOperationPresent
+}
+
 /** Linearizes the final post-read predicate and PCM byte commit with the latch. */
 internal class MainaReadCommitBarrier {
     private val lock = Any()

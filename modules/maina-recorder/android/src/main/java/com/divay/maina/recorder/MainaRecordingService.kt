@@ -449,8 +449,9 @@ class MainaRecordingService : Service() {
                 }
             }
             ACTION_RESUME_NATIVE_CAPTURE -> {
-                cancelCommunicationRetryTimer()
-                val resumingSystemPause = controlState.pauseOwner == MainaCapturePauseOwner.SYSTEM
+                val preservingSystemRecovery =
+                    MainaResumeRequestPolicy.preservesCommunicationRecovery(controlState)
+                if (!preservingSystemRecovery) cancelCommunicationRetryTimer()
                 when (val decision = MainaCallInterruptionPolicy.onManualResume(controlState)) {
                     is MainaCaptureControlDecision.Denied -> {
                         nativeCaptureStatus = nativeCapture.snapshot().asMap() + mapOf(
@@ -462,21 +463,31 @@ class MainaRecordingService : Service() {
                     }
                     is MainaCaptureControlDecision.Resume -> {
                         if (updateControlState(decision.state, "manual-resume-pending")) {
+                            val operationOwner = MainaResumeRequestPolicy.operationOwner(decision.state)
+                            val systemRecovery = operationOwner == MainaCapturePauseOwner.SYSTEM
                             val operation = issueCaptureOperation(
                                 kind = MainaCaptureOperationKind.RESUME,
-                                owner = MainaCapturePauseOwner.MANUAL,
+                                owner = operationOwner,
                                 expectedPhase = MainaCaptureControlPhase.RESUME_PENDING,
                             )
                             dispatchPreparedCapture(
                                 operation = operation,
                                 pendingState = "resuming",
-                                committedEvent = "manual-resumed",
-                                publicationEvent = "manual-resume-published",
-                                failureEvent = "manual-resume-failed",
+                                committedEvent = if (systemRecovery) "system-resumed" else "manual-resumed",
+                                publicationEvent = if (systemRecovery) {
+                                    "system-resume-published"
+                                } else {
+                                    "manual-resume-published"
+                                },
+                                failureEvent = if (systemRecovery) {
+                                    "system-resume-attempt-failed"
+                                } else {
+                                    "manual-resume-failed"
+                                },
                             ) {
                                 val generation = operation.expectedPrivacyLatchGeneration
                                     ?: error("Resume privacy authority is unavailable")
-                                if (resumingSystemPause) {
+                                if (systemRecovery) {
                                     nativeCapture.resumeAfterCommunication(generation)
                                 } else {
                                     nativeCapture.resume(generation)
@@ -484,6 +495,15 @@ class MainaRecordingService : Service() {
                             }
                         } else {
                             failClosedResumeDurability(MainaCapturePauseOwner.MANUAL)
+                        }
+                    }
+                    is MainaCaptureControlDecision.StateOnly -> {
+                        if (MainaResumeRequestPolicy.shouldRearmCommunicationRecovery(
+                                decision.state,
+                                activeOperationPresent = activeCaptureOperation != null,
+                            )
+                        ) {
+                            scheduleCommunicationResume()
                         }
                     }
                     else -> Unit
@@ -1010,13 +1030,40 @@ class MainaRecordingService : Service() {
 
         applyControlState(recordingState)
         nativeCaptureStatus = outcome.snapshot.asMap() + mapOf(
+            "state" to "resuming",
+            "operationId" to outcome.operation.operationId,
+        )
+        nativeCaptureStatus = nativeCaptureStatus + mapOf("pauseReason" to null)
+
+        // Main is the sole token/reducer authority, so no stop/call transition
+        // can interleave between this final fresh check and the nonthrowing native
+        // read latch. Public UI remains resuming until this exact latch succeeds.
+        val communicationReacquired = observedCommunicationActive()
+        if (!MainaCaptureOperationPolicy.enableAllowed(
+                activeCaptureOperation,
+                outcome.operation,
+                controlState,
+                communicationReacquired,
+                acceptingWork = MainaCaptureLifecyclePolicy.acceptsNativeWork(acceptingNativeWork, destroyed),
+            )
+        ) {
+            nativeCapture.latchReadsOffNow()
+            rollbackCommittedPublication(outcome.operation, "$committedEvent-communication-reacquired")
+            return
+        }
+        if (!nativeCapture.enablePreparedReads()) {
+            rollbackCommittedPublication(outcome.operation, "$committedEvent-enable-failed")
+            return
+        }
+
+        nativeCaptureStatus = nativeCapture.snapshot().asMap() + mapOf(
             "state" to "recording",
             "operationId" to outcome.operation.operationId,
+            "pauseReason" to null,
         )
         communicationResumeStartedAtMs = 0L
         communicationResumeAttempts = 0
-        nativeCaptureStatus = nativeCaptureStatus + mapOf("pauseReason" to null)
-        val preEnableUi = runCatching {
+        val postEnableUi = runCatching {
             setCaptureState("recording")
             if (outcome.operation.kind == MainaCaptureOperationKind.RESUME &&
                 outcome.operation.owner == MainaCapturePauseOwner.SYSTEM
@@ -1031,31 +1078,12 @@ class MainaRecordingService : Service() {
             }
             refreshForegroundUi()
         }
-        if (preEnableUi.isFailure) {
+        if (postEnableUi.isFailure) {
             nativeCapture.latchReadsOffNow()
-            rollbackCommittedPublication(outcome.operation, "$committedEvent-ui-preparation-failed")
-            return
-        }
-
-        // Main is the sole token/reducer authority, so no stop/call transition
-        // can interleave between this final fresh check and the nonthrowing native
-        // read latch. All durability and callbacks above completed with reads off.
-        val communicationReacquired = observedCommunicationActive()
-        if (!MainaCaptureOperationPolicy.enableAllowed(
-                activeCaptureOperation,
-                outcome.operation,
-                controlState,
-                communicationReacquired,
-                acceptingWork = MainaCaptureLifecyclePolicy.acceptsNativeWork(acceptingNativeWork, destroyed),
-            )
-        ) {
-            nativeCapture.latchReadsOffNow()
-            rollbackCommittedPublication(outcome.operation, "$committedEvent-communication-reacquired")
+            rollbackCommittedPublication(outcome.operation, "$committedEvent-ui-publication-failed")
             return
         }
         activeCaptureOperation = null
-        if (nativeCapture.enablePreparedReads()) return
-        rollbackCommittedPublication(outcome.operation, "$committedEvent-enable-failed")
     }
 
     private fun rollbackCommittedPublication(
