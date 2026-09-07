@@ -471,6 +471,26 @@ export async function enqueueMeetingTagMutation(input: {
   ));
 }
 
+export async function countClaimableMeetingTagMutationsInTransaction(
+  transaction: MeetingTagTransaction,
+  input: { ownerUserId: string; now: number },
+): Promise<number> {
+  const ownerUserId = assertOwner(input.ownerUserId);
+  const now = assertClock(input.now);
+  const row = await transaction.getFirstAsync<{ claimable_count: number }>(
+    `SELECT COUNT(*) AS claimable_count FROM meeting_tag_outbox
+     WHERE owner_user_id = ? AND (
+       state = 'queued'
+       OR (state = 'retryable' AND next_attempt_at IS NOT NULL AND next_attempt_at <= ?)
+       OR (state = 'running' AND lease_until IS NOT NULL AND lease_until <= ?)
+     )`,
+    [ownerUserId, now, now],
+  );
+  const count = row?.claimable_count;
+  if (!Number.isSafeInteger(count) || (count ?? -1) < 0) reject('invalid_record');
+  return count as number;
+}
+
 export async function claimNextMeetingTagMutationInTransaction(
   transaction: MeetingTagTransaction,
   input: { ownerUserId: string; leaseToken: string; now: number; leaseMs: number },
