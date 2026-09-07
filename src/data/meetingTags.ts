@@ -15,6 +15,7 @@ import {
   decodeMeetingTagMutationReceipt,
   decodeMeetingTagMutationRequest,
   decodeMeetingTagState,
+  meetingTagMutationSubjectKey,
   normalizeMeetingTagLabel,
 } from '@/services/mkc-meeting-tags-core';
 import { withDurableWakeTransaction } from './db';
@@ -143,17 +144,12 @@ function identityFor(request: MeetingTagMutationRequestV1): {
   subjectKey: string;
 } {
   const operation = request.operation;
-  const subjectKey = operation.kind === 'create_definition'
-    ? JSON.stringify(['definition_label', normalizeMeetingTagLabel(operation.display_label).normalized_value])
-    : operation.kind === 'rename_definition'
-      ? JSON.stringify(['definition', operation.tag_id])
-      : JSON.stringify(['assignment', operation.meeting_id, operation.tag_id]);
   return {
     operationKind: operation.kind,
     meetingId: 'meeting_id' in operation ? operation.meeting_id : null,
     sourceKey: 'source_key' in operation ? operation.source_key : null,
     tagId: 'tag_id' in operation ? operation.tag_id : null,
-    subjectKey,
+    subjectKey: meetingTagMutationSubjectKey(request),
   };
 }
 
@@ -329,9 +325,15 @@ function validateConflictReconciliation(
   }
   const state = decodeMeetingTagState(value, operation.source_key);
   const assignmentRevision = assignmentRevisionFor(state, operation.tag_id);
-  const changed = state.meeting_revision > operation.expected_meeting_revision
-    || assignmentRevision !== operation.expected_assignment_revision;
-  if (state.meeting_revision < operation.expected_meeting_revision || !changed) {
+  const expectedAssignmentRevision = operation.expected_assignment_revision;
+  const assignmentRegressed = expectedAssignmentRevision !== null
+    && (assignmentRevision === null || assignmentRevision < expectedAssignmentRevision);
+  const assignmentChanged = assignmentRevision !== expectedAssignmentRevision;
+  const meetingAdvanced = state.meeting_revision > operation.expected_meeting_revision;
+  if (state.meeting_revision < operation.expected_meeting_revision
+    || assignmentRegressed
+    || (assignmentChanged && !meetingAdvanced)
+    || (!meetingAdvanced && !assignmentChanged)) {
     reject('canonical_refresh_required');
   }
   return { value: state, json: canonicalMeetingTagStateJson(state, operation.source_key) };
@@ -372,7 +374,7 @@ export async function enqueueMeetingTagMutationInTransaction(
     `SELECT * FROM meeting_tag_outbox
      WHERE owner_user_id = ? AND subject_key = ?
        AND state IN ('queued', 'running', 'retryable', 'conflict')
-     ORDER BY created_at DESC, rowid DESC LIMIT 1`,
+     ORDER BY rowid DESC LIMIT 1`,
     [ownerUserId, identity.subjectKey],
   );
   if (unresolved && unresolvedStates.has(decodeRow(unresolved).state)) reject('pending_subject');
@@ -380,7 +382,7 @@ export async function enqueueMeetingTagMutationInTransaction(
   const latestEvidenceRow = await transaction.getFirstAsync<MeetingTagOutboxRow>(
     `SELECT * FROM meeting_tag_outbox
      WHERE owner_user_id = ? AND subject_key = ? AND state IN ('succeeded', 'reconciled')
-     ORDER BY created_at DESC, rowid DESC LIMIT 1`,
+     ORDER BY rowid DESC LIMIT 1`,
     [ownerUserId, identity.subjectKey],
   );
   const latestEvidence = latestEvidenceRow ? decodeRow(latestEvidenceRow) : null;
@@ -488,7 +490,7 @@ export async function claimNextMeetingTagMutationInTransaction(
        OR (state = 'retryable' AND next_attempt_at IS NOT NULL AND next_attempt_at <= ?)
        OR (state = 'running' AND lease_until IS NOT NULL AND lease_until <= ?)
      )
-     ORDER BY created_at ASC, rowid ASC LIMIT 1`,
+     ORDER BY rowid ASC LIMIT 1`,
     [ownerUserId, now, now],
   );
   if (!candidate) return null;

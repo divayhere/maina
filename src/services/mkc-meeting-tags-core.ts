@@ -377,12 +377,28 @@ export function canonicalMeetingTagMutationRequestJson(value: unknown): string {
   return stable(canonicalizeMeetingTagMutationRequest(value));
 }
 
+export function meetingTagMutationSubjectKey(value: unknown): string {
+  const operation = canonicalizeMeetingTagMutationRequest(value).operation;
+  return operation.kind === 'create_definition'
+    ? stable(['definition_label', normalizeMeetingTagLabel(operation.display_label).normalized_value])
+    : operation.kind === 'rename_definition'
+      ? stable(['definition', operation.tag_id])
+      : stable(['assignment', operation.meeting_id, operation.tag_id]);
+}
+
 export function canonicalMeetingTagDefinitionsJson(value: unknown): string {
   return stable(decodeMeetingTagDefinitions(value));
 }
 
 export function canonicalMeetingTagStateJson(value: unknown, expectedSourceKey?: string): string {
   return stable(decodeMeetingTagState(value, expectedSourceKey));
+}
+
+export function canonicalMeetingTagMutationReceiptJson(
+  value: unknown,
+  request?: MeetingTagMutationRequestV1,
+): string {
+  return stable(decodeMeetingTagMutationReceipt(value, request));
 }
 
 export function assertMeetingTagIdempotentReplay(

@@ -6,7 +6,10 @@
 import * as SQLite from 'expo-sqlite';
 import { log } from '../services/logger';
 import { migratePipelineWakeV17 } from '../core/pipeline/pipelineWakeMigration';
-import { MEETING_TAG_OUTBOX_MIGRATION_SQL } from './meetingTagsMigration';
+import {
+  MEETING_TAG_OUTBOX_V18_MIGRATION_SQL,
+  migrateMeetingTagOutboxV19,
+} from './meetingTagsMigration';
 
 let dbPromise: Promise<SQLite.SQLiteDatabase> | null = null;
 
@@ -414,7 +417,15 @@ const MIGRATIONS: Migration[] = [
   // deliberately stored in maina.db so capture, meeting identity, and offline
   // mutation ordering have one durable owner. Network draining remains gated
   // separately and disabled by default.
-  async (db) => db.execAsync(MEETING_TAG_OUTBOX_MIGRATION_SQL),
+  async (db) => db.execAsync(MEETING_TAG_OUTBOX_V18_MIGRATION_SQL),
+  // v19 — append-only upgrade of every v18 shape. The rebuild derives a
+  // canonical owner-scoped subject, preserves rowid ordering, validates every
+  // immutable request/receipt, and adds durable conflict reconciliation.
+  async (db) => migrateMeetingTagOutboxV19({
+    execAsync: (source) => db.execAsync(source),
+    getAllAsync: (source, params = []) => db.getAllAsync(source, params),
+    runAsync: (source, params = []) => db.runAsync(source, params),
+  }),
 ];
 
 export async function initDb(): Promise<void> {
