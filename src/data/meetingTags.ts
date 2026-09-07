@@ -9,6 +9,7 @@ import {
   canonicalizeMeetingTagMutationRequest,
   decodeMeetingTagMutationReceipt,
   decodeMeetingTagMutationRequest,
+  normalizeMeetingTagLabel,
 } from '@/services/mkc-meeting-tags-core';
 import { withDurableWakeTransaction } from './db';
 
@@ -56,6 +57,7 @@ interface MeetingTagOutboxRow {
   meeting_id: string | null;
   source_key: string | null;
   tag_id: string | null;
+  subject_key: string;
   state: MeetingTagOutboxState;
   attempt_count: number;
   next_attempt_at: number | null;
@@ -129,13 +131,20 @@ function identityFor(request: MeetingTagMutationRequestV1): {
   meetingId: string | null;
   sourceKey: string | null;
   tagId: string | null;
+  subjectKey: string;
 } {
   const operation = request.operation;
+  const subjectKey = operation.kind === 'create_definition'
+    ? JSON.stringify(['definition_label', normalizeMeetingTagLabel(operation.display_label).normalized_value])
+    : operation.kind === 'rename_definition'
+      ? JSON.stringify(['definition', operation.tag_id])
+      : JSON.stringify(['assignment', operation.meeting_id, operation.tag_id]);
   return {
     operationKind: operation.kind,
     meetingId: 'meeting_id' in operation ? operation.meeting_id : null,
     sourceKey: 'source_key' in operation ? operation.source_key : null,
     tagId: 'tag_id' in operation ? operation.tag_id : null,
+    subjectKey,
   };
 }
 
@@ -164,7 +173,8 @@ function decodeRow(row: MeetingTagOutboxRow): MeetingTagOutboxEntry {
     || row.operation_kind !== identity.operationKind
     || row.meeting_id !== identity.meetingId
     || row.source_key !== identity.sourceKey
-    || row.tag_id !== identity.tagId) {
+    || row.tag_id !== identity.tagId
+    || row.subject_key !== identity.subjectKey) {
     reject('invalid_record');
   }
   if (row.state === 'running') {
@@ -235,17 +245,14 @@ export async function enqueueMeetingTagMutationInTransaction(
     return decodeRow(priorKey);
   }
 
-  if (identity.tagId !== null) {
-    const unresolved = await transaction.getFirstAsync<MeetingTagOutboxRow>(
-      `SELECT * FROM meeting_tag_outbox
-       WHERE owner_user_id = ? AND tag_id = ?
-         AND ((meeting_id IS NULL AND ? IS NULL) OR meeting_id = ?)
-         AND state IN ('queued', 'running', 'retryable', 'conflict')
-       ORDER BY created_at DESC, rowid DESC LIMIT 1`,
-      [ownerUserId, identity.tagId, identity.meetingId, identity.meetingId],
-    );
-    if (unresolved && unresolvedStates.has(decodeRow(unresolved).state)) reject('pending_subject');
-  }
+  const unresolved = await transaction.getFirstAsync<MeetingTagOutboxRow>(
+    `SELECT * FROM meeting_tag_outbox
+     WHERE owner_user_id = ? AND subject_key = ?
+       AND state IN ('queued', 'running', 'retryable', 'conflict')
+     ORDER BY created_at DESC, rowid DESC LIMIT 1`,
+    [ownerUserId, identity.subjectKey],
+  );
+  if (unresolved && unresolvedStates.has(decodeRow(unresolved).state)) reject('pending_subject');
 
   if (request.operation.kind === 'assign') {
     const latestSuccess = await transaction.getFirstAsync<MeetingTagOutboxRow>(
@@ -269,8 +276,8 @@ export async function enqueueMeetingTagMutationInTransaction(
   await transaction.runAsync(
     `INSERT INTO meeting_tag_outbox
       (idempotency_key, owner_user_id, request_json, operation_kind, meeting_id,
-       source_key, tag_id, state, attempt_count, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', 0, ?, ?)`,
+       source_key, tag_id, subject_key, state, attempt_count, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'queued', 0, ?, ?)`,
     [
       request.idempotency_key,
       ownerUserId,
@@ -279,6 +286,7 @@ export async function enqueueMeetingTagMutationInTransaction(
       identity.meetingId,
       identity.sourceKey,
       identity.tagId,
+      identity.subjectKey,
       now,
       now,
     ],
