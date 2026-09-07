@@ -9,6 +9,7 @@ import {
   enqueueMeetingTagMutationInTransaction,
   failMeetingTagMutationInTransaction,
   MeetingTagOutboxError,
+  reconcileMeetingTagConflictInTransaction,
 } from './meetingTags';
 
 vi.mock('./db', () => ({
@@ -37,6 +38,13 @@ class MemoryMeetingTagTransaction {
       return (rows
         .filter((row) => row.owner_user_id === owner
           && row.meeting_id === meeting && row.tag_id === tag && row.state === 'succeeded')
+        .sort(newestFirst)[0] ?? null) as T | null;
+    }
+    if (sql.includes("state IN ('succeeded', 'reconciled')")) {
+      const [owner, subject] = params;
+      return (rows
+        .filter((row) => row.owner_user_id === owner && row.subject_key === subject)
+        .filter((row) => row.state === 'succeeded' || row.state === 'reconciled')
         .sort(newestFirst)[0] ?? null) as T | null;
     }
     if (sql.includes("state = 'queued'")) {
@@ -70,6 +78,7 @@ class MemoryMeetingTagTransaction {
         lease_token: null,
         lease_until: null,
         receipt_json: null,
+        reconciliation_json: null,
         failure_code: null,
         created_at: created,
         updated_at: updated,
@@ -104,6 +113,19 @@ class MemoryMeetingTagTransaction {
         lease_token: null,
         lease_until: null,
         next_attempt_at: null,
+        updated_at: now,
+      });
+      return { changes: 1 };
+    }
+    if (sql.includes("SET state = 'reconciled'")) {
+      const [reconciliationJson, now, key, owner] = params;
+      const row = this.rows.get(String(key));
+      if (!row || row.owner_user_id !== owner || row.state !== 'conflict'
+        || row.failure_code !== 'revision_conflict') return { changes: 0 };
+      Object.assign(row, {
+        state: 'reconciled',
+        reconciliation_json: reconciliationJson,
+        failure_code: null,
         updated_at: now,
       });
       return { changes: 1 };
@@ -167,7 +189,7 @@ describe('meeting-tag durable outbox', () => {
     expect(MEETING_TAG_OUTBOX_MIGRATION_SQL)
       .toContain("RAISE(ABORT, 'meeting_tag_outbox_state_transition_invalid')");
     expect(MEETING_TAG_OUTBOX_MIGRATION_SQL)
-      .toContain("state IN ('queued', 'running', 'retryable', 'succeeded', 'conflict', 'terminal')");
+      .toContain("'queued', 'running', 'retryable', 'succeeded', 'conflict', 'reconciled', 'terminal'");
     expect(MEETING_TAG_OUTBOX_MIGRATION_SQL).toContain('owner_user_id TEXT NOT NULL');
   });
 
@@ -419,5 +441,170 @@ describe('meeting-tag durable outbox', () => {
       now: 120,
     })).rejects.toMatchObject({ reason: 'invalid_record' } satisfies Partial<MeetingTagOutboxError>);
     expect(memory.rows.get('mobile-outbox:remove:failure-class')?.state).toBe('running');
+  });
+
+  it('keeps a conflict blocking until an exact canonical meeting refresh is durable', async () => {
+    const memory = new MemoryMeetingTagTransaction();
+    const key = 'mobile-outbox:remove:conflict';
+    await enqueueRemove(memory, key);
+    await claimNextMeetingTagMutationInTransaction(transaction(memory), {
+      ownerUserId: owner,
+      leaseToken: 'lease:conflict',
+      now: 110,
+      leaseMs: 60_000,
+    });
+    await failMeetingTagMutationInTransaction(transaction(memory), {
+      ownerUserId: owner,
+      idempotencyKey: key,
+      leaseToken: 'lease:conflict',
+      state: 'conflict',
+      failureCode: 'revision_conflict',
+      now: 120,
+    });
+    await expect(enqueueMeetingTagMutationInTransaction(transaction(memory), {
+      ownerUserId: owner,
+      request: requestWithKey('mobile-outbox:remove:blocked', {
+        ...example.remove_request.operation,
+        kind: 'remove',
+      }),
+      now: 121,
+    })).rejects.toMatchObject({ reason: 'pending_subject' } satisfies Partial<MeetingTagOutboxError>);
+    await expect(reconcileMeetingTagConflictInTransaction(transaction(memory), {
+      ownerUserId: owner,
+      idempotencyKey: key,
+      canonicalState: example.meeting_tag_state,
+      now: 122,
+    })).rejects.toMatchObject({
+      reason: 'canonical_refresh_required',
+    } satisfies Partial<MeetingTagOutboxError>);
+
+    const refreshedState = {
+      ...example.meeting_tag_state,
+      meeting_revision: 10,
+      active: example.meeting_tag_state.active.map((tag) => (
+        tag.tag_id === example.remove_request.operation.tag_id
+          ? { ...tag, assignment_revision: 2 }
+          : tag
+      )),
+    };
+    const reconciled = await reconcileMeetingTagConflictInTransaction(transaction(memory), {
+      ownerUserId: owner,
+      idempotencyKey: key,
+      canonicalState: refreshedState,
+      now: 123,
+    });
+    expect(reconciled).toMatchObject({
+      state: 'reconciled',
+      failureCode: null,
+      reconciliation: { meeting_revision: 10 },
+    });
+    await expect(enqueueMeetingTagMutationInTransaction(transaction(memory), {
+      ownerUserId: owner,
+      request: requestWithKey('mobile-outbox:remove:stale-after-refresh', {
+        ...example.remove_request.operation,
+        kind: 'remove',
+      }),
+      now: 124,
+    })).rejects.toMatchObject({
+      reason: 'canonical_refresh_required',
+    } satisfies Partial<MeetingTagOutboxError>);
+    const fresh = await enqueueMeetingTagMutationInTransaction(transaction(memory), {
+      ownerUserId: owner,
+      request: requestWithKey('mobile-outbox:remove:fresh-after-refresh', {
+        ...example.remove_request.operation,
+        kind: 'remove',
+        expected_meeting_revision: 10,
+        expected_assignment_revision: 2,
+      }),
+      now: 125,
+    });
+    expect(fresh.state).toBe('queued');
+  });
+
+  it('reconciles a create conflict to its canonical namespace owner and forbids duplicate recreation', async () => {
+    const memory = new MemoryMeetingTagTransaction();
+    const key = 'mobile-outbox:create:conflict';
+    await enqueueMeetingTagMutationInTransaction(transaction(memory), {
+      ownerUserId: owner,
+      request: requestWithKey(key, { kind: 'create_definition', display_label: 'ＤＵＢＡＩ' }),
+      now: 100,
+    });
+    await claimNextMeetingTagMutationInTransaction(transaction(memory), {
+      ownerUserId: owner,
+      leaseToken: 'lease:create-conflict',
+      now: 110,
+      leaseMs: 60_000,
+    });
+    await failMeetingTagMutationInTransaction(transaction(memory), {
+      ownerUserId: owner,
+      idempotencyKey: key,
+      leaseToken: 'lease:create-conflict',
+      state: 'conflict',
+      failureCode: 'revision_conflict',
+      now: 120,
+    });
+    const reconciled = await reconcileMeetingTagConflictInTransaction(transaction(memory), {
+      ownerUserId: owner,
+      idempotencyKey: key,
+      canonicalState: { schema_version: 'mkc.meeting-tag-definitions.v1', definitions: example.definitions },
+      now: 121,
+    });
+    expect(reconciled).toMatchObject({ state: 'reconciled' });
+    await expect(enqueueMeetingTagMutationInTransaction(transaction(memory), {
+      ownerUserId: owner,
+      request: requestWithKey('mobile-outbox:create:duplicate-after-refresh', {
+        kind: 'create_definition',
+        display_label: 'Dubai',
+      }),
+      now: 122,
+    })).rejects.toMatchObject({
+      reason: 'canonical_refresh_required',
+    } satisfies Partial<MeetingTagOutboxError>);
+  });
+
+  it('does not queue a second create after the first canonical receipt succeeded', async () => {
+    const memory = new MemoryMeetingTagTransaction();
+    const key = 'mobile-outbox:create:succeeded';
+    await enqueueMeetingTagMutationInTransaction(transaction(memory), {
+      ownerUserId: owner,
+      request: requestWithKey(key, { kind: 'create_definition', display_label: 'Planning' }),
+      now: 100,
+    });
+    await claimNextMeetingTagMutationInTransaction(transaction(memory), {
+      ownerUserId: owner,
+      leaseToken: 'lease:create-success',
+      now: 110,
+      leaseMs: 60_000,
+    });
+    await completeMeetingTagMutationInTransaction(transaction(memory), {
+      ownerUserId: owner,
+      idempotencyKey: key,
+      leaseToken: 'lease:create-success',
+      receipt: {
+        schema_version: 'mkc.meeting-tag-mutation-receipt.v1',
+        idempotency_key: key,
+        replayed: false,
+        operation: 'create_definition',
+        outcome: 'applied',
+        tag_id: example.definitions[0].tag_id,
+        meeting_id: null,
+        tag_revision: 1,
+        meeting_revision: null,
+        assignment_revision: null,
+        assignment_state: null,
+        occurred_at: '2026-09-07T00:00:00.000Z',
+      },
+      now: 120,
+    });
+    await expect(enqueueMeetingTagMutationInTransaction(transaction(memory), {
+      ownerUserId: owner,
+      request: requestWithKey('mobile-outbox:create:succeeded-duplicate', {
+        kind: 'create_definition',
+        display_label: ' Planning ',
+      }),
+      now: 121,
+    })).rejects.toMatchObject({
+      reason: 'canonical_refresh_required',
+    } satisfies Partial<MeetingTagOutboxError>);
   });
 });
