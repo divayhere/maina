@@ -199,10 +199,13 @@ function assertDefinitionSemantics(definition: MeetingTagDefinitionListV1['defin
 export function decodeMeetingTagDefinitions(value: unknown): MeetingTagDefinitionListV1 {
   const decoded = decode<MeetingTagDefinitionListV1>(MKC_MEETING_TAG_SCHEMAS.MeetingTagDefinitionListV1, value);
   const namespace = new Map<string, string>();
+  const seenTagIds = new Set<string>();
   let priorKey: string | null = null;
   decoded.definitions.forEach((definition, index) => {
     const path = `$.definitions[${index}]`;
     assertDefinitionSemantics(definition, path);
+    if (seenTagIds.has(definition.tag_id)) fail(`${path}.tag_id`, 'duplicate stable tag ID');
+    seenTagIds.add(definition.tag_id);
     const orderingKey = `${definition.normalized_value}\u0000${definition.tag_id}`;
     if (priorKey !== null && compareMeetingTagCodeUnits(priorKey, orderingKey) > 0) {
       fail(path, 'definitions are not in canonical order');
@@ -296,10 +299,14 @@ export function buildMeetingTagFilter(input: {
   if (labels.length + tagIds.length === 0) return null;
   if (labels.length + tagIds.length > 20) fail('$.refs', 'more than 20 nonempty clauses');
   const refs = new Map<string, MeetingTagFilterV1['refs'][number]>();
-  for (const tagId of tagIds) refs.set(`0:${tagId}`, { kind: 'tag_id', tag_id: tagId });
+  for (const tagId of tagIds) {
+    const key = `0:${tagId}`;
+    if (!refs.has(key)) refs.set(key, { kind: 'tag_id', tag_id: tagId });
+  }
   for (const label of labels) {
     const normalized = normalizeMeetingTagLabel(label);
-    refs.set(`1:${normalized.normalized_value}`, { kind: 'label', ...normalized });
+    const key = `1:${normalized.normalized_value}`;
+    if (!refs.has(key)) refs.set(key, { kind: 'label', ...normalized });
   }
   const filter = {
     schema_version: 'mkc.meeting-tag-filter.v1' as const,

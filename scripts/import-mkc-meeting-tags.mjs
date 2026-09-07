@@ -7,10 +7,36 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const APP_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-const BACKEND_ROOT = [
+
+function backendCandidates(appRoot, configuredRoot) {
+  return [
+    configuredRoot,
+    resolve(appRoot, '..', 'maina-knowledge-cloud'),
+    resolve(appRoot, '..', '..', 'maina-knowledge-cloud'),
+  ].filter((candidate) => typeof candidate === 'string' && candidate.length > 0);
+}
+
+function findBackendRoot(appRoot, configuredRoot, isCheckout) {
+  return backendCandidates(appRoot, configuredRoot).find(isCheckout);
+}
+
+function verifyBackendRootDiscovery() {
+  const expected = '/Users/example/Developer/maina-knowledge-cloud';
+  const exactOnly = (candidate) => candidate === expected;
+  const android = findBackendRoot('/Users/example/Developer/MainaV2', undefined, exactOnly);
+  const ios = findBackendRoot('/Users/example/Developer/.worktrees/maina-ios-feasibility', undefined, exactOnly);
+  const configured = findBackendRoot('/different/layout', expected, exactOnly);
+  if (android !== expected || ios !== expected || configured !== expected) {
+    throw new Error('Canonical Backend checkout discovery does not cover both Apps worktree layouts.');
+  }
+}
+
+verifyBackendRootDiscovery();
+const BACKEND_ROOT = findBackendRoot(
+  APP_ROOT,
   process.env.MAINA_BACKEND_ROOT,
-  resolve(APP_ROOT, '..', 'maina-knowledge-cloud'),
-].filter(Boolean).find((candidate) => existsSync(resolve(candidate, '.git')));
+  (candidate) => existsSync(resolve(candidate, '.git')),
+);
 const COORDINATION_ROOT = resolve(APP_ROOT, 'coordination');
 const BACKEND_COMMIT = '0faf14d6b089d2e386cca6649c2f1dc5792bc7ac';
 const ACCEPTANCE_COMMIT = 'a8184f6f1baef08bb0eae2865c8467c035a6c0db';
