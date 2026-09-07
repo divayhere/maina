@@ -26,10 +26,9 @@ class MemoryMeetingTagTransaction {
       return (this.rows.get(String(params[0])) ?? null) as T | null;
     }
     if (sql.includes("state IN ('queued', 'running', 'retryable', 'conflict')")) {
-      const [owner, tag, nullableMeeting, meeting] = params;
+      const [owner, subject] = params;
       return (rows
-        .filter((row) => row.owner_user_id === owner && row.tag_id === tag)
-        .filter((row) => nullableMeeting === null ? row.meeting_id === null : row.meeting_id === meeting)
+        .filter((row) => row.owner_user_id === owner && row.subject_key === subject)
         .filter((row) => ['queued', 'running', 'retryable', 'conflict'].includes(String(row.state)))
         .sort(newestFirst)[0] ?? null) as T | null;
     }
@@ -55,7 +54,7 @@ class MemoryMeetingTagTransaction {
 
   async runAsync(sql: string, params: unknown[] = []): Promise<{ changes: number }> {
     if (sql.includes('INSERT INTO meeting_tag_outbox')) {
-      const [key, owner, requestJson, operation, meeting, source, tag, created, updated] = params;
+      const [key, owner, requestJson, operation, meeting, source, tag, subject, created, updated] = params;
       this.rows.set(String(key), {
         idempotency_key: String(key),
         owner_user_id: owner,
@@ -64,6 +63,7 @@ class MemoryMeetingTagTransaction {
         meeting_id: meeting,
         source_key: source,
         tag_id: tag,
+        subject_key: subject,
         state: 'queued',
         attempt_count: 0,
         next_attempt_at: null,
@@ -224,6 +224,45 @@ describe('meeting-tag durable outbox', () => {
       }),
       now: 101,
     })).rejects.toMatchObject({ reason: 'pending_subject' } satisfies Partial<MeetingTagOutboxError>);
+  });
+
+  it('serializes equivalent create labels while allowing distinct owner-scoped labels', async () => {
+    const memory = new MemoryMeetingTagTransaction();
+    await enqueueMeetingTagMutationInTransaction(transaction(memory), {
+      ownerUserId: owner,
+      request: requestWithKey('mobile-outbox:create:equivalent-1', {
+        kind: 'create_definition',
+        display_label: ' Dubai ',
+      }),
+      now: 100,
+    });
+    await expect(enqueueMeetingTagMutationInTransaction(transaction(memory), {
+      ownerUserId: owner,
+      request: requestWithKey('mobile-outbox:create:equivalent-2', {
+        kind: 'create_definition',
+        display_label: 'ＤＵＢＡＩ',
+      }),
+      now: 101,
+    })).rejects.toMatchObject({ reason: 'pending_subject' } satisfies Partial<MeetingTagOutboxError>);
+    const distinct = await enqueueMeetingTagMutationInTransaction(transaction(memory), {
+      ownerUserId: owner,
+      request: requestWithKey('mobile-outbox:create:distinct', {
+        kind: 'create_definition',
+        display_label: 'Customer Research',
+      }),
+      now: 102,
+    });
+    expect(distinct).toMatchObject({ state: 'queued' });
+    const otherOwner = await enqueueMeetingTagMutationInTransaction(transaction(memory), {
+      ownerUserId: 'owner:other',
+      request: requestWithKey('mobile-outbox:create:other-owner', {
+        kind: 'create_definition',
+        display_label: 'ＤＵＢＡＩ',
+      }),
+      now: 103,
+    });
+    expect(otherOwner.ownerUserId).toBe('owner:other');
+    expect(memory.rows.size).toBe(3);
   });
 
   it('prevents an offline remove tombstone from being resurrected with stale revisions', async () => {

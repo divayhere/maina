@@ -7,6 +7,7 @@ export const MEETING_TAG_OUTBOX_MIGRATION_SQL = `CREATE TABLE IF NOT EXISTS meet
   meeting_id TEXT,
   source_key TEXT,
   tag_id TEXT,
+  subject_key TEXT NOT NULL,
   state TEXT NOT NULL DEFAULT 'queued'
     CHECK (state IN ('queued', 'running', 'retryable', 'succeeded', 'conflict', 'terminal')),
   attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
@@ -50,10 +51,10 @@ export const MEETING_TAG_OUTBOX_MIGRATION_SQL = `CREATE TABLE IF NOT EXISTS meet
 CREATE INDEX IF NOT EXISTS idx_meeting_tag_outbox_owner_due
   ON meeting_tag_outbox(owner_user_id, state, next_attempt_at, created_at);
 CREATE INDEX IF NOT EXISTS idx_meeting_tag_outbox_subject
-  ON meeting_tag_outbox(owner_user_id, meeting_id, tag_id, created_at DESC);
+  ON meeting_tag_outbox(owner_user_id, subject_key, state, created_at DESC);
 CREATE TRIGGER IF NOT EXISTS meeting_tag_outbox_immutable_request
   BEFORE UPDATE OF idempotency_key, owner_user_id, request_json, operation_kind,
-    meeting_id, source_key, tag_id, created_at
+    meeting_id, source_key, tag_id, subject_key, created_at
   ON meeting_tag_outbox
   WHEN OLD.idempotency_key IS NOT NEW.idempotency_key
     OR OLD.owner_user_id IS NOT NEW.owner_user_id
@@ -62,6 +63,7 @@ CREATE TRIGGER IF NOT EXISTS meeting_tag_outbox_immutable_request
     OR OLD.meeting_id IS NOT NEW.meeting_id
     OR OLD.source_key IS NOT NEW.source_key
     OR OLD.tag_id IS NOT NEW.tag_id
+    OR OLD.subject_key IS NOT NEW.subject_key
     OR OLD.created_at IS NOT NEW.created_at
   BEGIN
     SELECT RAISE(ABORT, 'meeting_tag_outbox_identity_immutable');
