@@ -9,12 +9,15 @@ export const MEETING_TAG_OUTBOX_MIGRATION_SQL = `CREATE TABLE IF NOT EXISTS meet
   tag_id TEXT,
   subject_key TEXT NOT NULL,
   state TEXT NOT NULL DEFAULT 'queued'
-    CHECK (state IN ('queued', 'running', 'retryable', 'succeeded', 'conflict', 'terminal')),
+    CHECK (state IN (
+      'queued', 'running', 'retryable', 'succeeded', 'conflict', 'reconciled', 'terminal'
+    )),
   attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
   next_attempt_at INTEGER,
   lease_token TEXT,
   lease_until INTEGER,
   receipt_json TEXT,
+  reconciliation_json TEXT,
   failure_code TEXT CHECK (failure_code IS NULL OR failure_code IN (
     'offline', 'transport_retryable', 'http_retryable', 'revision_conflict',
     'auth_required', 'validation_rejected', 'protocol_rejected'
@@ -39,11 +42,16 @@ export const MEETING_TAG_OUTBOX_MIGRATION_SQL = `CREATE TABLE IF NOT EXISTS meet
     OR (state <> 'succeeded' AND receipt_json IS NULL)
   ),
   CHECK (
+    (state = 'reconciled' AND reconciliation_json IS NOT NULL)
+    OR (state <> 'reconciled' AND reconciliation_json IS NULL)
+  ),
+  CHECK (
     (state IN ('queued', 'running') AND next_attempt_at IS NULL AND failure_code IS NULL)
     OR (state = 'retryable' AND next_attempt_at IS NOT NULL
       AND failure_code IN ('offline', 'transport_retryable', 'http_retryable'))
     OR (state = 'succeeded' AND next_attempt_at IS NULL AND failure_code IS NULL)
     OR (state = 'conflict' AND next_attempt_at IS NULL AND failure_code = 'revision_conflict')
+    OR (state = 'reconciled' AND next_attempt_at IS NULL AND failure_code IS NULL)
     OR (state = 'terminal' AND next_attempt_at IS NULL
       AND failure_code IN ('auth_required', 'validation_rejected', 'protocol_rejected'))
   )
@@ -76,7 +84,7 @@ CREATE TRIGGER IF NOT EXISTS meeting_tag_outbox_state_transition
       'running', 'retryable', 'succeeded', 'conflict', 'terminal'
     ))
     OR (OLD.state = 'retryable' AND NEW.state = 'running')
-    OR (OLD.state = 'conflict' AND NEW.state = 'terminal')
+    OR (OLD.state = 'conflict' AND NEW.state = 'reconciled')
   )
   BEGIN
     SELECT RAISE(ABORT, 'meeting_tag_outbox_state_transition_invalid');

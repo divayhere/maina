@@ -377,6 +377,14 @@ export function canonicalMeetingTagMutationRequestJson(value: unknown): string {
   return stable(canonicalizeMeetingTagMutationRequest(value));
 }
 
+export function canonicalMeetingTagDefinitionsJson(value: unknown): string {
+  return stable(decodeMeetingTagDefinitions(value));
+}
+
+export function canonicalMeetingTagStateJson(value: unknown, expectedSourceKey?: string): string {
+  return stable(decodeMeetingTagState(value, expectedSourceKey));
+}
+
 export function assertMeetingTagIdempotentReplay(
   firstValue: unknown,
   retryValue: unknown,

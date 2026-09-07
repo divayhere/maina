@@ -1,14 +1,20 @@
 import type * as SQLite from 'expo-sqlite';
 
 import type {
+  MeetingTagDefinitionListV1,
   MeetingTagMutationReceiptV1,
   MeetingTagMutationRequestV1,
+  MeetingTagStateV1,
 } from '@/contracts/mkc-meeting-tags.generated';
 import {
+  canonicalMeetingTagDefinitionsJson,
   canonicalMeetingTagMutationRequestJson,
+  canonicalMeetingTagStateJson,
   canonicalizeMeetingTagMutationRequest,
+  decodeMeetingTagDefinitions,
   decodeMeetingTagMutationReceipt,
   decodeMeetingTagMutationRequest,
+  decodeMeetingTagState,
   normalizeMeetingTagLabel,
 } from '@/services/mkc-meeting-tags-core';
 import { withDurableWakeTransaction } from './db';
@@ -19,6 +25,7 @@ export type MeetingTagOutboxState =
   | 'retryable'
   | 'succeeded'
   | 'conflict'
+  | 'reconciled'
   | 'terminal';
 
 export type MeetingTagOutboxFailureCode =
@@ -64,6 +71,7 @@ interface MeetingTagOutboxRow {
   lease_token: string | null;
   lease_until: number | null;
   receipt_json: string | null;
+  reconciliation_json: string | null;
   failure_code: MeetingTagOutboxFailureCode | null;
   created_at: number;
   updated_at: number;
@@ -79,6 +87,7 @@ export interface MeetingTagOutboxEntry {
   leaseToken: string | null;
   leaseUntil: number | null;
   receipt: MeetingTagMutationReceiptV1 | null;
+  reconciliation: MeetingTagDefinitionListV1 | MeetingTagStateV1 | null;
   failureCode: MeetingTagOutboxFailureCode | null;
   createdAt: number;
   updatedAt: number;
@@ -87,7 +96,7 @@ export interface MeetingTagOutboxEntry {
 type MeetingTagTransaction = Pick<SQLite.SQLiteDatabase, 'getFirstAsync' | 'runAsync'>;
 
 const states = new Set<MeetingTagOutboxState>([
-  'queued', 'running', 'retryable', 'succeeded', 'conflict', 'terminal',
+  'queued', 'running', 'retryable', 'succeeded', 'conflict', 'reconciled', 'terminal',
 ]);
 const failureCodes = new Set<MeetingTagOutboxFailureCode>([
   'offline',
@@ -190,12 +199,29 @@ function decodeRow(row: MeetingTagOutboxRow): MeetingTagOutboxEntry {
     && (row.failure_code === null || row.next_attempt_at === null)) reject('invalid_record');
   if ((row.state === 'conflict' || row.state === 'terminal')
     && (row.failure_code === null || row.next_attempt_at !== null)) reject('invalid_record');
-  if (row.state === 'succeeded' && row.next_attempt_at !== null) reject('invalid_record');
+  if ((row.state === 'succeeded' || row.state === 'reconciled')
+    && (row.failure_code !== null || row.next_attempt_at !== null)) reject('invalid_record');
   let receipt: MeetingTagMutationReceiptV1 | null = null;
   if (row.state === 'succeeded') {
     if (row.receipt_json === null || row.failure_code !== null) reject('invalid_record');
     receipt = decodeMeetingTagMutationReceipt(parseJson(row.receipt_json), request);
   } else if (row.receipt_json !== null) {
+    reject('invalid_record');
+  }
+  let reconciliation: MeetingTagDefinitionListV1 | MeetingTagStateV1 | null = null;
+  if (row.state === 'reconciled') {
+    if (row.reconciliation_json === null) reject('invalid_record');
+    const parsed = parseJson(row.reconciliation_json);
+    if (request.operation.kind === 'create_definition' || request.operation.kind === 'rename_definition') {
+      reconciliation = decodeMeetingTagDefinitions(parsed);
+      if (canonicalMeetingTagDefinitionsJson(reconciliation) !== row.reconciliation_json) reject('invalid_record');
+    } else {
+      reconciliation = decodeMeetingTagState(parsed, request.operation.source_key);
+      if (canonicalMeetingTagStateJson(reconciliation, request.operation.source_key) !== row.reconciliation_json) {
+        reject('invalid_record');
+      }
+    }
+  } else if (row.reconciliation_json !== null) {
     reject('invalid_record');
   }
   return {
@@ -208,10 +234,107 @@ function decodeRow(row: MeetingTagOutboxRow): MeetingTagOutboxEntry {
     leaseToken: row.lease_token,
     leaseUntil: row.lease_until,
     receipt,
+    reconciliation,
     failureCode: row.failure_code,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
+}
+
+function assignmentRevisionFor(
+  state: MeetingTagStateV1,
+  tagId: string,
+): number | null {
+  return state.active.find((tag) => tag.tag_id === tagId)?.assignment_revision
+    ?? state.tombstones.find((tag) => tag.tag_id === tagId)?.assignment_revision
+    ?? null;
+}
+
+function namespaceOwnerFor(
+  definitions: MeetingTagDefinitionListV1,
+  normalizedValue: string,
+): string | null {
+  for (const definition of definitions.definitions) {
+    if (definition.normalized_value === normalizedValue
+      || definition.aliases.some((alias) => alias.normalized_value === normalizedValue)) {
+      return definition.tag_id;
+    }
+  }
+  return null;
+}
+
+function assertRequestMatchesReconciliation(
+  request: MeetingTagMutationRequestV1,
+  reconciliation: MeetingTagDefinitionListV1 | MeetingTagStateV1,
+): void {
+  const operation = request.operation;
+  if (operation.kind === 'create_definition') reject('canonical_refresh_required');
+  if (operation.kind === 'rename_definition') {
+    const definitions = reconciliation as MeetingTagDefinitionListV1;
+    const definition = definitions.definitions.find((item) => item.tag_id === operation.tag_id);
+    const targetOwner = namespaceOwnerFor(
+      definitions,
+      normalizeMeetingTagLabel(operation.display_label).normalized_value,
+    );
+    if (!definition || operation.expected_tag_revision !== definition.revision) {
+      reject('canonical_refresh_required');
+    }
+    if (targetOwner !== null && targetOwner !== operation.tag_id) reject('canonical_refresh_required');
+    return;
+  }
+  const state = reconciliation as MeetingTagStateV1;
+  if (operation.expected_meeting_revision !== state.meeting_revision
+    || operation.expected_assignment_revision !== assignmentRevisionFor(state, operation.tag_id)) {
+    reject('canonical_refresh_required');
+  }
+}
+
+function assertRequestMatchesReceipt(
+  request: MeetingTagMutationRequestV1,
+  receipt: MeetingTagMutationReceiptV1,
+): void {
+  const operation = request.operation;
+  if (operation.kind === 'create_definition') reject('canonical_refresh_required');
+  if (operation.kind === 'rename_definition') {
+    if (operation.expected_tag_revision !== receipt.tag_revision) reject('canonical_refresh_required');
+    return;
+  }
+  if (operation.expected_meeting_revision !== receipt.meeting_revision
+    || operation.expected_assignment_revision !== receipt.assignment_revision) {
+    reject('canonical_refresh_required');
+  }
+}
+
+function validateConflictReconciliation(
+  request: MeetingTagMutationRequestV1,
+  value: unknown,
+): { value: MeetingTagDefinitionListV1 | MeetingTagStateV1; json: string } {
+  const operation = request.operation;
+  if (operation.kind === 'create_definition' || operation.kind === 'rename_definition') {
+    const definitions = decodeMeetingTagDefinitions(value);
+    if (operation.kind === 'create_definition') {
+      const target = normalizeMeetingTagLabel(operation.display_label).normalized_value;
+      if (namespaceOwnerFor(definitions, target) === null) reject('canonical_refresh_required');
+    } else {
+      const definition = definitions.definitions.find((item) => item.tag_id === operation.tag_id);
+      const target = normalizeMeetingTagLabel(operation.display_label).normalized_value;
+      const targetOwner = namespaceOwnerFor(definitions, target);
+      if (!definition || definition.revision < operation.expected_tag_revision
+        || (definition.revision === operation.expected_tag_revision
+          && (targetOwner === null || targetOwner === operation.tag_id))) {
+        reject('canonical_refresh_required');
+      }
+    }
+    return { value: definitions, json: canonicalMeetingTagDefinitionsJson(definitions) };
+  }
+  const state = decodeMeetingTagState(value, operation.source_key);
+  const assignmentRevision = assignmentRevisionFor(state, operation.tag_id);
+  const changed = state.meeting_revision > operation.expected_meeting_revision
+    || assignmentRevision !== operation.expected_assignment_revision;
+  if (state.meeting_revision < operation.expected_meeting_revision || !changed) {
+    reject('canonical_refresh_required');
+  }
+  return { value: state, json: canonicalMeetingTagStateJson(state, operation.source_key) };
 }
 
 function canonicalReceiptJson(receipt: MeetingTagMutationReceiptV1): string {
@@ -254,23 +377,20 @@ export async function enqueueMeetingTagMutationInTransaction(
   );
   if (unresolved && unresolvedStates.has(decodeRow(unresolved).state)) reject('pending_subject');
 
-  if (request.operation.kind === 'assign') {
-    const latestSuccess = await transaction.getFirstAsync<MeetingTagOutboxRow>(
-      `SELECT * FROM meeting_tag_outbox
-       WHERE owner_user_id = ? AND meeting_id = ? AND tag_id = ? AND state = 'succeeded'
-       ORDER BY created_at DESC, rowid DESC LIMIT 1`,
-      [ownerUserId, request.operation.meeting_id, request.operation.tag_id],
-    );
-    if (latestSuccess) {
-      const latest = decodeRow(latestSuccess);
-      if (latest.request.operation.kind === 'remove') {
-        if (!latest.receipt
-          || request.operation.expected_meeting_revision !== latest.receipt.meeting_revision
-          || request.operation.expected_assignment_revision !== latest.receipt.assignment_revision) {
-          reject('canonical_refresh_required');
-        }
-      }
-    }
+  const latestEvidenceRow = await transaction.getFirstAsync<MeetingTagOutboxRow>(
+    `SELECT * FROM meeting_tag_outbox
+     WHERE owner_user_id = ? AND subject_key = ? AND state IN ('succeeded', 'reconciled')
+     ORDER BY created_at DESC, rowid DESC LIMIT 1`,
+    [ownerUserId, identity.subjectKey],
+  );
+  const latestEvidence = latestEvidenceRow ? decodeRow(latestEvidenceRow) : null;
+  if (latestEvidence?.state === 'reconciled') {
+    if (!latestEvidence.reconciliation) reject('invalid_record');
+    assertRequestMatchesReconciliation(request, latestEvidence.reconciliation);
+  }
+  if (latestEvidence?.state === 'succeeded') {
+    if (!latestEvidence.receipt) reject('invalid_record');
+    assertRequestMatchesReceipt(request, latestEvidence.receipt);
   }
 
   await transaction.runAsync(
@@ -294,6 +414,48 @@ export async function enqueueMeetingTagMutationInTransaction(
   const inserted = await findByKey(transaction, request.idempotency_key);
   if (!inserted) reject('invalid_record');
   return decodeRow(inserted);
+}
+
+export async function reconcileMeetingTagConflictInTransaction(
+  transaction: MeetingTagTransaction,
+  input: {
+    ownerUserId: string;
+    idempotencyKey: string;
+    canonicalState: unknown;
+    now: number;
+  },
+): Promise<MeetingTagOutboxEntry> {
+  const ownerUserId = assertOwner(input.ownerUserId);
+  const now = assertClock(input.now);
+  const row = await findByKey(transaction, input.idempotencyKey);
+  if (!row || row.owner_user_id !== ownerUserId
+    || row.state !== 'conflict' || row.failure_code !== 'revision_conflict') reject('claim_lost');
+  const entry = decodeRow(row);
+  if (now < entry.updatedAt) reject('invalid_clock');
+  const reconciliation = validateConflictReconciliation(entry.request, input.canonicalState);
+  const result = await transaction.runAsync(
+    `UPDATE meeting_tag_outbox
+     SET state = 'reconciled', reconciliation_json = ?, failure_code = NULL, updated_at = ?
+     WHERE idempotency_key = ? AND owner_user_id = ?
+       AND state = 'conflict' AND failure_code = 'revision_conflict'`,
+    [reconciliation.json, now, input.idempotencyKey, ownerUserId],
+  );
+  if (result.changes !== 1) reject('claim_lost');
+  const reconciled = await findByKey(transaction, input.idempotencyKey);
+  if (!reconciled) reject('invalid_record');
+  return decodeRow(reconciled);
+}
+
+export async function reconcileMeetingTagConflict(input: {
+  ownerUserId: string;
+  idempotencyKey: string;
+  canonicalState: unknown;
+  now?: number;
+}): Promise<MeetingTagOutboxEntry> {
+  const now = input.now ?? Date.now();
+  return withDurableWakeTransaction((transaction) => (
+    reconcileMeetingTagConflictInTransaction(transaction, { ...input, now })
+  ));
 }
 
 export async function enqueueMeetingTagMutation(input: {
