@@ -127,6 +127,8 @@ describe('MKC meeting-tags client boundary', () => {
     [409, 'meeting_tag_revision_conflict', 'conflict', false],
     [422, 'meeting_tag_label_invalid', 'invalid', false],
     [503, 'meeting_tag_mutation_unavailable', 'retryable', true],
+    [503, 'meeting_tag_revision_conflict', 'retryable', true],
+    [429, 'meeting_tag_label_invalid', 'retryable', true],
     [0, 'network_error', 'offline', true],
   ] as const)('maps HTTP %s/%s to a sanitized failure', async (status, code, kind, retryable) => {
     const CloudError = (await import('./mainaCloudSession')).MainaCloudApiError;

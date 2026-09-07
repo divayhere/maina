@@ -116,6 +116,136 @@ describe('MKC manual meeting-tag contract boundary', () => {
     })).toThrow(/changed request body/);
   });
 
+  it('requires all assignment receipt fields together in both directions', () => {
+    const createReceipt = {
+      ...example.remove_receipt,
+      operation: 'create_definition',
+      outcome: 'applied',
+      tag_revision: 1,
+      meeting_id: null,
+      meeting_revision: null,
+      assignment_revision: null,
+      assignment_state: null,
+    };
+    expect(() => decodeMeetingTagMutationReceipt({
+      ...createReceipt,
+      meeting_id: example.remove_receipt.meeting_id,
+    })).toThrow(/assignment field presence mismatch/);
+    expect(() => decodeMeetingTagMutationReceipt({
+      ...example.remove_receipt,
+      assignment_revision: null,
+    })).toThrow(/assignment field presence mismatch/);
+  });
+
+  it('binds applied and no-op receipts to the request revision transition', () => {
+    const removeRequest = decodeMeetingTagMutationRequest(example.remove_request);
+    expect(() => decodeMeetingTagMutationReceipt({
+      ...example.remove_receipt,
+      meeting_revision: removeRequest.operation.kind === 'remove'
+        ? removeRequest.operation.expected_meeting_revision
+        : 0,
+      assignment_revision: removeRequest.operation.kind === 'remove'
+        ? removeRequest.operation.expected_assignment_revision
+        : 1,
+    }, removeRequest)).toThrow(/meeting revision transition mismatch/);
+    expect(() => decodeMeetingTagMutationReceipt({
+      ...example.remove_receipt,
+      assignment_revision: 1,
+    }, removeRequest)).toThrow(/assignment revision transition mismatch/);
+
+    expect(decodeMeetingTagMutationReceipt({
+      ...example.remove_receipt,
+      outcome: 'no_op',
+      meeting_revision: 9,
+      assignment_revision: 1,
+    }, removeRequest)).toEqual(expect.objectContaining({ outcome: 'no_op' }));
+    expect(() => decodeMeetingTagMutationReceipt({
+      ...example.remove_receipt,
+      outcome: 'no_op',
+      meeting_revision: 9,
+      assignment_revision: 2,
+    }, removeRequest)).toThrow(/assignment revision transition mismatch/);
+
+    const renameRequest = decodeMeetingTagMutationRequest({
+      schema_version: 'mkc.meeting-tag-mutation-request.v1',
+      idempotency_key: 'mobile-outbox:rename:0001',
+      operation: {
+        kind: 'rename_definition',
+        tag_id: example.definitions[0].tag_id,
+        expected_tag_revision: 2,
+        display_label: 'Customer Interviews',
+      },
+    });
+    const renameReceipt = {
+      ...example.remove_receipt,
+      idempotency_key: 'mobile-outbox:rename:0001',
+      operation: 'rename_definition',
+      outcome: 'applied',
+      tag_id: example.definitions[0].tag_id,
+      tag_revision: 3,
+      meeting_id: null,
+      meeting_revision: null,
+      assignment_revision: null,
+      assignment_state: null,
+    };
+    expect(decodeMeetingTagMutationReceipt(renameReceipt, renameRequest)).toEqual(renameReceipt);
+    expect(() => decodeMeetingTagMutationReceipt({ ...renameReceipt, tag_revision: 2 }, renameRequest))
+      .toThrow(/rename revision transition mismatch/);
+    expect(decodeMeetingTagMutationReceipt({
+      ...renameReceipt,
+      outcome: 'no_op',
+      tag_revision: 2,
+    }, renameRequest)).toEqual(expect.objectContaining({ outcome: 'no_op' }));
+  });
+
+  it('requires first assignment and create receipts to begin at revision 1', () => {
+    const assignRequest = decodeMeetingTagMutationRequest({
+      schema_version: 'mkc.meeting-tag-mutation-request.v1',
+      idempotency_key: 'mobile-outbox:assign:0001',
+      operation: {
+        kind: 'assign',
+        meeting_id: example.meeting_tag_state.meeting_id,
+        source_key: example.meeting_tag_state.source_key,
+        tag_id: example.definitions[0].tag_id,
+        expected_meeting_revision: 9,
+        expected_assignment_revision: null,
+      },
+    });
+    const assignReceipt = {
+      ...example.remove_receipt,
+      idempotency_key: 'mobile-outbox:assign:0001',
+      operation: 'assign',
+      tag_id: example.definitions[0].tag_id,
+      assignment_revision: 1,
+      assignment_state: 'active',
+    };
+    expect(decodeMeetingTagMutationReceipt(assignReceipt, assignRequest)).toEqual(assignReceipt);
+    expect(() => decodeMeetingTagMutationReceipt({
+      ...assignReceipt,
+      outcome: 'no_op',
+      meeting_revision: 9,
+    }, assignRequest)).toThrow(/first assignment must apply/);
+
+    const createRequest = decodeMeetingTagMutationRequest({
+      schema_version: 'mkc.meeting-tag-mutation-request.v1',
+      idempotency_key: 'mobile-outbox:create:0002',
+      operation: { kind: 'create_definition', display_label: 'Pricing' },
+    });
+    const createReceipt = {
+      ...example.remove_receipt,
+      idempotency_key: 'mobile-outbox:create:0002',
+      operation: 'create_definition',
+      tag_revision: 1,
+      meeting_id: null,
+      meeting_revision: null,
+      assignment_revision: null,
+      assignment_state: null,
+    };
+    expect(decodeMeetingTagMutationReceipt(createReceipt, createRequest)).toEqual(createReceipt);
+    expect(() => decodeMeetingTagMutationReceipt({ ...createReceipt, outcome: 'no_op' }, createRequest))
+      .toThrow(/create must apply/);
+  });
+
   it('keeps migration, deployment, UI, and network mutation activation off', () => {
     expect(MKC_MEETING_TAGS_ACTIVATION).toEqual({
       backendMigrationQualified: false,
