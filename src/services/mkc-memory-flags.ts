@@ -5,6 +5,7 @@ export type MkcMemoryFeatureFlags = {
   mobileMemoryPulseV1: boolean;
   mobileSavedRecallsV1: boolean;
   mobileVerifiedLinksV1: boolean;
+  mobileMeetingTagsV1: boolean;
 };
 
 type FlagEnvironment = Partial<Record<
@@ -13,7 +14,8 @@ type FlagEnvironment = Partial<Record<
   | 'EXPO_PUBLIC_MOBILE_FROZEN_HANDOFF_V1'
   | 'EXPO_PUBLIC_MOBILE_MEMORY_PULSE_V1'
   | 'EXPO_PUBLIC_MOBILE_SAVED_RECALLS_V1'
-  | 'EXPO_PUBLIC_MOBILE_VERIFIED_LINKS_V1',
+  | 'EXPO_PUBLIC_MOBILE_VERIFIED_LINKS_V1'
+  | 'EXPO_PUBLIC_MOBILE_MEETING_TAGS_V1',
   string | undefined
 >>;
 
@@ -29,6 +31,7 @@ export function resolveMkcMemoryFeatureFlags(environment: FlagEnvironment): MkcM
     mobileMemoryPulseV1: enabled(environment.EXPO_PUBLIC_MOBILE_MEMORY_PULSE_V1),
     mobileSavedRecallsV1: enabled(environment.EXPO_PUBLIC_MOBILE_SAVED_RECALLS_V1),
     mobileVerifiedLinksV1: enabled(environment.EXPO_PUBLIC_MOBILE_VERIFIED_LINKS_V1),
+    mobileMeetingTagsV1: enabled(environment.EXPO_PUBLIC_MOBILE_MEETING_TAGS_V1),
   };
 }
 
@@ -39,4 +42,5 @@ export const MKC_MEMORY_FEATURE_FLAGS = resolveMkcMemoryFeatureFlags({
   EXPO_PUBLIC_MOBILE_MEMORY_PULSE_V1: process.env.EXPO_PUBLIC_MOBILE_MEMORY_PULSE_V1,
   EXPO_PUBLIC_MOBILE_SAVED_RECALLS_V1: process.env.EXPO_PUBLIC_MOBILE_SAVED_RECALLS_V1,
   EXPO_PUBLIC_MOBILE_VERIFIED_LINKS_V1: process.env.EXPO_PUBLIC_MOBILE_VERIFIED_LINKS_V1,
+  EXPO_PUBLIC_MOBILE_MEETING_TAGS_V1: process.env.EXPO_PUBLIC_MOBILE_MEETING_TAGS_V1,
 });

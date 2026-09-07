@@ -1,0 +1,67 @@
+{
+  "schema_version": "maina.mobile-meeting-tags-contract-pin.v1",
+  "backend_commit": "0faf14d6b089d2e386cca6649c2f1dc5792bc7ac",
+  "backend_source_acceptance": {
+    "coordination_commit": "a8184f6f1baef08bb0eae2865c8467c035a6c0db",
+    "receipt_path": "operations/receipts/p4-05-accepted.json",
+    "receipt_sha256": "e427216f3d06c52c5d343c15d234aab4d35b14e7ed48eb0c6c1e49f08aa3a7c4",
+    "scope": "source-only-not-deployed"
+  },
+  "source_files": {
+    "contract": {
+      "path": "contracts/meeting-tags.v1.md",
+      "sha256": "7a526d5f5e79ec50d0fcdb30a20a280aa23216283b8f96eff44ffca71b000310"
+    },
+    "example": {
+      "path": "contracts/examples/maina-meeting-tags.v1.json",
+      "sha256": "3ebbfdf92457f1253397ac27e266a7c44094956edd0ac92e940400f60419d2e2"
+    },
+    "openapi": {
+      "path": "contracts/openapi.v0.1.json",
+      "sha256": "584b1669d71135c4651e87f669c460187b2c7595033d5733ad3843623b921d10"
+    },
+    "validator": {
+      "path": "src/meetings/tag-contract.ts",
+      "sha256": "cee0f011307462fcca12364b0917fd43962f22d04a3c3b70281ada12425764c0"
+    },
+    "service": {
+      "path": "src/meetings/tag-service.ts",
+      "sha256": "10c856a0ef851022d31a056de43c0ce845437b9ae89fda472ad1b29ee9e4ca15"
+    },
+    "migration": {
+      "path": "migrations/0025_canonical_meeting_tags.sql",
+      "sha256": "934ab6decfa78524beceb5573a3629794d62fb79bf68b62dc9e5a43918e539e3"
+    }
+  },
+  "selected_openapi": {
+    "path": "contracts/mkc-meeting-tags/openapi.selected.json",
+    "sha256": "ce1fdea35333175802fa75e0d634ad8b08668f094f7a61679964b840d27343df",
+    "paths": [
+      "/v1/meeting-tags",
+      "/v1/meeting-tags/mutations",
+      "/v1/meetings/{sourceKey}/tags"
+    ],
+    "schemas": [
+      "MeetingTagDefinitionV1",
+      "MeetingTagAssignmentV1",
+      "MeetingTagStateV1",
+      "MeetingTagMutationRequestV1",
+      "MeetingTagMutationReceiptV1",
+      "MeetingTagFilterV1",
+      "ResolvedMeetingTagFilterV1",
+      "MeetingTagSafeAuditEventV1",
+      "MeetingTagDefinitionListV1"
+    ]
+  },
+  "generated_types": {
+    "path": "src/contracts/mkc-meeting-tags.generated.ts",
+    "sha256": "8fbbff75f7c74b0d595e620641d22e7ae9677ad8e0ab70b7c984fd06de4b2846"
+  },
+  "activation": {
+    "mobile_meeting_tags": "default-off",
+    "backend_migration_0025": "not-executed",
+    "backend_deployment": "not-deployed",
+    "ui": "not-activated",
+    "network_mutations": "not-activated"
+  }
+}

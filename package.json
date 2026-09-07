@@ -65,6 +65,8 @@
     "verify:mkc-release-a": "node scripts/import-mkc-release-a-contracts.mjs --check",
     "import:mkc-memory-contracts": "node scripts/import-mkc-memory-contracts.mjs",
     "verify:mkc-memory-contracts": "node scripts/import-mkc-memory-contracts.mjs --check",
+    "import:mkc-meeting-tags": "node scripts/import-mkc-meeting-tags.mjs",
+    "verify:mkc-meeting-tags": "node scripts/import-mkc-meeting-tags.mjs --check",
     "verify:native-recorder": "node scripts/verify-native-recorder.mjs",
     "verify:android-source-native": "bash scripts/verify-android-source-native.sh",
     "verify:pipeline-wake-api": "node scripts/verify-pipeline-wake-native-api.mjs",

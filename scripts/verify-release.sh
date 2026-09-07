@@ -13,6 +13,7 @@ cd "$PROJECT_DIR"
 npm run verify:coordination
 npm run verify:mkc-release-a
 npm run verify:mkc-memory-contracts
+npm run verify:mkc-meeting-tags
 npm run verify:native-recorder
 npm run typecheck
 npm test
