@@ -1,0 +1,131 @@
+{
+  "definitions": [
+    {
+      "schema_version": "mkc.meeting-tag-definition.v1",
+      "tag_id": "tag_01k4customerdiscovery000001",
+      "visibility": "owner_private",
+      "revision": 2,
+      "display_label": "Customer Discovery",
+      "normalized_value": "customer discovery",
+      "aliases": [
+        {
+          "display_label": "Customer Research",
+          "normalized_value": "customer research",
+          "added_in_revision": 2,
+          "added_at": "2026-09-05T06:00:00.000Z"
+        }
+      ],
+      "created_at": "2026-09-05T05:30:00.000Z",
+      "updated_at": "2026-09-05T06:00:00.000Z"
+    },
+    {
+      "schema_version": "mkc.meeting-tag-definition.v1",
+      "tag_id": "tag_01k4dubai0000000000000001",
+      "visibility": "owner_private",
+      "revision": 1,
+      "display_label": "Dubai",
+      "normalized_value": "dubai",
+      "aliases": [],
+      "created_at": "2026-09-05T05:31:00.000Z",
+      "updated_at": "2026-09-05T05:31:00.000Z"
+    }
+  ],
+  "meeting_tag_state": {
+    "schema_version": "mkc.meeting-tag-state.v1",
+    "meeting_id": "meeting:maina:2026-08-21-demo",
+    "source_key": "meeting:maina:2026-08-21-demo",
+    "meeting_revision": 9,
+    "active": [
+      {
+        "tag_id": "tag_01k4customerdiscovery000001",
+        "display_label": "Customer Discovery",
+        "normalized_value": "customer discovery",
+        "definition_revision": 2,
+        "assignment_id": "tagasn_01k4customerdiscover0001",
+        "assignment_revision": 1,
+        "assigned_at": "2026-09-05T05:35:00.000Z",
+        "removed_at": null
+      },
+      {
+        "tag_id": "tag_01k4dubai0000000000000001",
+        "display_label": "Dubai",
+        "normalized_value": "dubai",
+        "definition_revision": 1,
+        "assignment_id": "tagasn_01k4dubai00000000000001",
+        "assignment_revision": 1,
+        "assigned_at": "2026-09-05T05:36:00.000Z",
+        "removed_at": null
+      }
+    ],
+    "tombstones": [
+      {
+        "tag_id": "tag_01k4pricing000000000000001",
+        "assignment_id": "tagasn_01k4pricing000000000001",
+        "assignment_revision": 2,
+        "removed_at": "2026-09-05T05:50:00.000Z"
+      }
+    ]
+  },
+  "remove_request": {
+    "schema_version": "mkc.meeting-tag-mutation-request.v1",
+    "idempotency_key": "mobile-outbox:tag-remove:0001",
+    "operation": {
+      "kind": "remove",
+      "meeting_id": "meeting:maina:2026-08-21-demo",
+      "source_key": "meeting:maina:2026-08-21-demo",
+      "tag_id": "tag_01k4dubai0000000000000001",
+      "expected_meeting_revision": 9,
+      "expected_assignment_revision": 1
+    }
+  },
+  "remove_receipt": {
+    "schema_version": "mkc.meeting-tag-mutation-receipt.v1",
+    "idempotency_key": "mobile-outbox:tag-remove:0001",
+    "replayed": false,
+    "operation": "remove",
+    "outcome": "applied",
+    "tag_id": "tag_01k4dubai0000000000000001",
+    "meeting_id": "meeting:maina:2026-08-21-demo",
+    "tag_revision": 1,
+    "meeting_revision": 10,
+    "assignment_revision": 2,
+    "assignment_state": "removed",
+    "occurred_at": "2026-09-05T06:10:00.000Z"
+  },
+  "filter": {
+    "schema_version": "mkc.meeting-tag-filter.v1",
+    "operator": "and",
+    "refs": [
+      {
+        "kind": "label",
+        "display_label": "Customer Research",
+        "normalized_value": "customer research"
+      },
+      {
+        "kind": "label",
+        "display_label": "Dubai",
+        "normalized_value": "dubai"
+      }
+    ]
+  },
+  "resolved_filter": {
+    "schema_version": "mkc.meeting-tag-filter-resolution.v1",
+    "operator": "and",
+    "requested_clause_count": 2,
+    "resolved_tag_ids": [
+      "tag_01k4customerdiscovery000001",
+      "tag_01k4dubai0000000000000001"
+    ],
+    "unresolved_refs": [],
+    "match_semantics": "exact_active_assignments_only"
+  },
+  "safe_audit_event": {
+    "schema_version": "mkc.meeting-tag-audit.v1",
+    "operation": "filter",
+    "outcome": "applied",
+    "requested_tag_count": 2,
+    "resolved_tag_count": 2,
+    "revision_conflict": false,
+    "occurred_at": "2026-09-05T06:11:00.000Z"
+  }
+}

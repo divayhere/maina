@@ -11,6 +11,7 @@ describe('MKC Memory feature flags', () => {
       mobileMemoryPulseV1: false,
       mobileSavedRecallsV1: false,
       mobileVerifiedLinksV1: false,
+      mobileMeetingTagsV1: false,
     });
   });
 
@@ -18,8 +19,10 @@ describe('MKC Memory feature flags', () => {
     const flags = resolveMkcMemoryFeatureFlags({
       EXPO_PUBLIC_MOBILE_MEMORY_SURFACE_V1: 'true',
       EXPO_PUBLIC_MOBILE_MEMORY_PULSE_V1: 'false',
+      EXPO_PUBLIC_MOBILE_MEETING_TAGS_V1: 'true',
     });
     expect(flags.mobileMemorySurfaceV1).toBe(true);
     expect(flags.mobileMemoryPulseV1).toBe(false);
+    expect(flags.mobileMeetingTagsV1).toBe(true);
   });
 });
