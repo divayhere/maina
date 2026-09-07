@@ -2,7 +2,11 @@ import { describe, expect, it, vi } from 'vitest';
 
 import example from '../../contracts/mkc-meeting-tags/maina-meeting-tags.v1.json';
 import type { MeetingTagMutationRequestV1 } from '@/contracts/mkc-meeting-tags.generated';
-import { MEETING_TAG_OUTBOX_MIGRATION_SQL } from './meetingTagsMigration';
+import {
+  MEETING_TAG_OUTBOX_V18_MIGRATION_SQL,
+  MEETING_TAG_OUTBOX_V19_FINALIZE_SQL,
+  MEETING_TAG_OUTBOX_V19_TABLE_SQL,
+} from './meetingTagsMigration';
 import {
   claimNextMeetingTagMutationInTransaction,
   completeMeetingTagMutationInTransaction,
@@ -64,6 +68,7 @@ class MemoryMeetingTagTransaction {
     if (sql.includes('INSERT INTO meeting_tag_outbox')) {
       const [key, owner, requestJson, operation, meeting, source, tag, subject, created, updated] = params;
       this.rows.set(String(key), {
+        source_rowid: this.rows.size + 1,
         idempotency_key: String(key),
         owner_user_id: owner,
         request_json: requestJson,
@@ -150,13 +155,11 @@ class MemoryMeetingTagTransaction {
 }
 
 function newestFirst(left: Row, right: Row): number {
-  return Number(right.created_at) - Number(left.created_at)
-    || String(right.idempotency_key).localeCompare(String(left.idempotency_key));
+  return Number(right.source_rowid) - Number(left.source_rowid);
 }
 
 function oldestFirst(left: Row, right: Row): number {
-  return Number(left.created_at) - Number(right.created_at)
-    || String(left.idempotency_key).localeCompare(String(right.idempotency_key));
+  return Number(left.source_rowid) - Number(right.source_rowid);
 }
 
 const owner = 'owner:mobile:test';
@@ -183,14 +186,18 @@ async function enqueueRemove(memory: MemoryMeetingTagTransaction, key: string, n
 
 describe('meeting-tag durable outbox', () => {
   it('appends one immutable owner-bound outbox migration to maina.db', () => {
-    expect(MEETING_TAG_OUTBOX_MIGRATION_SQL).toContain('CREATE TABLE IF NOT EXISTS meeting_tag_outbox');
-    expect(MEETING_TAG_OUTBOX_MIGRATION_SQL)
+    expect(MEETING_TAG_OUTBOX_V18_MIGRATION_SQL).toContain('CREATE TABLE IF NOT EXISTS meeting_tag_outbox');
+    expect(MEETING_TAG_OUTBOX_V18_MIGRATION_SQL).not.toContain('subject_key');
+    expect(MEETING_TAG_OUTBOX_V18_MIGRATION_SQL).not.toContain('reconciliation_json');
+    expect(MEETING_TAG_OUTBOX_V19_TABLE_SQL).toContain('subject_key TEXT NOT NULL');
+    expect(MEETING_TAG_OUTBOX_V19_TABLE_SQL).toContain('reconciliation_json TEXT');
+    expect(MEETING_TAG_OUTBOX_V19_FINALIZE_SQL)
       .toContain("RAISE(ABORT, 'meeting_tag_outbox_identity_immutable')");
-    expect(MEETING_TAG_OUTBOX_MIGRATION_SQL)
+    expect(MEETING_TAG_OUTBOX_V19_FINALIZE_SQL)
       .toContain("RAISE(ABORT, 'meeting_tag_outbox_state_transition_invalid')");
-    expect(MEETING_TAG_OUTBOX_MIGRATION_SQL)
+    expect(MEETING_TAG_OUTBOX_V19_TABLE_SQL)
       .toContain("'queued', 'running', 'retryable', 'succeeded', 'conflict', 'reconciled', 'terminal'");
-    expect(MEETING_TAG_OUTBOX_MIGRATION_SQL).toContain('owner_user_id TEXT NOT NULL');
+    expect(MEETING_TAG_OUTBOX_V19_TABLE_SQL).toContain('owner_user_id TEXT NOT NULL');
   });
 
   it('coalesces a canonical same-key replay and rejects body or owner drift', async () => {
@@ -521,6 +528,62 @@ describe('meeting-tag durable outbox', () => {
     expect(fresh.state).toBe('queued');
   });
 
+  it('rejects regressing assignment state and assignment movement without a meeting advance', async () => {
+    const conflict = async (
+      key: string,
+      expectedAssignmentRevision: number,
+      canonicalState: unknown,
+    ) => {
+      const memory = new MemoryMeetingTagTransaction();
+      await enqueueMeetingTagMutationInTransaction(transaction(memory), {
+        ownerUserId: owner,
+        request: requestWithKey(key, {
+          ...example.remove_request.operation,
+          kind: 'remove',
+          expected_assignment_revision: expectedAssignmentRevision,
+        }),
+        now: 100,
+      });
+      await claimNextMeetingTagMutationInTransaction(transaction(memory), {
+        ownerUserId: owner,
+        leaseToken: `lease:${expectedAssignmentRevision}`,
+        now: 110,
+        leaseMs: 60_000,
+      });
+      await failMeetingTagMutationInTransaction(transaction(memory), {
+        ownerUserId: owner,
+        idempotencyKey: key,
+        leaseToken: `lease:${expectedAssignmentRevision}`,
+        state: 'conflict',
+        failureCode: 'revision_conflict',
+        now: 120,
+      });
+      return reconcileMeetingTagConflictInTransaction(transaction(memory), {
+        ownerUserId: owner,
+        idempotencyKey: key,
+        canonicalState,
+        now: 121,
+      });
+    };
+    await expect(conflict(
+      'mobile-outbox:remove:lower-assignment',
+      2,
+      example.meeting_tag_state,
+    )).rejects.toMatchObject({ reason: 'canonical_refresh_required' } satisfies Partial<MeetingTagOutboxError>);
+    await expect(conflict(
+      'mobile-outbox:remove:assignment-without-meeting',
+      1,
+      {
+        ...example.meeting_tag_state,
+        active: example.meeting_tag_state.active.map((tag) => (
+          tag.tag_id === example.remove_request.operation.tag_id
+            ? { ...tag, assignment_revision: 2 }
+            : tag
+        )),
+      },
+    )).rejects.toMatchObject({ reason: 'canonical_refresh_required' } satisfies Partial<MeetingTagOutboxError>);
+  });
+
   it('reconciles a create conflict to its canonical namespace owner and forbids duplicate recreation', async () => {
     const memory = new MemoryMeetingTagTransaction();
     const key = 'mobile-outbox:create:conflict';
@@ -606,5 +669,68 @@ describe('meeting-tag durable outbox', () => {
     })).rejects.toMatchObject({
       reason: 'canonical_refresh_required',
     } satisfies Partial<MeetingTagOutboxError>);
+  });
+
+  it('orders successor evidence by durable row sequence across a backward device clock', async () => {
+    const memory = new MemoryMeetingTagTransaction();
+    await enqueueRemove(memory, example.remove_request.idempotency_key, 1_000);
+    await claimNextMeetingTagMutationInTransaction(transaction(memory), {
+      ownerUserId: owner,
+      leaseToken: 'lease:clock-remove',
+      now: 1_010,
+      leaseMs: 60_000,
+    });
+    await completeMeetingTagMutationInTransaction(transaction(memory), {
+      ownerUserId: owner,
+      idempotencyKey: example.remove_request.idempotency_key,
+      leaseToken: 'lease:clock-remove',
+      receipt: example.remove_receipt,
+      now: 1_020,
+    });
+    const assignKey = 'mobile-outbox:assign:clock-rollback';
+    await enqueueMeetingTagMutationInTransaction(transaction(memory), {
+      ownerUserId: owner,
+      request: requestWithKey(assignKey, {
+        kind: 'assign',
+        meeting_id: example.remove_request.operation.meeting_id,
+        source_key: example.remove_request.operation.source_key,
+        tag_id: example.remove_request.operation.tag_id,
+        expected_meeting_revision: 10,
+        expected_assignment_revision: 2,
+      }),
+      now: 500,
+    });
+    await claimNextMeetingTagMutationInTransaction(transaction(memory), {
+      ownerUserId: owner,
+      leaseToken: 'lease:clock-assign',
+      now: 510,
+      leaseMs: 60_000,
+    });
+    await completeMeetingTagMutationInTransaction(transaction(memory), {
+      ownerUserId: owner,
+      idempotencyKey: assignKey,
+      leaseToken: 'lease:clock-assign',
+      receipt: {
+        ...example.remove_receipt,
+        idempotency_key: assignKey,
+        operation: 'assign',
+        meeting_revision: 11,
+        assignment_revision: 3,
+        assignment_state: 'active',
+        occurred_at: '2026-09-07T00:01:00.000Z',
+      },
+      now: 520,
+    });
+    const successor = await enqueueMeetingTagMutationInTransaction(transaction(memory), {
+      ownerUserId: owner,
+      request: requestWithKey('mobile-outbox:remove:after-clock-rollback', {
+        ...example.remove_request.operation,
+        kind: 'remove',
+        expected_meeting_revision: 11,
+        expected_assignment_revision: 3,
+      }),
+      now: 400,
+    });
+    expect(successor).toMatchObject({ state: 'queued', createdAt: 400 });
   });
 });
