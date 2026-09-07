@@ -6,6 +6,7 @@
 import * as SQLite from 'expo-sqlite';
 import { log } from '../services/logger';
 import { migratePipelineWakeV17 } from '../core/pipeline/pipelineWakeMigration';
+import { MEETING_TAG_OUTBOX_MIGRATION_SQL } from './meetingTagsMigration';
 
 let dbPromise: Promise<SQLite.SQLiteDatabase> | null = null;
 
@@ -409,6 +410,11 @@ const MIGRATIONS: Migration[] = [
       runAsync: (source, params = []) => db.runAsync(source, params),
     });
   },
+  // v18 — owner-bound, immutable manual meeting-tag mutation outbox. This is
+  // deliberately stored in maina.db so capture, meeting identity, and offline
+  // mutation ordering have one durable owner. Network draining remains gated
+  // separately and disabled by default.
+  async (db) => db.execAsync(MEETING_TAG_OUTBOX_MIGRATION_SQL),
 ];
 
 export async function initDb(): Promise<void> {

@@ -357,20 +357,34 @@ function stable(value: unknown): string {
   return JSON.stringify(value);
 }
 
+export function canonicalizeMeetingTagMutationRequest(
+  value: unknown,
+): MeetingTagMutationRequestV1 {
+  const request = decodeMeetingTagMutationRequest(value);
+  if (request.operation.kind !== 'create_definition' && request.operation.kind !== 'rename_definition') {
+    return request;
+  }
+  return {
+    ...request,
+    operation: {
+      ...request.operation,
+      display_label: normalizeMeetingTagLabel(request.operation.display_label).display_label,
+    },
+  } as MeetingTagMutationRequestV1;
+}
+
+export function canonicalMeetingTagMutationRequestJson(value: unknown): string {
+  return stable(canonicalizeMeetingTagMutationRequest(value));
+}
+
 export function assertMeetingTagIdempotentReplay(
   firstValue: unknown,
   retryValue: unknown,
 ): MeetingTagMutationRequestV1 {
-  const first = decodeMeetingTagMutationRequest(firstValue);
+  const first = canonicalizeMeetingTagMutationRequest(firstValue);
   const retry = decodeMeetingTagMutationRequest(retryValue);
   if (first.idempotency_key !== retry.idempotency_key) fail('$.idempotency_key', 'retry key mismatch');
-  const canonicalOperation = (request: MeetingTagMutationRequestV1) => {
-    if (request.operation.kind !== 'create_definition' && request.operation.kind !== 'rename_definition') {
-      return request.operation;
-    }
-    return { ...request.operation, display_label: normalizeMeetingTagLabel(request.operation.display_label).display_label };
-  };
-  if (stable(canonicalOperation(first)) !== stable(canonicalOperation(retry))) {
+  if (stable(first.operation) !== stable(canonicalizeMeetingTagMutationRequest(retry).operation)) {
     fail('$.operation', 'same idempotency key changed request body');
   }
   return retry;
