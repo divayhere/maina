@@ -14,6 +14,7 @@ import {
   enqueueMeetingTagMutationInTransaction,
   failMeetingTagMutationInTransaction,
   MeetingTagOutboxError,
+  reconcileClaimedMeetingTagConflictInTransaction,
   reconcileMeetingTagConflictInTransaction,
 } from './meetingTags';
 
@@ -580,6 +581,58 @@ describe('meeting-tag durable outbox', () => {
       now: 125,
     });
     expect(fresh.state).toBe('queued');
+  });
+
+  it('validates before atomically moving a claimed conflict through both durable states', async () => {
+    const memory = new MemoryMeetingTagTransaction();
+    const key = 'mobile-outbox:remove:atomic-conflict';
+    await enqueueRemove(memory, key);
+    await claimNextMeetingTagMutationInTransaction(transaction(memory), {
+      ownerUserId: owner,
+      leaseToken: 'lease:atomic-conflict',
+      now: 110,
+      leaseMs: 60_000,
+    });
+    const refreshedState = {
+      ...example.meeting_tag_state,
+      meeting_revision: 10,
+      active: example.meeting_tag_state.active.map((tag) => (
+        tag.tag_id === example.remove_request.operation.tag_id
+          ? { ...tag, assignment_revision: 2 }
+          : tag
+      )),
+    };
+
+    const reconciled = await reconcileClaimedMeetingTagConflictInTransaction(transaction(memory), {
+      ownerUserId: owner,
+      idempotencyKey: key,
+      leaseToken: 'lease:atomic-conflict',
+      canonicalState: refreshedState,
+      now: 120,
+    });
+    expect(reconciled).toMatchObject({ state: 'reconciled', failureCode: null });
+
+    const invalidMemory = new MemoryMeetingTagTransaction();
+    await enqueueRemove(invalidMemory, `${key}:invalid`);
+    await claimNextMeetingTagMutationInTransaction(transaction(invalidMemory), {
+      ownerUserId: owner,
+      leaseToken: 'lease:atomic-invalid',
+      now: 110,
+      leaseMs: 60_000,
+    });
+    await expect(reconcileClaimedMeetingTagConflictInTransaction(transaction(invalidMemory), {
+      ownerUserId: owner,
+      idempotencyKey: `${key}:invalid`,
+      leaseToken: 'lease:atomic-invalid',
+      canonicalState: example.meeting_tag_state,
+      now: 120,
+    })).rejects.toMatchObject({
+      reason: 'canonical_refresh_required',
+    } satisfies Partial<MeetingTagOutboxError>);
+    expect(invalidMemory.rows.get(`${key}:invalid`)).toMatchObject({
+      state: 'running',
+      lease_token: 'lease:atomic-invalid',
+    });
   });
 
   it('rejects regressing assignment state and assignment movement without a meeting advance', async () => {

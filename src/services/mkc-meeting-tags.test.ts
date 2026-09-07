@@ -14,6 +14,7 @@ vi.mock('./mainaCloudSession', () => ({
       super(message);
     }
   },
+  MainaCloudSessionMismatchError: class MainaCloudSessionMismatchError extends Error {},
   MainaCloudScopeError: class MainaCloudScopeError extends Error {},
   mainaCloudRequestJson: mocks.request,
   requireMainaCloudScope: mocks.requireScope,
@@ -118,6 +119,36 @@ describe('MKC meeting-tags client boundary', () => {
       kind: 'auth', retryable: false,
     } satisfies Partial<MkcMeetingTagsError>));
     expect(mocks.request).not.toHaveBeenCalled();
+  });
+
+  it('rejects an owner-session switch at both pre-request seams', async () => {
+    const executionContext = {
+      ownerUserId: 'owner-a',
+      accessToken: 'token-a',
+      scopesVerifiedAt: 1,
+    } as const;
+    const SessionMismatch = (await import('./mainaCloudSession')).MainaCloudSessionMismatchError;
+
+    mocks.requireScope.mockRejectedValueOnce(new SessionMismatch());
+    await expect(mutateMkcMeetingTags(example.remove_request, {
+      enabled: true,
+      executionContext,
+    })).rejects.toMatchObject({ kind: 'session_changed', retryable: true });
+    expect(mocks.requireScope).toHaveBeenCalledWith('sources:write', executionContext);
+    expect(mocks.request).not.toHaveBeenCalled();
+
+    mocks.requireScope.mockResolvedValueOnce({ user: { userId: 'owner-a' } });
+    mocks.request.mockRejectedValueOnce(new SessionMismatch());
+    await expect(mutateMkcMeetingTags(example.remove_request, {
+      enabled: true,
+      executionContext,
+    })).rejects.toMatchObject({ kind: 'session_changed', retryable: true });
+    expect(mocks.request).toHaveBeenCalledTimes(1);
+    expect(mocks.request).toHaveBeenCalledWith(
+      '/v1/meeting-tags/mutations',
+      expect.objectContaining({ method: 'POST' }),
+      { executionContext },
+    );
   });
 
   it.each([

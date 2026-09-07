@@ -6,9 +6,11 @@ import type {
 } from '@/contracts/mkc-meeting-tags.generated';
 import {
   MainaCloudApiError,
+  MainaCloudSessionMismatchError,
   MainaCloudScopeError,
   mainaCloudRequestJson,
   requireMainaCloudScope,
+  type MainaCloudExecutionContext,
 } from './mainaCloudSession';
 import {
   MkcMeetingTagContractError,
@@ -28,6 +30,7 @@ export type MkcMeetingTagsFailureKind =
   | 'invalid'
   | 'offline'
   | 'retryable'
+  | 'session_changed'
   | 'protocol';
 
 export class MkcMeetingTagsError extends Error {
@@ -44,6 +47,7 @@ export class MkcMeetingTagsError extends Error {
 type RequestBoundary = {
   enabled?: boolean;
   signal?: AbortSignal;
+  executionContext?: MainaCloudExecutionContext;
 };
 
 function requireEnabled(enabled: boolean | undefined): void {
@@ -60,6 +64,13 @@ function safeError(cause: unknown): MkcMeetingTagsError {
   if (cause instanceof MkcMeetingTagsError) return cause;
   if (cause instanceof MkcMeetingTagContractError) {
     return new MkcMeetingTagsError('protocol', false, 'Maina could not verify the meeting-tag response safely.');
+  }
+  if (cause instanceof MainaCloudSessionMismatchError) {
+    return new MkcMeetingTagsError(
+      'session_changed',
+      true,
+      'Meeting tags paused because the Maina Cloud account changed.',
+    );
   }
   if (cause instanceof MainaCloudScopeError) {
     return new MkcMeetingTagsError('auth', false, 'Reconnect Maina Cloud to use meeting tags.');
@@ -87,12 +98,29 @@ function safeError(cause: unknown): MkcMeetingTagsError {
   return new MkcMeetingTagsError('protocol', false, 'Maina could not complete the meeting-tag request safely.');
 }
 
-async function requireScope(scope: 'sources:read' | 'sources:write'): Promise<void> {
+async function requireScope(
+  scope: 'sources:read' | 'sources:write',
+  executionContext?: MainaCloudExecutionContext,
+): Promise<void> {
   try {
-    await requireMainaCloudScope(scope);
+    if (executionContext) {
+      await requireMainaCloudScope(scope, executionContext);
+    } else {
+      await requireMainaCloudScope(scope);
+    }
   } catch (cause) {
     throw safeError(cause);
   }
+}
+
+function requestJson(
+  path: string,
+  init: RequestInit,
+  executionContext?: MainaCloudExecutionContext,
+) {
+  return executionContext
+    ? mainaCloudRequestJson(path, init, { executionContext })
+    : mainaCloudRequestJson(path, init);
 }
 
 function sourceKeyPath(sourceKey: string): string {
@@ -106,12 +134,12 @@ export async function listMkcMeetingTags(
   boundary: RequestBoundary = {},
 ): Promise<MeetingTagDefinitionListV1> {
   requireEnabled(boundary.enabled);
-  await requireScope('sources:read');
+  await requireScope('sources:read', boundary.executionContext);
   try {
-    const response = await mainaCloudRequestJson('/v1/meeting-tags', {
+    const response = await requestJson('/v1/meeting-tags', {
       method: 'GET',
       signal: boundary.signal,
-    });
+    }, boundary.executionContext);
     return decodeMeetingTagDefinitions(response.data);
   } catch (cause) {
     throw safeError(cause);
@@ -124,12 +152,12 @@ export async function readMkcMeetingTagState(
 ): Promise<MeetingTagStateV1> {
   requireEnabled(boundary.enabled);
   const path = sourceKeyPath(sourceKey);
-  await requireScope('sources:read');
+  await requireScope('sources:read', boundary.executionContext);
   try {
-    const response = await mainaCloudRequestJson(path, {
+    const response = await requestJson(path, {
       method: 'GET',
       signal: boundary.signal,
-    });
+    }, boundary.executionContext);
     return decodeMeetingTagState(response.data, sourceKey);
   } catch (cause) {
     throw safeError(cause);
@@ -147,14 +175,14 @@ export async function mutateMkcMeetingTags(
   } catch (cause) {
     throw safeError(cause);
   }
-  await requireScope('sources:write');
+  await requireScope('sources:write', boundary.executionContext);
   try {
-    const response = await mainaCloudRequestJson('/v1/meeting-tags/mutations', {
+    const response = await requestJson('/v1/meeting-tags/mutations', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(request),
       signal: boundary.signal,
-    });
+    }, boundary.executionContext);
     return decodeMeetingTagMutationReceipt(response.data, request);
   } catch (cause) {
     throw safeError(cause);

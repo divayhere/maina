@@ -33,6 +33,12 @@ export type MainaCloudSession = {
   user: MainaCloudUser;
 };
 
+export type MainaCloudExecutionContext = Readonly<{
+  ownerUserId: string;
+  accessToken: string;
+  scopesVerifiedAt: number;
+}>;
+
 export class MainaCloudScopeError extends Error {
   constructor(
     readonly code: 'cloud_scope_unverified' | 'cloud_scope_repair_required',
@@ -40,6 +46,13 @@ export class MainaCloudScopeError extends Error {
   ) {
     super(message);
     this.name = 'MainaCloudScopeError';
+  }
+}
+
+export class MainaCloudSessionMismatchError extends Error {
+  constructor() {
+    super('The Maina Cloud session changed before the request could be sent.');
+    this.name = 'MainaCloudSessionMismatchError';
   }
 }
 
@@ -123,12 +136,10 @@ export async function saveMainaCloudSession(session: MainaCloudSession): Promise
   ]);
 }
 
-export async function clearMainaCloudSession(): Promise<void> {
-  const session = parseStoredSession(await SecureStore.getItemAsync(SESSION_KEY));
-  await SecureStore.deleteItemAsync(SESSION_KEY);
-  if (session?.user.userId) {
+async function clearOwnerMemoryCache(ownerUserId: string | null): Promise<void> {
+  if (ownerUserId) {
     try {
-      await clearMkcMemoryCacheForOwner(session.user.userId);
+      await clearMkcMemoryCacheForOwner(ownerUserId);
     } catch (cause) {
       // Token removal must never be rolled back by a disposable-cache failure.
       log.warn('maina-cloud-session', 'owner memory cache cleanup did not complete', {
@@ -138,10 +149,51 @@ export async function clearMainaCloudSession(): Promise<void> {
   }
 }
 
+export async function clearMainaCloudSession(): Promise<void> {
+  const session = parseStoredSession(await SecureStore.getItemAsync(SESSION_KEY));
+  await SecureStore.deleteItemAsync(SESSION_KEY);
+  await clearOwnerMemoryCache(session?.user.userId ?? null);
+}
+
+function sessionMatchesExecutionContext(
+  session: MainaCloudSession | null,
+  context: MainaCloudExecutionContext,
+): session is MainaCloudSession {
+  return session !== null
+    && session.user.userId === context.ownerUserId
+    && session.accessToken === context.accessToken
+    && session.scopesVerifiedAt === context.scopesVerifiedAt;
+}
+
+export function pinMainaCloudExecutionContext(
+  session: MainaCloudSession,
+): MainaCloudExecutionContext {
+  if (!session.scopesVerifiedAt) throw new MainaCloudSessionMismatchError();
+  return Object.freeze({
+    ownerUserId: session.user.userId,
+    accessToken: session.accessToken,
+    scopesVerifiedAt: session.scopesVerifiedAt,
+  });
+}
+
+async function clearMainaCloudSessionIfMatching(
+  context: MainaCloudExecutionContext,
+): Promise<void> {
+  const session = await getMainaCloudSession();
+  if (!sessionMatchesExecutionContext(session, context)) return;
+  // Delete immediately after the matching read; do not re-read through the
+  // generic clear path, which could observe and remove a replacement owner.
+  await SecureStore.deleteItemAsync(SESSION_KEY);
+  await clearOwnerMemoryCache(context.ownerUserId);
+}
+
 export async function mainaCloudRequestJson(
   path: string,
   init: RequestInit = {},
-  options?: { acceptHttpErrors?: boolean },
+  options?: {
+    acceptHttpErrors?: boolean;
+    executionContext?: MainaCloudExecutionContext;
+  },
 ): Promise<MainaCloudJsonResponse> {
   const session = await getMainaCloudSession();
   if (!session) {
@@ -151,6 +203,10 @@ export async function mainaCloudRequestJson(
       'cloud_session_missing',
       'auth',
     );
+  }
+  if (options?.executionContext
+    && !sessionMatchesExecutionContext(session, options.executionContext)) {
+    throw new MainaCloudSessionMismatchError();
   }
   const response = await requestMainaCloudJson({
     url: `${apiBaseUrl()}${path}`,
@@ -168,7 +224,11 @@ export async function mainaCloudRequestJson(
     if (response.status === 401) {
       // Preserve nothing but an opaque expired token; no local meeting state
       // is mutated here. The caller maps this to an auth-blocked cloud job.
-      await clearMainaCloudSession();
+      if (options?.executionContext) {
+        await clearMainaCloudSessionIfMatching(options.executionContext);
+      } else {
+        await clearMainaCloudSession();
+      }
     }
     log.warn('maina-cloud-session', 'authenticated cloud request was rejected', {
       status: response.status,
@@ -297,10 +357,25 @@ export function mainaCloudSessionHasScope(session: MainaCloudSession, scope: str
   return session.scopes.includes('*') || session.scopes.includes(scope);
 }
 
-export async function requireMainaCloudScope(scope: string): Promise<MainaCloudSession> {
+export async function requireMainaCloudScope(
+  scope: string,
+  executionContext?: MainaCloudExecutionContext,
+): Promise<MainaCloudSession> {
   const stored = await getMainaCloudSession();
   if (!stored) {
     throw new MainaCloudScopeError('cloud_scope_unverified', 'Connect Maina Cloud to use Memory.');
+  }
+  if (executionContext) {
+    if (!sessionMatchesExecutionContext(stored, executionContext)) {
+      throw new MainaCloudSessionMismatchError();
+    }
+    if (!stored.scopesVerifiedAt || !mainaCloudSessionHasScope(stored, scope)) {
+      throw new MainaCloudScopeError(
+        'cloud_scope_repair_required',
+        'Re-pair this phone in Settings to enable Memory. Your local meetings are safe.',
+      );
+    }
+    return stored;
   }
   if (stored.scopesVerifiedAt && mainaCloudSessionHasScope(stored, scope)) return stored;
 

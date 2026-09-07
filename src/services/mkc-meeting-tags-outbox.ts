@@ -6,14 +6,19 @@ import {
   failMeetingTagMutation,
   failMeetingTagMutationInTransaction,
   MeetingTagOutboxError,
-  reconcileMeetingTagConflict,
+  reconcileClaimedMeetingTagConflictInTransaction,
   type MeetingTagOutboxEntry,
   type MeetingTagOutboxFailureCode,
 } from '@/data/meetingTags';
 import { withDurableWakeTransaction } from '@/data/db';
 import { persistDeferredPipelineWakeInTransaction } from '@/data/pipelineWake';
 import { cloudRetryDelayMs } from '@/services/cloudRetryPolicy';
-import { MainaCloudScopeError, requireMainaCloudScope } from '@/services/mainaCloudSession';
+import {
+  MainaCloudScopeError,
+  pinMainaCloudExecutionContext,
+  requireMainaCloudScope,
+  type MainaCloudExecutionContext,
+} from '@/services/mainaCloudSession';
 import {
   listMkcMeetingTags,
   MkcMeetingTagsError,
@@ -51,10 +56,17 @@ function disabledError(): MkcMeetingTagsError {
   return new MkcMeetingTagsError('disabled', false, 'Meeting tags are not available in this build.');
 }
 
-async function requireWriteOwner(enabled: boolean | undefined): Promise<string> {
+async function requireWriteOwner(enabled: boolean | undefined): Promise<{
+  ownerUserId: string;
+  executionContext: MainaCloudExecutionContext;
+}> {
   if (!featureEnabled(enabled)) throw disabledError();
   try {
-    return (await requireMainaCloudScope('sources:write')).user.userId;
+    const session = await requireMainaCloudScope('sources:write');
+    return {
+      ownerUserId: session.user.userId,
+      executionContext: pinMainaCloudExecutionContext(session),
+    };
   } catch (cause) {
     if (cause instanceof MkcMeetingTagsError) throw cause;
     if (cause instanceof MainaCloudScopeError) {
@@ -79,7 +91,7 @@ export async function queueMkcMeetingTagMutation(input: {
   enabled?: boolean;
   now?: number;
 }): Promise<MeetingTagOutboxEntry> {
-  const ownerUserId = await requireWriteOwner(input.enabled);
+  const { ownerUserId } = await requireWriteOwner(input.enabled);
   const now = input.now ?? Date.now();
   const entry = await withDurableWakeTransaction(async (transaction) => {
     const queued = await enqueueMeetingTagMutationInTransaction(transaction, {
@@ -113,6 +125,9 @@ function classifyFailure(cause: unknown): {
   }
   if (error.kind === 'retryable') {
     return { state: 'retryable', failureCode: 'http_retryable', stopDrain: false };
+  }
+  if (error.kind === 'session_changed') {
+    return { state: 'retryable', failureCode: 'transport_retryable', stopDrain: true };
   }
   if (error.kind === 'auth') {
     return { state: 'terminal', failureCode: 'auth_required', stopDrain: true };
@@ -160,12 +175,15 @@ async function persistClaimFailure(
   return { outcome: 'terminal', stopDrain: classified.stopDrain };
 }
 
-async function refreshConflict(claimed: MeetingTagOutboxEntry): Promise<unknown> {
+async function refreshConflict(
+  claimed: MeetingTagOutboxEntry,
+  executionContext: MainaCloudExecutionContext,
+): Promise<unknown> {
   const operation = claimed.request.operation;
   if (operation.kind === 'create_definition' || operation.kind === 'rename_definition') {
-    return listMkcMeetingTags({ enabled: true });
+    return listMkcMeetingTags({ enabled: true, executionContext });
   }
-  return readMkcMeetingTagState(operation.source_key, { enabled: true });
+  return readMkcMeetingTagState(operation.source_key, { enabled: true, executionContext });
 }
 
 async function persistConflict(claimed: MeetingTagOutboxEntry, now: number): Promise<void> {
@@ -181,13 +199,14 @@ async function persistConflict(claimed: MeetingTagOutboxEntry, now: number): Pro
 
 async function processClaim(
   claimed: MeetingTagOutboxEntry,
+  executionContext: MainaCloudExecutionContext,
   checkpoint: () => Promise<void>,
   now: () => number,
 ): Promise<{ outcome: 'succeeded' | 'retryable' | 'reconciled' | 'conflicted' | 'terminal'; stopDrain: boolean }> {
   await checkpoint();
   let receipt: Awaited<ReturnType<typeof mutateMkcMeetingTags>>;
   try {
-    receipt = await mutateMkcMeetingTags(claimed.request, { enabled: true });
+    receipt = await mutateMkcMeetingTags(claimed.request, { enabled: true, executionContext });
   } catch (cause) {
     if (!(cause instanceof MkcMeetingTagsError) || cause.kind !== 'conflict') {
       await checkpoint();
@@ -197,7 +216,7 @@ async function processClaim(
     await checkpoint();
     let canonicalState: unknown;
     try {
-      canonicalState = await refreshConflict(claimed);
+      canonicalState = await refreshConflict(claimed, executionContext);
     } catch (refreshCause) {
       await checkpoint();
       if (refreshCause instanceof MkcMeetingTagsError && refreshCause.retryable) {
@@ -214,18 +233,22 @@ async function processClaim(
     }
 
     await checkpoint();
-    await persistConflict(claimed, now());
+    const reconcileAt = now();
     try {
-      await reconcileMeetingTagConflict({
-        ownerUserId: claimed.ownerUserId,
-        idempotencyKey: claimed.idempotencyKey,
-        canonicalState,
-        now: now(),
-      });
+      await withDurableWakeTransaction((transaction) => (
+        reconcileClaimedMeetingTagConflictInTransaction(transaction, {
+          ownerUserId: claimed.ownerUserId,
+          idempotencyKey: claimed.idempotencyKey,
+          leaseToken: claimed.leaseToken!,
+          canonicalState,
+          now: reconcileAt,
+        })
+      ));
       return { outcome: 'reconciled', stopDrain: false };
     } catch (reconcileCause) {
       if (reconcileCause instanceof MeetingTagOutboxError
         && reconcileCause.reason === 'canonical_refresh_required') {
+        await persistConflict(claimed, reconcileAt);
         return { outcome: 'conflicted', stopDrain: false };
       }
       throw reconcileCause;
@@ -258,8 +281,9 @@ export async function reconcilePendingMkcMeetingTagMutations(
   if (!featureEnabled(options.enabled)) return { disposition: 'disabled', ...empty };
 
   let ownerUserId: string;
+  let executionContext: MainaCloudExecutionContext;
   try {
-    ownerUserId = await requireWriteOwner(true);
+    ({ ownerUserId, executionContext } = await requireWriteOwner(true));
   } catch (cause) {
     if (cause instanceof MkcMeetingTagsError && cause.kind === 'auth') {
       return { disposition: 'no_session', ...empty };
@@ -294,7 +318,7 @@ export async function reconcilePendingMkcMeetingTagMutations(
     ));
     if (!claimed) break;
     result.attempted += 1;
-    const processed = await processClaim(claimed, checkpoint, now);
+    const processed = await processClaim(claimed, executionContext, checkpoint, now);
     result[processed.outcome] += 1;
     if (processed.stopDrain) break;
   }

@@ -301,8 +301,16 @@ async function earliestCanonicalPipelineDue(
       END AS due_at
       FROM knowledge_cloud_corrections
       WHERE sync_status IN ('sync_queued', 'syncing', 'sync_failed_retryable', 'sync_blocked_budget')
+      UNION ALL
+      SELECT CASE
+        WHEN state = 'queued' THEN ?
+        WHEN state = 'running' THEN lease_until
+        ELSE next_attempt_at
+      END AS due_at
+      FROM meeting_tag_outbox
+      WHERE state IN ('queued', 'running', 'retryable')
     ) WHERE due_at IS NOT NULL`,
-    [now, now, now],
+    [now, now, now, now],
   );
   return row?.due_at ?? null;
 }
