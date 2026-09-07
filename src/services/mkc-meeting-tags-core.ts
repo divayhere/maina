@@ -271,11 +271,17 @@ export function decodeMeetingTagMutationReceipt(
 ): MeetingTagMutationReceiptV1 {
   const decoded = decode<MeetingTagMutationReceiptV1>(MKC_MEETING_TAG_SCHEMAS.MeetingTagMutationReceiptV1, value);
   const assignmentOperation = decoded.operation === 'assign' || decoded.operation === 'remove';
-  const assignmentFieldsPresent = decoded.meeting_id !== null
-    && decoded.meeting_revision !== null
-    && decoded.assignment_revision !== null
-    && decoded.assignment_state !== null;
-  if (assignmentOperation !== assignmentFieldsPresent) fail('$.operation', 'assignment field presence mismatch');
+  const assignmentFields = [
+    decoded.meeting_id,
+    decoded.meeting_revision,
+    decoded.assignment_revision,
+    decoded.assignment_state,
+  ];
+  const everyAssignmentFieldPresent = assignmentFields.every((field) => field !== null);
+  const everyAssignmentFieldAbsent = assignmentFields.every((field) => field === null);
+  if (assignmentOperation ? !everyAssignmentFieldPresent : !everyAssignmentFieldAbsent) {
+    fail('$.operation', 'assignment field presence mismatch');
+  }
   if (decoded.operation === 'assign' && decoded.assignment_state !== 'active') fail('$.assignment_state', 'assign must be active');
   if (decoded.operation === 'remove' && decoded.assignment_state !== 'removed') fail('$.assignment_state', 'remove must be removed');
   if (request) {
@@ -284,6 +290,28 @@ export function decodeMeetingTagMutationReceipt(
     if ('tag_id' in request.operation && decoded.tag_id !== request.operation.tag_id) fail('$.tag_id', 'request tag identity mismatch');
     if ('meeting_id' in request.operation && decoded.meeting_id !== request.operation.meeting_id) {
       fail('$.meeting_id', 'request meeting identity mismatch');
+    }
+    const appliedDelta = decoded.outcome === 'applied' ? 1 : 0;
+    if (request.operation.kind === 'create_definition') {
+      if (decoded.outcome !== 'applied' || decoded.tag_revision !== 1) {
+        fail('$.tag_revision', 'create must apply at definition revision 1');
+      }
+    } else if (request.operation.kind === 'rename_definition') {
+      if (decoded.tag_revision !== request.operation.expected_tag_revision + appliedDelta) {
+        fail('$.tag_revision', 'rename revision transition mismatch');
+      }
+    } else {
+      if (decoded.meeting_revision !== request.operation.expected_meeting_revision + appliedDelta) {
+        fail('$.meeting_revision', 'meeting revision transition mismatch');
+      }
+      const expectedAssignmentRevision = request.operation.expected_assignment_revision;
+      if (expectedAssignmentRevision === null) {
+        if (decoded.outcome !== 'applied' || decoded.assignment_revision !== 1) {
+          fail('$.assignment_revision', 'first assignment must apply at revision 1');
+        }
+      } else if (decoded.assignment_revision !== expectedAssignmentRevision + appliedDelta) {
+        fail('$.assignment_revision', 'assignment revision transition mismatch');
+      }
     }
   }
   return decoded;

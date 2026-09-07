@@ -67,24 +67,21 @@ function safeError(cause: unknown): MkcMeetingTagsError {
   if (!(cause instanceof MainaCloudApiError)) {
     return new MkcMeetingTagsError('offline', true, 'Meeting tags will be available when Maina Cloud reconnects.');
   }
-  const code = cause.code ?? '';
   if (cause.status === 401) return new MkcMeetingTagsError('auth', false, 'Reconnect Maina Cloud to use meeting tags.');
   if (cause.status === 403) return new MkcMeetingTagsError('forbidden', false, 'This phone cannot access meeting tags.');
-  if (cause.status === 404 || code === 'meeting_tag_not_found') {
+  if (cause.status === 404) {
     return new MkcMeetingTagsError('not_found', false, 'This meeting tag is not available.');
   }
-  if (cause.status === 409 || code === 'meeting_tag_label_conflict'
-    || code === 'meeting_tag_revision_conflict' || code === 'meeting_tag_idempotency_conflict') {
+  if (cause.status === 409) {
     return new MkcMeetingTagsError('conflict', false, 'Meeting tags changed elsewhere. Refresh and try again.');
   }
-  if (cause.status === 422 || code === 'meeting_tag_label_invalid') {
+  if (cause.status === 422) {
     return new MkcMeetingTagsError('invalid', false, 'This meeting-tag change is not valid.');
   }
   if (cause.status === 0) {
     return new MkcMeetingTagsError('offline', true, 'Meeting tags will be available when Maina Cloud reconnects.');
   }
-  if (cause.status === 429 || cause.status >= 500
-    || code === 'meeting_tag_mutation_unavailable' || code === 'meeting_tag_read_unavailable') {
+  if (cause.status === 429 || cause.status >= 500) {
     return new MkcMeetingTagsError('retryable', true, 'Meeting tags are temporarily unavailable.');
   }
   return new MkcMeetingTagsError('protocol', false, 'Maina could not complete the meeting-tag request safely.');
