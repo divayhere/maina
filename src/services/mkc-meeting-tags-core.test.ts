@@ -55,6 +55,16 @@ describe('MKC manual meeting-tag contract boundary', () => {
     })).toThrow(/canonical order/);
   });
 
+  it('rejects two canonically ordered definitions that reuse one stable tag ID', () => {
+    expect(() => decodeMeetingTagDefinitions({
+      ...definitionList,
+      definitions: [
+        example.definitions[0],
+        { ...example.definitions[1], tag_id: example.definitions[0].tag_id },
+      ],
+    })).toThrow(/duplicate stable tag ID/);
+  });
+
   it('normalizes exact labels and builds a deduplicated AND-by-default filter', () => {
     expect(normalizeMeetingTagLabel('  Customer\tResearch  ')).toEqual({
       display_label: 'Customer Research',
@@ -71,6 +81,15 @@ describe('MKC manual meeting-tag contract boundary', () => {
         { kind: 'label', display_label: 'Dubai', normalized_value: 'dubai' },
       ],
     });
+  });
+
+  it('matches Backend first-wins behavior for mixed-case and NFKC-equivalent labels', () => {
+    expect(buildMeetingTagFilter({ labels: ['Dubai', 'DUBAI'] })?.refs).toEqual([
+      { kind: 'label', display_label: 'Dubai', normalized_value: 'dubai' },
+    ]);
+    expect(buildMeetingTagFilter({ labels: ['ＤＵＢＡＩ', 'Dubai'] })?.refs).toEqual([
+      { kind: 'label', display_label: 'DUBAI', normalized_value: 'dubai' },
+    ]);
   });
 
   it('fails closed for invalid filter cardinality, IDs, and bidi controls', () => {
