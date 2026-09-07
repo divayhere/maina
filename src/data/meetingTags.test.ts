@@ -10,6 +10,7 @@ import {
 import {
   claimNextMeetingTagMutationInTransaction,
   completeMeetingTagMutationInTransaction,
+  countClaimableMeetingTagMutationsInTransaction,
   enqueueMeetingTagMutationInTransaction,
   failMeetingTagMutationInTransaction,
   MeetingTagOutboxError,
@@ -27,6 +28,18 @@ class MemoryMeetingTagTransaction {
 
   async getFirstAsync<T>(sql: string, params: unknown[] = []): Promise<T | null> {
     const rows = [...this.rows.values()];
+    if (sql.includes('COUNT(*) AS claimable_count')) {
+      const ownerId = String(params[0]);
+      const now = Number(params[1]);
+      return ({
+        claimable_count: rows
+          .filter((row) => row.owner_user_id === ownerId)
+          .filter((row) => row.state === 'queued'
+            || (row.state === 'retryable' && Number(row.next_attempt_at) <= now)
+            || (row.state === 'running' && Number(row.lease_until) <= now))
+          .length,
+      } as T);
+    }
     if (sql.includes('WHERE idempotency_key = ?')) {
       return (this.rows.get(String(params[0])) ?? null) as T | null;
     }
@@ -363,6 +376,47 @@ describe('meeting-tag durable outbox', () => {
       leaseMs: 1_000,
     });
     expect(reclaimed).toMatchObject({ state: 'running', attemptCount: 2, leaseToken: 'lease:second' });
+  });
+
+  it('snapshots only rows claimable for the exact owner and due time', async () => {
+    const memory = new MemoryMeetingTagTransaction();
+    await enqueueRemove(memory, 'mobile-outbox:remove:due');
+    await enqueueMeetingTagMutationInTransaction(transaction(memory), {
+      ownerUserId: 'owner:other',
+      request: requestWithKey('mobile-outbox:remove:other'),
+      now: 101,
+    });
+    await enqueueMeetingTagMutationInTransaction(transaction(memory), {
+      ownerUserId: owner,
+      request: requestWithKey('mobile-outbox:create:future', {
+        kind: 'create_definition',
+        display_label: 'Future',
+      }),
+      now: 102,
+    });
+    await claimNextMeetingTagMutationInTransaction(transaction(memory), {
+      ownerUserId: owner,
+      leaseToken: 'lease:future',
+      now: 103,
+      leaseMs: 1_000,
+    });
+    await failMeetingTagMutationInTransaction(transaction(memory), {
+      ownerUserId: owner,
+      idempotencyKey: 'mobile-outbox:remove:due',
+      leaseToken: 'lease:future',
+      state: 'retryable',
+      failureCode: 'offline',
+      nextAttemptAt: 2_000,
+      now: 104,
+    });
+    expect(await countClaimableMeetingTagMutationsInTransaction(transaction(memory), {
+      ownerUserId: owner,
+      now: 1_999,
+    })).toBe(1);
+    expect(await countClaimableMeetingTagMutationsInTransaction(transaction(memory), {
+      ownerUserId: owner,
+      now: 2_000,
+    })).toBe(2);
   });
 
   it('validates the exact request-bound receipt before committing success', async () => {

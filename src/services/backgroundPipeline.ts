@@ -8,6 +8,7 @@ import { enforceAudioRetentionPolicy } from '@/services/audioRetention';
 import { log } from '@/services/logger';
 import { reconcilePendingMainaKnowledgeCloudSyncs } from '@/services/mainaKnowledgeCloud';
 import { reconcilePendingMainaKnowledgeCloudCorrections } from '@/services/mainaKnowledgeCloudCorrections';
+import { reconcilePendingMkcMeetingTagMutations } from '@/services/mkc-meeting-tags-outbox';
 import { reconcilePendingNativeMeetingWork } from '@/services/meetingCaptureLifecycle';
 import { reconcileAutoSummaryEligibility, reconcilePendingMeetingPackets } from '@/services/meetingPacket';
 import { flushDiagnostics, getMeetingsWithDeletedAudio } from '@/services/remoteLog';
@@ -41,6 +42,7 @@ async function performPipelineRecoveryCycle(assertActive?: () => Promise<void>):
     reconcilePendingMeetingPackets,
     reconcilePendingMainaKnowledgeCloudSyncs,
     reconcilePendingMainaKnowledgeCloudCorrections,
+    reconcilePendingMkcMeetingTagMutations: () => reconcilePendingMkcMeetingTagMutations({ assertActive }),
     flushDiagnostics,
   });
 }

@@ -3,6 +3,7 @@ export type PipelineRecoveryResult = {
   pendingPackets: number;
   eligiblePackets: number;
   repairedReferences: number;
+  meetingTagMutations: number;
 };
 
 export type PipelineRecoveryDependencies = {
@@ -17,6 +18,7 @@ export type PipelineRecoveryDependencies = {
   reconcilePendingMeetingPackets(): Promise<number>;
   reconcilePendingMainaKnowledgeCloudSyncs(): Promise<unknown>;
   reconcilePendingMainaKnowledgeCloudCorrections(): Promise<unknown>;
+  reconcilePendingMkcMeetingTagMutations(): Promise<{ attempted: number }>;
   flushDiagnostics(): Promise<unknown>;
 };
 
@@ -48,8 +50,10 @@ export async function executePipelineRecovery(
   await checkpoint();
   await dependencies.reconcilePendingMainaKnowledgeCloudCorrections();
   await checkpoint();
+  const meetingTagMutations = (await dependencies.reconcilePendingMkcMeetingTagMutations()).attempted;
+  await checkpoint();
   await dependencies.flushDiagnostics().catch(() => {});
-  return { nativeMeetings, pendingPackets, eligiblePackets, repairedReferences };
+  return { nativeMeetings, pendingPackets, eligiblePackets, repairedReferences, meetingTagMutations };
 }
 
 /** Coalesces concurrent foreground/network/Worker signals into one drain. */

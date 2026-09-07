@@ -19,6 +19,7 @@ function dependencies(events: string[]): PipelineRecoveryDependencies {
     reconcilePendingMeetingPackets: step('notes-poll', 2),
     reconcilePendingMainaKnowledgeCloudSyncs: step('source-sync', undefined),
     reconcilePendingMainaKnowledgeCloudCorrections: step('corrections', undefined),
+    reconcilePendingMkcMeetingTagMutations: step('meeting-tags', { attempted: 1 }),
     flushDiagnostics: step('diagnostics', undefined),
   };
 }
@@ -29,9 +30,16 @@ describe('unattended pipeline recovery', () => {
     const result = await executePipelineRecovery(dependencies(events));
     expect(events).toEqual([
       'db', 'paths', 'deleted-audio', 'mark-audio', 'asr', 'retention',
-      'notes-eligible', 'notes-poll', 'source-sync', 'corrections', 'diagnostics',
+      'notes-eligible', 'notes-poll', 'source-sync', 'corrections', 'meeting-tags',
+      'diagnostics',
     ]);
-    expect(result).toEqual({ nativeMeetings: 1, pendingPackets: 2, eligiblePackets: 3, repairedReferences: 2 });
+    expect(result).toEqual({
+      nativeMeetings: 1,
+      pendingPackets: 2,
+      eligiblePackets: 3,
+      repairedReferences: 2,
+      meetingTagMutations: 1,
+    });
   });
 
   it('does not advance to notes when local ASR recovery fails', async () => {
