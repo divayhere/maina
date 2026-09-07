@@ -27,6 +27,7 @@ import {
   getMainaCloudConnection,
   getMainaCloudSession,
   mainaCloudRequestJson,
+  pinMainaCloudExecutionContext,
   requireMainaCloudScope,
   saveMainaCloudSession,
 } from './mainaCloudSession';
@@ -143,6 +144,56 @@ describe('mainaCloudSession', () => {
       name: 'MainaCloudApiError', status: 403, code: 'auth_forbidden', failureClass: 'auth',
     } satisfies Partial<MainaCloudApiError>));
     expect(await getMainaCloudSession()).toEqual(validSession);
+  });
+
+  it('rejects a pinned owner-session switch before transport', async () => {
+    const ownerA = {
+      ...validSession,
+      accessToken: 'token-a',
+      scopes: ['sources:read', 'sources:write'],
+      user: { ...validSession.user, userId: 'owner-a' },
+    };
+    const ownerB = {
+      ...validSession,
+      accessToken: 'token-b',
+      scopes: ['sources:read', 'sources:write'],
+      user: { ...validSession.user, userId: 'owner-b' },
+    };
+    await saveMainaCloudSession(ownerA);
+    const executionContext = pinMainaCloudExecutionContext(ownerA);
+    await saveMainaCloudSession(ownerB);
+
+    await expect(requireMainaCloudScope('sources:write', executionContext))
+      .rejects.toMatchObject({ name: 'MainaCloudSessionMismatchError' });
+    await expect(mainaCloudRequestJson('/v1/meeting-tags/mutations', {}, { executionContext }))
+      .rejects.toMatchObject({ name: 'MainaCloudSessionMismatchError' });
+    expect(mocks.fetch).not.toHaveBeenCalled();
+    expect(await getMainaCloudSession()).toEqual(ownerB);
+  });
+
+  it('does not clear a replacement owner when the pinned request receives 401', async () => {
+    const ownerA = {
+      ...validSession,
+      accessToken: 'token-a',
+      scopes: ['sources:write'],
+      user: { ...validSession.user, userId: 'owner-a' },
+    };
+    const ownerB = {
+      ...validSession,
+      accessToken: 'token-b',
+      scopes: ['sources:write'],
+      user: { ...validSession.user, userId: 'owner-b' },
+    };
+    await saveMainaCloudSession(ownerA);
+    const executionContext = pinMainaCloudExecutionContext(ownerA);
+    mocks.fetch.mockImplementationOnce(async () => {
+      await saveMainaCloudSession(ownerB);
+      return new Response(JSON.stringify({ error: { code: 'auth_invalid' } }), { status: 401 });
+    });
+
+    await expect(mainaCloudRequestJson('/v1/meeting-tags/mutations', {}, { executionContext }))
+      .rejects.toMatchObject({ status: 401 });
+    expect(await getMainaCloudSession()).toEqual(ownerB);
   });
 
   it('uses auth/me as the authority for recall read access and reports legacy sessions truthfully', async () => {

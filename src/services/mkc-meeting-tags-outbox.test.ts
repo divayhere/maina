@@ -12,7 +12,7 @@ const mocks = vi.hoisted(() => ({
   complete: vi.fn(),
   fail: vi.fn(),
   failInTransaction: vi.fn(),
-  reconcile: vi.fn(),
+  reconcileClaimed: vi.fn(),
   deferredWake: vi.fn(),
   repairSchedule: vi.fn(),
   requireScope: vi.fn(),
@@ -32,8 +32,14 @@ vi.mock('@/services/pipelineWakeScheduler', () => ({
 }));
 vi.mock('@/services/mainaCloudSession', () => ({
   MainaCloudApiError: class MainaCloudApiError extends Error {},
+  MainaCloudSessionMismatchError: class MainaCloudSessionMismatchError extends Error {},
   MainaCloudScopeError: class MainaCloudScopeError extends Error {},
   mainaCloudRequestJson: vi.fn(),
+  pinMainaCloudExecutionContext: (session: { user: { userId: string }; accessToken: string; scopesVerifiedAt: number }) => ({
+    ownerUserId: session.user.userId,
+    accessToken: session.accessToken,
+    scopesVerifiedAt: session.scopesVerifiedAt,
+  }),
   requireMainaCloudScope: mocks.requireScope,
 }));
 vi.mock('@/services/mkc-memory-flags', () => ({
@@ -47,7 +53,7 @@ vi.mock('@/data/meetingTags', async (importOriginal) => ({
   completeMeetingTagMutation: mocks.complete,
   failMeetingTagMutation: mocks.fail,
   failMeetingTagMutationInTransaction: mocks.failInTransaction,
-  reconcileMeetingTagConflict: mocks.reconcile,
+  reconcileClaimedMeetingTagConflictInTransaction: mocks.reconcileClaimed,
 }));
 vi.mock('@/services/mkc-meeting-tags', async (importOriginal) => ({
   ...await importOriginal<typeof import('@/services/mkc-meeting-tags')>(),
@@ -64,6 +70,11 @@ import {
 } from './mkc-meeting-tags-outbox';
 
 const ownerUserId = 'owner:tags:test';
+const executionContext = {
+  ownerUserId,
+  accessToken: 'owner-token',
+  scopesVerifiedAt: 100,
+} as const;
 const claimed = {
   idempotencyKey: example.remove_request.idempotency_key,
   ownerUserId,
@@ -94,13 +105,17 @@ describe('meeting-tag outbox recovery owner', () => {
     mocks.withTransaction.mockImplementation(async (task: (transaction: typeof mocks.transaction) => unknown) => (
       task(mocks.transaction)
     ));
-    mocks.requireScope.mockResolvedValue({ user: { userId: ownerUserId } });
+    mocks.requireScope.mockResolvedValue({
+      user: { userId: ownerUserId },
+      accessToken: executionContext.accessToken,
+      scopesVerifiedAt: executionContext.scopesVerifiedAt,
+    });
     mocks.count.mockResolvedValue(0);
     mocks.claim.mockResolvedValue(null);
     mocks.complete.mockResolvedValue({});
     mocks.fail.mockResolvedValue({});
     mocks.failInTransaction.mockResolvedValue({});
-    mocks.reconcile.mockResolvedValue({});
+    mocks.reconcileClaimed.mockResolvedValue({});
     mocks.deferredWake.mockResolvedValue({});
     mocks.repairSchedule.mockResolvedValue({ generation: 1, scheduled: true });
   });
@@ -172,7 +187,10 @@ describe('meeting-tag outbox recovery owner', () => {
     expect(mocks.count).toHaveBeenCalledOnce();
     expect(mocks.claim).toHaveBeenCalledOnce();
     expect(mocks.mutate).toHaveBeenCalledTimes(1);
-    expect(mocks.mutate).toHaveBeenCalledWith(example.remove_request, { enabled: true });
+    expect(mocks.mutate).toHaveBeenCalledWith(example.remove_request, {
+      enabled: true,
+      executionContext,
+    });
     expect(mocks.complete).toHaveBeenCalledWith(expect.objectContaining({
       idempotencyKey: claimed.idempotencyKey,
       leaseToken: claimed.leaseToken,
@@ -205,6 +223,30 @@ describe('meeting-tag outbox recovery owner', () => {
     expect(mocks.claim).toHaveBeenCalledOnce();
   });
 
+  it('requeues and stops when the verified owner session changes before transport', async () => {
+    mocks.count.mockResolvedValue(2);
+    mocks.claim.mockResolvedValueOnce(claimed);
+    mocks.mutate.mockRejectedValue(new MkcMeetingTagsError(
+      'session_changed',
+      true,
+      'sanitized',
+    ));
+    const result = await reconcilePendingMkcMeetingTagMutations({
+      enabled: true,
+      now: clock(1_000),
+      leaseToken: () => claimed.leaseToken,
+    });
+    expect(result).toMatchObject({ claimBudget: 2, attempted: 1, retryable: 1 });
+    expect(mocks.mutate).toHaveBeenCalledWith(claimed.request, {
+      enabled: true,
+      executionContext,
+    });
+    expect(mocks.failInTransaction).toHaveBeenCalledWith(mocks.transaction, expect.objectContaining({
+      state: 'retryable', failureCode: 'transport_retryable',
+    }));
+    expect(mocks.claim).toHaveBeenCalledOnce();
+  });
+
   it('uses one canonical meeting read after a conflict and durably reconciles before continuing', async () => {
     mocks.count.mockResolvedValue(1);
     mocks.claim.mockResolvedValueOnce(claimed);
@@ -218,12 +260,15 @@ describe('meeting-tag outbox recovery owner', () => {
     expect(result).toMatchObject({ attempted: 1, reconciled: 1 });
     expect(mocks.mutate).toHaveBeenCalledOnce();
     expect(mocks.read).toHaveBeenCalledTimes(1);
+    expect(mocks.read).toHaveBeenCalledWith(example.remove_request.operation.source_key, {
+      enabled: true,
+      executionContext,
+    });
     expect(mocks.list).not.toHaveBeenCalled();
-    expect(mocks.fail).toHaveBeenCalledWith(expect.objectContaining({
-      state: 'conflict', failureCode: 'revision_conflict',
-    }));
-    expect(mocks.reconcile).toHaveBeenCalledWith(expect.objectContaining({
+    expect(mocks.fail).not.toHaveBeenCalled();
+    expect(mocks.reconcileClaimed).toHaveBeenCalledWith(mocks.transaction, expect.objectContaining({
       canonicalState: example.meeting_tag_state,
+      leaseToken: claimed.leaseToken,
     }));
   });
 
@@ -250,6 +295,7 @@ describe('meeting-tag outbox recovery owner', () => {
       leaseToken: () => definitionClaim.leaseToken,
     });
     expect(mocks.list).toHaveBeenCalledTimes(1);
+    expect(mocks.list).toHaveBeenCalledWith({ enabled: true, executionContext });
     expect(mocks.read).not.toHaveBeenCalled();
     expect(mocks.mutate).toHaveBeenCalledTimes(1);
   });
@@ -269,7 +315,28 @@ describe('meeting-tag outbox recovery owner', () => {
       state: 'retryable', failureCode: 'http_retryable',
     }));
     expect(mocks.fail).not.toHaveBeenCalled();
-    expect(mocks.reconcile).not.toHaveBeenCalled();
+    expect(mocks.reconcileClaimed).not.toHaveBeenCalled();
+  });
+
+  it('stops the drain if the owner session changes before the 409 refresh request', async () => {
+    mocks.count.mockResolvedValue(2);
+    mocks.claim.mockResolvedValueOnce(claimed);
+    mocks.mutate.mockRejectedValue(new MkcMeetingTagsError('conflict', false, 'sanitized'));
+    mocks.read.mockRejectedValue(new MkcMeetingTagsError('session_changed', true, 'sanitized'));
+    const result = await reconcilePendingMkcMeetingTagMutations({
+      enabled: true,
+      now: clock(),
+      leaseToken: () => claimed.leaseToken,
+    });
+    expect(result).toMatchObject({ claimBudget: 2, attempted: 1, retryable: 1 });
+    expect(mocks.read).toHaveBeenCalledWith(example.remove_request.operation.source_key, {
+      enabled: true,
+      executionContext,
+    });
+    expect(mocks.failInTransaction).toHaveBeenCalledWith(mocks.transaction, expect.objectContaining({
+      state: 'retryable', failureCode: 'transport_retryable',
+    }));
+    expect(mocks.claim).toHaveBeenCalledOnce();
   });
 
   it('keeps a verified conflict blocking when canonical refresh is invalid', async () => {
@@ -286,7 +353,7 @@ describe('meeting-tag outbox recovery owner', () => {
     expect(mocks.fail).toHaveBeenCalledWith(expect.objectContaining({
       state: 'conflict', failureCode: 'revision_conflict',
     }));
-    expect(mocks.reconcile).not.toHaveBeenCalled();
+    expect(mocks.reconcileClaimed).not.toHaveBeenCalled();
   });
 
   it('keeps pipeline-lease loss outside transport classification and leaves the claim replayable', async () => {
@@ -351,7 +418,7 @@ describe('meeting-tag outbox recovery owner', () => {
     mocks.claim.mockResolvedValueOnce(claimed);
     mocks.mutate.mockRejectedValue(new MkcMeetingTagsError('conflict', false, 'sanitized'));
     mocks.read.mockResolvedValue(example.meeting_tag_state);
-    mocks.reconcile.mockRejectedValue(new MeetingTagOutboxError('canonical_refresh_required'));
+    mocks.reconcileClaimed.mockRejectedValue(new MeetingTagOutboxError('canonical_refresh_required'));
     const result = await reconcilePendingMkcMeetingTagMutations({
       enabled: true,
       now: clock(),
@@ -359,5 +426,24 @@ describe('meeting-tag outbox recovery owner', () => {
     });
     expect(result).toMatchObject({ attempted: 1, conflicted: 1, reconciled: 0 });
     expect(mocks.fail).toHaveBeenCalledOnce();
+  });
+
+  it('keeps both valid-conflict transitions inside one transaction and propagates an injected fault', async () => {
+    mocks.count.mockResolvedValue(1);
+    mocks.claim.mockResolvedValueOnce(claimed);
+    mocks.mutate.mockRejectedValue(new MkcMeetingTagsError('conflict', false, 'sanitized'));
+    mocks.read.mockResolvedValue(example.meeting_tag_state);
+    mocks.reconcileClaimed.mockImplementationOnce(async (transaction: unknown) => {
+      expect(transaction).toBe(mocks.transaction);
+      throw new Error('fault-between-conflict-transitions');
+    });
+
+    await expect(reconcilePendingMkcMeetingTagMutations({
+      enabled: true,
+      now: clock(),
+      leaseToken: () => claimed.leaseToken,
+    })).rejects.toThrow('fault-between-conflict-transitions');
+    expect(mocks.withTransaction).toHaveBeenCalledTimes(3);
+    expect(mocks.fail).not.toHaveBeenCalled();
   });
 });

@@ -448,6 +448,49 @@ export async function reconcileMeetingTagConflictInTransaction(
   return decodeRow(reconciled);
 }
 
+/**
+ * Validate a canonical conflict refresh before mutating the claimed row, then
+ * preserve running -> conflict -> reconciled as one caller-owned transaction.
+ * A fault between the two logical transitions therefore rolls both back.
+ */
+export async function reconcileClaimedMeetingTagConflictInTransaction(
+  transaction: MeetingTagTransaction,
+  input: {
+    ownerUserId: string;
+    idempotencyKey: string;
+    leaseToken: string;
+    canonicalState: unknown;
+    now: number;
+  },
+): Promise<MeetingTagOutboxEntry> {
+  const ownerUserId = assertOwner(input.ownerUserId);
+  const leaseToken = assertLease(input.leaseToken);
+  const now = assertClock(input.now);
+  const row = await findByKey(transaction, input.idempotencyKey);
+  if (!row || row.owner_user_id !== ownerUserId
+    || row.state !== 'running' || row.lease_token !== leaseToken) reject('claim_lost');
+  const entry = decodeRow(row);
+  if (now < entry.updatedAt) reject('invalid_clock');
+
+  // This must run before the first UPDATE. Invalid canonical evidence is
+  // intentionally handled by the service as a separately committed conflict.
+  validateConflictReconciliation(entry.request, input.canonicalState);
+  await failMeetingTagMutationInTransaction(transaction, {
+    ownerUserId,
+    idempotencyKey: input.idempotencyKey,
+    leaseToken,
+    state: 'conflict',
+    failureCode: 'revision_conflict',
+    now,
+  });
+  return reconcileMeetingTagConflictInTransaction(transaction, {
+    ownerUserId,
+    idempotencyKey: input.idempotencyKey,
+    canonicalState: input.canonicalState,
+    now,
+  });
+}
+
 export async function reconcileMeetingTagConflict(input: {
   ownerUserId: string;
   idempotencyKey: string;
