@@ -16,7 +16,7 @@ import {
 } from './lib/release-provenance-core.mjs';
 
 const root = path.resolve(import.meta.dirname, '..');
-const planPath = path.join(root, 'release/m3-m4-0.10.57-candidate-plan.json');
+const planPath = path.join(root, 'release/m3-m4-0.10.58-candidate-plan.json');
 const plan = JSON.parse(readFileSync(planPath, 'utf8'));
 const planSha256 = sha256File(planPath);
 const temporary = mkdtempSync(path.join(tmpdir(), 'maina-release-provenance-'));
@@ -122,7 +122,7 @@ function approveCandidate(candidate, mutateEnvelope = null) {
   const directive = 'Owner authorizes this exact local staging release for preserving-data installs and automated qualification on Android and iOS.';
   const envelope = {
     schemaVersion: 'maina.owner-release-authorization.v1',
-    authorizationId: 'maina-0.10.57-owner-direct-test',
+    authorizationId: 'maina-0.10.58-owner-direct-test',
     authorizedBy: 'owner-direct',
     sourceThreadId: '01a048c0-82f8-7183-ac1b-0c9cdad6f2d4',
     directive,
