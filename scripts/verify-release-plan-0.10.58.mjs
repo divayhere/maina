@@ -62,7 +62,7 @@ assert.equal(manifest.version, plan.release.version);
 assert.equal(lock.version, plan.release.version);
 assert.equal(lock.packages[''].version, plan.release.version);
 assert.match(source('android/app/build.gradle'), /versionCode 84/);
-assert.match(source('android/app/build.gradle'), /versionName "0\.10\.57"/);
+assert.match(source('android/app/build.gradle'), /versionName "0\.10\.58"/);
 
 assert.deepEqual(plan.featureFlagDefaults, {
   mobileMemorySurfaceV1: false,
@@ -253,6 +253,6 @@ for (const relative of [
 }
 assert.match(source('scripts/build-android-release-candidate.sh'), /Maina-0\.10\.58-84\.apk/);
 assert.equal((source('scripts/build-android-release-candidate.sh').match(/verify-generated-native-release-metadata\.mjs android/g) ?? []).length, 2);
-assert.match(manifest.scripts['verify:release-plan-candidate'], /verify-release-plan-0\.10\.57\.mjs/);
+assert.match(manifest.scripts['verify:release-plan-candidate'], /verify-release-plan-0\.10\.58\.mjs/);
 assert.match(manifest.scripts['verify:release-plan-candidate'], /verify-generated-native-release-metadata\.synthetic\.mjs/);
 console.log('0.10.58 paired reliability and default-off meeting-tag candidate identity, frozen 0.10.57 evidence, defaults, exact source pins, call-interruption policy, and native terminal safety verified.');
