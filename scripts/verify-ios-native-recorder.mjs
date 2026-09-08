@@ -5,6 +5,8 @@ import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
+import { validateNativeResult } from '../coordination/scripts/verify-native-post-processing-contract.mjs';
+
 const project = path.resolve(import.meta.dirname, '..');
 const moduleRoot = path.join(project, 'modules', 'maina-recorder');
 const capture = path.join(moduleRoot, 'ios', 'MainaIOSNativeAudioCapture.swift');
@@ -19,14 +21,17 @@ const callRecoveryPolicyTests = path.join(project, 'scripts', 'fixtures', 'Maina
 const pipelineWake = path.join(moduleRoot, 'ios', 'MainaIOSPipelineWake.swift');
 const pipelineWakePolicy = path.join(moduleRoot, 'ios', 'MainaIOSPipelineWakePolicy.swift');
 const pipelineWakePolicyTests = path.join(project, 'scripts', 'fixtures', 'MainaIOSPipelineWakePolicyTests.swift');
+const nativePostProcessingStore = path.join(moduleRoot, 'ios', 'MainaNativePostProcessingStore.swift');
+const nativePostProcessingTests = path.join(project, 'scripts', 'fixtures', 'MainaIOSNativePostProcessingTests.swift');
 const continuedProcessingPlugin = path.join(project, 'plugins', 'withMainaIOSContinuedProcessing.js');
 const sherpaHeaders = path.join(moduleRoot, 'ios', 'vendor', 'sherpa-onnx.xcframework', 'ios-arm64', 'Headers');
 const config = JSON.parse(readFileSync(path.join(moduleRoot, 'expo-module.config.json'), 'utf8'));
 const appConfig = JSON.parse(readFileSync(path.join(project, 'app.json'), 'utf8'));
 const captureSource = readFileSync(capture, 'utf8');
 const callRecoveryPolicySource = readFileSync(callRecoveryPolicy, 'utf8');
+const nativePostProcessingStoreSource = readFileSync(nativePostProcessingStore, 'utf8');
 
-for (const file of [capture, module, podspec, qwen, continuedProcessing, continuedProcessingPolicy, continuedProcessingPolicyTests, callRecoveryPolicy, callRecoveryPolicyTests, pipelineWake, pipelineWakePolicy, pipelineWakePolicyTests, continuedProcessingPlugin]) {
+for (const file of [capture, module, podspec, qwen, continuedProcessing, continuedProcessingPolicy, continuedProcessingPolicyTests, callRecoveryPolicy, callRecoveryPolicyTests, pipelineWake, pipelineWakePolicy, pipelineWakePolicyTests, nativePostProcessingStore, nativePostProcessingTests, continuedProcessingPlugin]) {
   if (!existsSync(file) || readFileSync(file, 'utf8').trim().length === 0) {
     throw new Error(`Required iOS recorder source is missing: ${file}`);
   }
@@ -154,6 +159,23 @@ for (const token of [
 ]) {
   if (!readFileSync(continuedProcessing, 'utf8').includes(token)) {
     throw new Error(`iOS continued-processing invariant missing: ${token}`);
+  }
+}
+for (const token of [
+  'PRAGMA journal_mode=WAL',
+  'PRAGMA synchronous=FULL',
+  'BEGIN IMMEDIATE',
+  'CREATE TABLE IF NOT EXISTS runtime_owner',
+  'func claimFirstIncomplete',
+  'func setRecordingActive',
+  'func acknowledge',
+  'func releaseRuntime',
+  'result_payload_sha256',
+  'unresolvedIntervals',
+  'Owner-first lookup keeps cross-owner access indistinguishable from absence.',
+]) {
+  if (!nativePostProcessingStoreSource.includes(token)) {
+    throw new Error(`iOS native post-processing durability invariant missing: ${token}`);
   }
 }
 
@@ -345,6 +367,28 @@ if (process.platform === 'darwin') {
     'swiftc', '-target', 'arm64-apple-ios16.4', '-sdk', sdk,
     '-typecheck', pipelineWakePolicy, pipelineWake,
   ], { stdio: 'inherit' });
+  execFileSync('xcrun', [
+    'swiftc', '-target', 'arm64-apple-ios16.4', '-sdk', sdk,
+    '-typecheck', nativePostProcessingStore,
+  ], { stdio: 'inherit' });
+  const nativePostProcessingTestDirectory = mkdtempSync(path.join(tmpdir(), 'maina-ios-native-post-processing-'));
+  const nativePostProcessingTestExecutable = path.join(nativePostProcessingTestDirectory, 'native-post-processing-tests');
+  const nativePostProcessingResult = path.join(nativePostProcessingTestDirectory, 'native-post-processing-result.json');
+  try {
+    execFileSync('xcrun', [
+      'swiftc', nativePostProcessingStore, nativePostProcessingTests, '-lsqlite3',
+      '-o', nativePostProcessingTestExecutable,
+    ], { stdio: 'inherit' });
+    execFileSync(nativePostProcessingTestExecutable, [], {
+      env: { ...process.env, MAINA_NATIVE_POST_PROCESSING_RESULT_OUTPUT: nativePostProcessingResult },
+      stdio: 'inherit',
+    });
+    validateNativeResult(JSON.parse(readFileSync(nativePostProcessingResult, 'utf8')), {
+      root: path.join(project, 'coordination'),
+    });
+  } finally {
+    rmSync(nativePostProcessingTestDirectory, { recursive: true, force: true });
+  }
   const policyTestDirectory = mkdtempSync(path.join(tmpdir(), 'maina-ios-pipeline-policy-'));
   const policyTestExecutable = path.join(policyTestDirectory, 'pipeline-wake-policy-tests');
   try {
