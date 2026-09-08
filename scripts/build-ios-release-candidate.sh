@@ -14,8 +14,8 @@ STORAGE_ROOT="$($STORAGE_GUARD)" || exit $?
 [[ "$STORAGE_ROOT" == "/Volumes/DivaySSD/MainaBuild" ]] || { echo "Canonical Maina storage root was rejected." >&2; exit 78; }
 MAINA_IOS_RELEASE_OUTPUT_ROOT="${MAINA_IOS_RELEASE_OUTPUT_ROOT:-$STORAGE_ROOT/artifacts/apps/ios-feasibility}"
 MAINA_IOS_DERIVED_DATA_ROOT="${MAINA_IOS_DERIVED_DATA_ROOT:-$STORAGE_ROOT/builds/apps/ios-feasibility/ios/DerivedData}"
-OUTPUT_DIR="${MAINA_RELEASE_OUTPUT_DIR:-$MAINA_IOS_RELEASE_OUTPUT_ROOT/ios/Maina-0.10.56-38-candidate}"
-BUILD_ROOT="${MAINA_IOS_CANDIDATE_DERIVED_DATA:-$MAINA_IOS_DERIVED_DATA_ROOT/Maina-0.10.56-38-candidate}"
+OUTPUT_DIR="${MAINA_RELEASE_OUTPUT_DIR:-$MAINA_IOS_RELEASE_OUTPUT_ROOT/ios/Maina-0.10.57-39-candidate}"
+BUILD_ROOT="${MAINA_IOS_CANDIDATE_DERIVED_DATA:-$MAINA_IOS_DERIVED_DATA_ROOT/Maina-0.10.57-39-candidate}"
 TEAM_ID="${MAINA_IOS_TEAM_ID:-9X4X3R4KCN}"
 
 [[ "$TEAM_ID" == "9X4X3R4KCN" ]] || { echo "iOS candidate team must remain 9X4X3R4KCN." >&2; exit 2; }
@@ -147,11 +147,11 @@ fi
 APP="$BUILD_ROOT/Build/Products/Release-iphoneos/Maina.app"
 DSYM="$BUILD_ROOT/Build/Products/Release-iphoneos/Maina.app.dSYM"
 [[ -d "$APP" && -d "$DSYM" ]] || fail_terminal "IOS_BUILD_ARTIFACT_MISSING" 1
-APP_ZIP="$OUTPUT_DIR/Maina-0.10.56-38.app.zip"
-DSYM_ZIP="$OUTPUT_DIR/Maina-0.10.56-38.app.dSYM.zip"
+APP_ZIP="$OUTPUT_DIR/Maina-0.10.57-39.app.zip"
+DSYM_ZIP="$OUTPUT_DIR/Maina-0.10.57-39.app.dSYM.zip"
 /usr/bin/ditto -c -k --sequesterRsrc --keepParent "$APP" "$APP_ZIP"
 /usr/bin/ditto -c -k --sequesterRsrc --keepParent "$DSYM" "$DSYM_ZIP"
-node scripts/inspect-exact-artifact.mjs ios release/m3-m4-0.10.56-candidate-plan.json "$APP_ZIP" "$DSYM_ZIP" \
+node scripts/inspect-exact-artifact.mjs ios release/m3-m4-0.10.57-candidate-plan.json "$APP_ZIP" "$DSYM_ZIP" \
   > "$OUTPUT_DIR/ios-inspection.json"
 node scripts/verify-generated-native-release-metadata.mjs ios
 node scripts/verify-build-source-state.mjs ios "$EXPECTED_FINAL"
