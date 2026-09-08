@@ -24,8 +24,8 @@ from pymobiledevice3.services.dvt.testmanaged.xctest_types import XCActivityReco
 DEVICE_UDID = "00008120-001E146611E2601E"
 RUNNER_BUNDLE_ID = "com.divay.maina.staging.qualify1048.uitests.xctrunner"
 TARGET_BUNDLE_ID = "com.divay.maina.staging"
-EXPECTED_VERSION = "0.10.57"
-EXPECTED_BUILD = "37"
+EXPECTED_VERSION = "0.10.58"
+EXPECTED_BUILD = "40"
 ALLOWED_TESTS = {
     "navigation-audit": "MainaUITests/testNavigationAudit",
     "short-recording-lifecycle": "MainaUITests/testShortRecordingLifecycle",
