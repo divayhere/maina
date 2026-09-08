@@ -63,7 +63,7 @@ assert.equal(app.android.versionCode, plan.release.androidVersionCode);
 assert.equal(manifest.version, plan.release.version);
 assert.equal(lock.version, plan.release.version);
 assert.equal(lock.packages[''].version, plan.release.version);
-assert.match(source('ios/Maina/Info.plist'), /<key>CFBundleShortVersionString<\/key>\s*<string>0\.10\.57<\/string>/);
+assert.match(source('ios/Maina/Info.plist'), /<key>CFBundleShortVersionString<\/key>\s*<string>0\.10\.58<\/string>/);
 assert.match(source('ios/Maina/Info.plist'), /<key>CFBundleVersion<\/key>\s*<string>40<\/string>/);
 assert.match(source('ios/Maina.xcodeproj/project.pbxproj'), /PRODUCT_BUNDLE_IDENTIFIER = "?com\.divay\.maina\.staging"?;/);
 
@@ -264,7 +264,7 @@ assert.match(source('scripts/run-ios-xcuitest-direct.py'), /EXPECTED_VERSION = "
 assert.match(source('scripts/run-ios-xcuitest-direct.py'), /EXPECTED_BUILD = "40"/);
 assert.equal((source('scripts/build-android-release-candidate.sh').match(/verify-generated-native-release-metadata\.mjs android/g) ?? []).length, 2);
 assert.equal((source('scripts/build-ios-release-candidate.sh').match(/verify-generated-native-release-metadata\.mjs ios/g) ?? []).length, 2);
-assert.match(manifest.scripts['verify:release-plan-candidate'], /verify-release-plan-0\.10\.57\.mjs/);
+assert.match(manifest.scripts['verify:release-plan-candidate'], /verify-release-plan-0\.10\.58\.mjs/);
 assert.match(manifest.scripts['verify:release-plan-candidate'], /verify-generated-native-release-metadata\.synthetic\.mjs/);
 assert.match(source('scripts/build-install-ios-staging.sh'), /Refusing combined candidate build\/install/);
 assert.match(source('scripts/renew-ios-personal.sh'), /Refusing build-and-install renewal for the active candidate/);
