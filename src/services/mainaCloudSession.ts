@@ -17,6 +17,7 @@ import {
 const SESSION_KEY = 'maina_cloud_session_v1';
 const MAINAKC_BASE_URL = process.env.EXPO_PUBLIC_MKC_BASE_URL?.trim().replace(/\/+$/, '')
   || 'https://mkc-backend.maina-knowledge-cloud.workers.dev';
+let sessionMutationTail: Promise<void> = Promise.resolve();
 
 export type MainaCloudUser = {
   userId: string;
@@ -100,6 +101,25 @@ function parseStoredSession(value: string | null): MainaCloudSession | null {
   }
 }
 
+function withSessionMutation<T>(task: () => Promise<T>): Promise<T> {
+  const operation = sessionMutationTail.then(task, task);
+  sessionMutationTail = operation.then(() => undefined, () => undefined);
+  return operation;
+}
+
+async function readStoredSession(): Promise<MainaCloudSession | null> {
+  return parseStoredSession(await SecureStore.getItemAsync(SESSION_KEY));
+}
+
+function sameSessionCredential(
+  left: MainaCloudSession | null,
+  right: Pick<MainaCloudSession, 'accessToken' | 'user'>,
+): left is MainaCloudSession {
+  return left !== null
+    && left.accessToken === right.accessToken
+    && left.user.userId === right.user.userId;
+}
+
 function isExpired(expiresAt?: string | null) {
   if (!expiresAt) return false;
   const value = Date.parse(expiresAt);
@@ -115,17 +135,22 @@ function apiMessage(body: unknown, fallback: string) {
 }
 
 export async function getMainaCloudSession(): Promise<MainaCloudSession | null> {
-  const session = parseStoredSession(await SecureStore.getItemAsync(SESSION_KEY));
+  const session = await readStoredSession();
   if (!session) return null;
   if (isExpired(session.expiresAt)) {
-    await SecureStore.deleteItemAsync(SESSION_KEY);
-    return null;
+    return withSessionMutation(async () => {
+      const current = await readStoredSession();
+      if (!current) return null;
+      if (!isExpired(current.expiresAt)) return current;
+      await SecureStore.deleteItemAsync(SESSION_KEY);
+      return null;
+    });
   }
   return session;
 }
 
 export async function saveMainaCloudSession(session: MainaCloudSession): Promise<void> {
-  await SecureStore.setItemAsync(SESSION_KEY, JSON.stringify(session));
+  await withSessionMutation(() => SecureStore.setItemAsync(SESSION_KEY, JSON.stringify(session)));
   // The former direct-key configuration must not stay available as a hidden
   // fallback after a scoped Cloud session is established.
   await Promise.all([
@@ -150,9 +175,12 @@ async function clearOwnerMemoryCache(ownerUserId: string | null): Promise<void> 
 }
 
 export async function clearMainaCloudSession(): Promise<void> {
-  const session = parseStoredSession(await SecureStore.getItemAsync(SESSION_KEY));
-  await SecureStore.deleteItemAsync(SESSION_KEY);
-  await clearOwnerMemoryCache(session?.user.userId ?? null);
+  const ownerUserId = await withSessionMutation(async () => {
+    const session = await readStoredSession();
+    await SecureStore.deleteItemAsync(SESSION_KEY);
+    return session?.user.userId ?? null;
+  });
+  await clearOwnerMemoryCache(ownerUserId);
 }
 
 function sessionMatchesExecutionContext(
@@ -179,12 +207,13 @@ export function pinMainaCloudExecutionContext(
 async function clearMainaCloudSessionIfMatching(
   context: MainaCloudExecutionContext,
 ): Promise<void> {
-  const session = await getMainaCloudSession();
-  if (!sessionMatchesExecutionContext(session, context)) return;
-  // Delete immediately after the matching read; do not re-read through the
-  // generic clear path, which could observe and remove a replacement owner.
-  await SecureStore.deleteItemAsync(SESSION_KEY);
-  await clearOwnerMemoryCache(context.ownerUserId);
+  const clearedOwnerUserId = await withSessionMutation(async () => {
+    const session = await readStoredSession();
+    if (!sessionMatchesExecutionContext(session, context)) return null;
+    await SecureStore.deleteItemAsync(SESSION_KEY);
+    return context.ownerUserId;
+  });
+  await clearOwnerMemoryCache(clearedOwnerUserId);
 }
 
 export async function mainaCloudRequestJson(
@@ -342,8 +371,12 @@ export async function getMainaCloudConnection(): Promise<MainaCloudSession | nul
           role: typeof body.user.role === 'string' ? body.user.role : null,
         },
       };
-      await SecureStore.setItemAsync(SESSION_KEY, JSON.stringify(refreshed));
-      return refreshed;
+      return withSessionMutation(async () => {
+        const current = await readStoredSession();
+        if (!sameSessionCredential(current, session)) return current;
+        await SecureStore.setItemAsync(SESSION_KEY, JSON.stringify(refreshed));
+        return refreshed;
+      });
     }
     return session;
   } catch (cause) {

@@ -1,5 +1,6 @@
 /* eslint-disable import/first -- Vitest mocks must be declared before importing the module under test. */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import * as SecureStore from 'expo-secure-store';
 
 const store = new Map<string, string>();
 const mocks = vi.hoisted(() => ({
@@ -193,6 +194,52 @@ describe('mainaCloudSession', () => {
 
     await expect(mainaCloudRequestJson('/v1/meeting-tags/mutations', {}, { executionContext }))
       .rejects.toMatchObject({ status: 401 });
+    expect(await getMainaCloudSession()).toEqual(ownerB);
+  });
+
+  it('serializes a replacement save behind an in-flight matching 401 clear', async () => {
+    const ownerA = {
+      ...validSession,
+      accessToken: 'token-a',
+      scopes: ['sources:write'],
+      user: { ...validSession.user, userId: 'owner-a' },
+    };
+    const ownerB = {
+      ...validSession,
+      accessToken: 'token-b',
+      scopes: ['sources:write'],
+      user: { ...validSession.user, userId: 'owner-b' },
+    };
+    await saveMainaCloudSession(ownerA);
+    const executionContext = pinMainaCloudExecutionContext(ownerA);
+    mocks.fetch.mockResolvedValueOnce(new Response(
+      JSON.stringify({ error: { code: 'auth_invalid' } }),
+      { status: 401 },
+    ));
+
+    let announceDeleteStarted!: () => void;
+    let allowDeleteToFinish!: () => void;
+    const deleteStarted = new Promise<void>((resolve) => { announceDeleteStarted = resolve; });
+    const deleteMayFinish = new Promise<void>((resolve) => { allowDeleteToFinish = resolve; });
+    vi.mocked(SecureStore.deleteItemAsync).mockImplementationOnce(async (key: string) => {
+      announceDeleteStarted();
+      await deleteMayFinish;
+      store.delete(key);
+    });
+
+    const oldRequest = mainaCloudRequestJson(
+      '/v1/meeting-tags/mutations',
+      {},
+      { executionContext },
+    ).catch((cause: unknown) => cause);
+    await deleteStarted;
+    const replacementSave = saveMainaCloudSession(ownerB);
+    await Promise.resolve();
+    expect(await getMainaCloudSession()).toEqual(ownerA);
+
+    allowDeleteToFinish();
+    await expect(oldRequest).resolves.toMatchObject({ status: 401 });
+    await replacementSave;
     expect(await getMainaCloudSession()).toEqual(ownerB);
   });
 
