@@ -22,6 +22,7 @@ const pipelineWake = path.join(moduleRoot, 'ios', 'MainaIOSPipelineWake.swift');
 const pipelineWakePolicy = path.join(moduleRoot, 'ios', 'MainaIOSPipelineWakePolicy.swift');
 const pipelineWakePolicyTests = path.join(project, 'scripts', 'fixtures', 'MainaIOSPipelineWakePolicyTests.swift');
 const nativePostProcessingStore = path.join(moduleRoot, 'ios', 'MainaNativePostProcessingStore.swift');
+const nativePostProcessingCoordinator = path.join(moduleRoot, 'ios', 'MainaNativePostProcessingCoordinator.swift');
 const nativePostProcessingTests = path.join(project, 'scripts', 'fixtures', 'MainaIOSNativePostProcessingTests.swift');
 const continuedProcessingPlugin = path.join(project, 'plugins', 'withMainaIOSContinuedProcessing.js');
 const sherpaHeaders = path.join(moduleRoot, 'ios', 'vendor', 'sherpa-onnx.xcframework', 'ios-arm64', 'Headers');
@@ -30,8 +31,9 @@ const appConfig = JSON.parse(readFileSync(path.join(project, 'app.json'), 'utf8'
 const captureSource = readFileSync(capture, 'utf8');
 const callRecoveryPolicySource = readFileSync(callRecoveryPolicy, 'utf8');
 const nativePostProcessingStoreSource = readFileSync(nativePostProcessingStore, 'utf8');
+const nativePostProcessingCoordinatorSource = readFileSync(nativePostProcessingCoordinator, 'utf8');
 
-for (const file of [capture, module, podspec, qwen, continuedProcessing, continuedProcessingPolicy, continuedProcessingPolicyTests, callRecoveryPolicy, callRecoveryPolicyTests, pipelineWake, pipelineWakePolicy, pipelineWakePolicyTests, nativePostProcessingStore, nativePostProcessingTests, continuedProcessingPlugin]) {
+for (const file of [capture, module, podspec, qwen, continuedProcessing, continuedProcessingPolicy, continuedProcessingPolicyTests, callRecoveryPolicy, callRecoveryPolicyTests, pipelineWake, pipelineWakePolicy, pipelineWakePolicyTests, nativePostProcessingStore, nativePostProcessingCoordinator, nativePostProcessingTests, continuedProcessingPlugin]) {
   if (!existsSync(file) || readFileSync(file, 'utf8').trim().length === 0) {
     throw new Error(`Required iOS recorder source is missing: ${file}`);
   }
@@ -99,6 +101,20 @@ for (const token of [
 ]) {
   if (!captureSource.includes(token)) {
     throw new Error(`iOS recorder reliability invariant missing: ${token}`);
+  }
+}
+for (const token of [
+  'private var inferenceInFlight = false',
+  'func setRecordingActive',
+  'func releaseAsr',
+  'store.claimFirstIncomplete',
+  'store.commitWindow',
+  'store.failWindow',
+  'onChanged(event)',
+  'Invalid or stale callbacks cannot gain a second mutation path.',
+]) {
+  if (!nativePostProcessingCoordinatorSource.includes(token)) {
+    throw new Error(`iOS native post-processing coordinator invariant missing: ${token}`);
   }
 }
 for (const token of [
@@ -369,14 +385,14 @@ if (process.platform === 'darwin') {
   ], { stdio: 'inherit' });
   execFileSync('xcrun', [
     'swiftc', '-target', 'arm64-apple-ios16.4', '-sdk', sdk,
-    '-typecheck', nativePostProcessingStore,
+    '-typecheck', nativePostProcessingStore, nativePostProcessingCoordinator,
   ], { stdio: 'inherit' });
   const nativePostProcessingTestDirectory = mkdtempSync(path.join(tmpdir(), 'maina-ios-native-post-processing-'));
   const nativePostProcessingTestExecutable = path.join(nativePostProcessingTestDirectory, 'native-post-processing-tests');
   const nativePostProcessingResult = path.join(nativePostProcessingTestDirectory, 'native-post-processing-result.json');
   try {
     execFileSync('xcrun', [
-      'swiftc', nativePostProcessingStore, nativePostProcessingTests, '-lsqlite3',
+      'swiftc', nativePostProcessingStore, nativePostProcessingCoordinator, nativePostProcessingTests, '-lsqlite3',
       '-o', nativePostProcessingTestExecutable,
     ], { stdio: 'inherit' });
     execFileSync(nativePostProcessingTestExecutable, [], {

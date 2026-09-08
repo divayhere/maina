@@ -2,6 +2,61 @@ import Foundation
 
 private var assertions = 0
 
+private final class FakeNativePostProcessingTranscriber {
+  typealias Completion = (Result<MainaNativePostProcessingRecognition, MainaNativePostProcessingRecognitionFailure>) -> Void
+  private let lock = NSLock()
+  private var pending: [(MainaNativePostProcessingClaim, Completion)] = []
+  private(set) var maximumPending = 0
+
+  func transcribe(_ claim: MainaNativePostProcessingClaim, completion: @escaping Completion) {
+    lock.lock()
+    pending.append((claim, completion))
+    maximumPending = max(maximumPending, pending.count)
+    lock.unlock()
+  }
+
+  var pendingCount: Int {
+    lock.lock()
+    defer { lock.unlock() }
+    return pending.count
+  }
+
+  func completeNext(
+    _ result: Result<MainaNativePostProcessingRecognition, MainaNativePostProcessingRecognitionFailure>
+  ) {
+    lock.lock()
+    let next = pending.removeFirst()
+    lock.unlock()
+    next.1(result)
+  }
+}
+
+private final class NativePostProcessingEvents {
+  private let lock = NSLock()
+  private var values: [[String: Any]] = []
+
+  func append(_ event: [String: Any]) {
+    lock.lock()
+    values.append(event)
+    lock.unlock()
+  }
+
+  var last: [String: Any]? {
+    lock.lock()
+    defer { lock.unlock() }
+    return values.last
+  }
+}
+
+private func waitUntil(_ message: String, timeout: TimeInterval = 2, _ condition: () -> Bool) {
+  let deadline = Date().addingTimeInterval(timeout)
+  while Date() < deadline {
+    if condition() { return }
+    Thread.sleep(forTimeInterval: 0.01)
+  }
+  expect(condition(), message)
+}
+
 private func expect(_ condition: Bool, _ message: String) {
   assertions += 1
   if !condition {
@@ -291,6 +346,63 @@ private func run() throws {
   expect(try reopened.releaseRuntime(runtimeOwnerToken: "wrong-owner", generation: 1) == false, "stale runtime release is rejected")
   expect(try reopened.releaseRuntime(runtimeOwnerToken: "runtime-release", generation: 1), "exact runtime release succeeds")
   expect(try reopened.debugState(ownerUserId: "owner-a", meetingId: "meeting-release") == "queued", "runtime release preserves durable run")
+
+  let coordinatorURL = root.appendingPathComponent("coordinator.sqlite3")
+  let coordinatorStore = try MainaNativePostProcessingStore(
+    databaseURL: coordinatorURL,
+    processInstanceToken: "coordinator-process"
+  )
+  let fake = FakeNativePostProcessingTranscriber()
+  let events = NativePostProcessingEvents()
+  let coordinator = MainaNativePostProcessingCoordinator(
+    store: coordinatorStore,
+    transcribe: fake.transcribe,
+    releaseRecognizer: {},
+    onChanged: events.append
+  )
+  let coordinatorStart = makeStart(meeting: "meeting-coordinator", run: "run-coordinator", token: "runtime-coordinator")
+  let startSignal = DispatchSemaphore(value: 0)
+  var coordinatorStarted = false
+  coordinator.start(coordinatorStart) { result in
+    if case .success = result { coordinatorStarted = true }
+    startSignal.signal()
+  }
+  expect(startSignal.wait(timeout: .now() + 2) == .success && coordinatorStarted, "coordinator starts exact durable generation")
+  waitUntil("coordinator claims its first durable window") { fake.pendingCount == 1 }
+  expect(fake.maximumPending == 1, "coordinator has one recognizer callback owner")
+  let eventKeys = Set(events.last?.keys ?? Dictionary<String, Any>().keys)
+  expect(eventKeys == Set(["schemaVersion", "meetingId", "runId", "generation", "eventSequence"]),
+    "coordinator event is identifier-only")
+
+  coordinator.setRecordingActive(true)
+  waitUntil("recording durably preempts the coordinator") {
+    (try? coordinatorStore.debugState(ownerUserId: "owner-a", meetingId: "meeting-coordinator")) == "preempted"
+  }
+  fake.completeNext(.success(.init(
+    text: "stale text", language: "en", vadStatus: "speech", vadEvidenceSha256: String(repeating: "c", count: 64)
+  )))
+  waitUntil("stale callback drains without starting under recording") { fake.pendingCount == 0 }
+  expect(try coordinatorStore.readResult(
+    ownerUserId: "owner-a", meetingId: "meeting-coordinator", runId: "run-coordinator", generation: 1
+  ) == nil, "preempted stale callback cannot seal a result")
+
+  coordinator.setRecordingActive(false)
+  waitUntil("recording release wakes the first incomplete window") { fake.pendingCount == 1 }
+  fake.completeNext(.success(.init(
+    text: "first coordinator window", language: "en", vadStatus: "speech",
+    vadEvidenceSha256: String(repeating: "c", count: 64)
+  )))
+  waitUntil("coordinator serially claims the second window") { fake.pendingCount == 1 }
+  fake.completeNext(.success(.init(
+    text: "second coordinator window", language: "en", vadStatus: "speech",
+    vadEvidenceSha256: String(repeating: "c", count: 64)
+  )))
+  waitUntil("coordinator seals the exact terminal result") {
+    (try? coordinatorStore.readResult(
+      ownerUserId: "owner-a", meetingId: "meeting-coordinator", runId: "run-coordinator", generation: 1
+    )) != nil
+  }
+  expect(fake.maximumPending == 1, "coordinator never overlaps recognizer callbacks")
 }
 
 @main

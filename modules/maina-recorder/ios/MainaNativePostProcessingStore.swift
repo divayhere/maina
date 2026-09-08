@@ -503,6 +503,28 @@ final class MainaNativePostProcessingStore {
     }
   }
 
+  func changedEvent(ownerUserId: String, meetingId: String, runId: String, generation: Int) throws -> [String: Any]? {
+    guard Self.validIdentifier(ownerUserId), Self.validIdentifier(meetingId), Self.validIdentifier(runId), generation > 0 else {
+      return nil
+    }
+    return try locked {
+      guard try persistedOwner(meetingId: meetingId) == ownerUserId,
+        let value = try queryText(
+          "SELECT CAST(event_sequence AS TEXT) FROM runs WHERE owner_user_id = ? AND meeting_id = ? "
+            + "AND run_id = ? AND generation = ? LIMIT 1",
+          [.text(ownerUserId), .text(meetingId), .text(runId), .int(Int64(generation))]
+        ), let sequence = Int(value), sequence > 0
+      else { return nil }
+      return [
+        "schemaVersion": "maina.native-post-processing-changed.v1",
+        "meetingId": meetingId,
+        "runId": runId,
+        "generation": generation,
+        "eventSequence": sequence,
+      ]
+    }
+  }
+
   func acknowledge(_ fence: MainaNativePostProcessingImportFence) throws -> Bool {
     try validate(fence)
     return try lockedTransaction {
