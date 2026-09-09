@@ -50,7 +50,7 @@ const mocks = vi.hoisted(() => ({
   getStages: vi.fn(async () => [] as { stage: string; state: string }[]),
   notify: vi.fn(),
   updateMeeting: vi.fn(async () => {}),
-  updateStage: vi.fn(async () => {}),
+  updateStage: vi.fn(async (_stage: Record<string, unknown>) => {}),
 }));
 
 vi.mock('react-native', () => ({ Platform: { OS: 'ios' } }));
@@ -195,6 +195,7 @@ describe('iOS durable native post-processing lifecycle', () => {
     mocks.acknowledge.mockResolvedValue(true);
     mocks.markRunning.mockResolvedValue('running');
     mocks.getStages.mockResolvedValue([]);
+    mocks.updateStage.mockImplementation(async () => {});
   });
 
   it('acknowledges and cleans complete audio only after exact durable import evidence', async () => {
@@ -321,6 +322,54 @@ describe('iOS durable native post-processing lifecycle', () => {
     expect(mocks.updateStage).toHaveBeenCalledWith(expect.objectContaining({
       meetingId: 'meeting-a', stage: 'transcript_durable', state: 'failed',
     }));
+  });
+
+  it('never downgrades an imported run when terminal-stage repair cannot read its stages', async () => {
+    const identity = deriveIOSNativePostProcessingExecutionIdentity('owner-a', 'meeting-a');
+    mocks.markRunning.mockImplementationOnce(async () => {
+      mocks.meeting.nativePostprocessRunId = identity.runId;
+      mocks.meeting.nativePostprocessImportedAt = 1_788_000_030_000;
+      return 'already_imported';
+    });
+    mocks.getStages.mockRejectedValueOnce(new Error('bounded stage read failure'));
+
+    await expect(reconcilePendingNativeMeetingWork()).resolves.toBe(0);
+
+    expect(mocks.start).toHaveBeenCalledOnce();
+    expect(mocks.updateMeeting).not.toHaveBeenCalledWith('meeting-a', expect.objectContaining({
+      lastError: 'Local transcription paused safely. Maina will continue automatically.',
+    }));
+    expect(mocks.updateStage).not.toHaveBeenCalledWith(expect.objectContaining({
+      meetingId: 'meeting-a', stage: 'asr', state: 'deferred',
+    }));
+    expect(mocks.notify).not.toHaveBeenCalled();
+  });
+
+  it('keeps a partially repaired imported ASR terminal when transcript-stage repair fails', async () => {
+    const identity = deriveIOSNativePostProcessingExecutionIdentity('owner-a', 'meeting-a');
+    mocks.markRunning.mockImplementationOnce(async () => {
+      mocks.meeting.nativePostprocessRunId = identity.runId;
+      mocks.meeting.nativePostprocessImportedAt = 1_788_000_030_000;
+      return 'already_imported';
+    });
+    mocks.updateStage.mockImplementation(async (stage) => {
+      if (stage.stage === 'transcript_durable') {
+        throw new Error('bounded transcript stage write failure');
+      }
+    });
+
+    await expect(reconcilePendingNativeMeetingWork()).resolves.toBe(0);
+
+    expect(mocks.updateStage).toHaveBeenCalledWith(expect.objectContaining({
+      meetingId: 'meeting-a', stage: 'asr', state: 'ready',
+    }));
+    expect(mocks.updateMeeting).not.toHaveBeenCalledWith('meeting-a', expect.objectContaining({
+      lastError: 'Local transcription paused safely. Maina will continue automatically.',
+    }));
+    expect(mocks.updateStage).not.toHaveBeenCalledWith(expect.objectContaining({
+      meetingId: 'meeting-a', stage: 'asr', state: 'deferred',
+    }));
+    expect(mocks.notify).not.toHaveBeenCalled();
   });
 
   it('does not reopen a run when terminal import fails before a durable import fence exists', async () => {

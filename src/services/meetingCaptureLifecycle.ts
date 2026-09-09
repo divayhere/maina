@@ -350,12 +350,24 @@ async function launchIOSPostProcessing(meeting: Meeting): Promise<boolean> {
         },
       });
       if (runningDisposition === 'already_imported') {
-        const importedMeeting = await getMeeting(meeting.id);
-        if (!importedMeeting || !await repairIOSImportedPostProcessingStages(importedMeeting, request)) {
-          throw new Error('native_post_processing_import_reconciliation_failed');
+        // The exact durable import fence is terminal authority. Stage repair is
+        // deliberately isolated from the generic start-failure catch below:
+        // a transient read/write failure must never downgrade an imported ASR
+        // result back to transcribing/deferred. Startup reconciliation will
+        // retry this idempotent repair without reopening native work.
+        let repaired = false;
+        try {
+          const importedMeeting = await getMeeting(meeting.id);
+          repaired = importedMeeting !== null
+            && await repairIOSImportedPostProcessingStages(importedMeeting, request);
+        } catch (cause) {
+          log.warn('recovery', 'iOS imported post-processing stage repair retained for retry', {
+            meetingId: meeting.id,
+            causeName: cause instanceof Error ? cause.name : typeof cause,
+          });
         }
         if (continuedHandle) removeIOSPostProcessingHandle(continuedHandle, true);
-        return true;
+        return repaired;
       }
       if (continuedHandle) updateIOSContinuedProcessing(continuedHandle.requestId, 0, totalUnits);
       await finishIOSNativePostProcessingResult(meeting, request);
