@@ -34,6 +34,12 @@ cd "$PROJECT_DIR"
   echo "MainaUITests shared scheme is missing." >&2
   exit 78
 }
+"$PROJECT_DIR/scripts/refresh-ios-pods-for-build-guarded.sh"
+[[ -d ios/Maina.xcworkspace ]] || { echo "ios/Maina.xcworkspace disappeared during pod refresh." >&2; exit 78; }
+[[ -f ios/Maina.xcodeproj/xcshareddata/xcschemes/MainaUITests.xcscheme ]] || {
+  echo "MainaUITests shared scheme disappeared during pod refresh." >&2
+  exit 78
+}
 
 maina_storage_mkdir "$BUILD_ROOT"
 # Qualification-only UI-test products are never distributed and must not

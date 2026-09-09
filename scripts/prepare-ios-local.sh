@@ -31,4 +31,5 @@ npm run verify:ios-native
 npx expo prebuild --platform ios --no-install --clean
 "$PROJECT_DIR/scripts/restore-external-build-links.sh" ios
 (cd ios && PROJECT_ROOT="$PROJECT_DIR" pod install)
+"$MAINA_IOS_RUBY_BIN/ruby" scripts/verify-ios-pod-source-membership.rb
 "$PROJECT_DIR/scripts/configure-ios-ui-tests-guarded.sh"
