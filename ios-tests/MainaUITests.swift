@@ -79,6 +79,7 @@ final class MainaUITests: XCTestCase {
     let record = app.buttons["Record a meeting"]
     XCTAssertTrue(record.waitForExistence(timeout: 5))
     record.tap()
+    authorizeMicrophoneIfPresented()
     XCTAssertTrue(app.staticTexts["Recording"].waitForExistence(timeout: 10))
     sleep(8)
     attach("recording-listening")
@@ -100,7 +101,7 @@ final class MainaUITests: XCTestCase {
 
     XCTAssertTrue(app.buttons["Stop and save"].waitForExistence(timeout: 5))
     app.buttons["Stop and save"].tap()
-    XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label CONTAINS[c] 'Recent' OR label CONTAINS[c] 'recording'")).firstMatch.waitForExistence(timeout: 20))
+    XCTAssertTrue(waitForDurablePostRecordingState(timeout: 20))
     attach("recording-saved")
   }
 
@@ -242,6 +243,7 @@ final class MainaUITests: XCTestCase {
     let record = app.buttons["Record a meeting"]
     XCTAssertTrue(record.waitForExistence(timeout: 8))
     record.tap()
+    authorizeMicrophoneIfPresented()
     XCTAssertTrue(app.staticTexts["Recording"].waitForExistence(timeout: 12))
   }
 
@@ -249,12 +251,32 @@ final class MainaUITests: XCTestCase {
     let stop = app.buttons["Stop and save"]
     XCTAssertTrue(stop.waitForExistence(timeout: 8))
     stop.tap()
-    XCTAssertTrue(
-      app.staticTexts.matching(NSPredicate(
-        format: "label CONTAINS[c] 'Recent' OR label CONTAINS[c] 'recording' OR label CONTAINS[c] 'transcrib'"
-      )).firstMatch.waitForExistence(timeout: 30),
-      "Maina did not publish a durable post-recording state."
-    )
+    XCTAssertTrue(waitForDurablePostRecordingState(timeout: 30), "Maina did not publish a durable post-recording state.")
+  }
+
+  private func authorizeMicrophoneIfPresented() {
+    let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
+    let alert = springboard.alerts.firstMatch
+    guard alert.waitForExistence(timeout: 2) else { return }
+    let allow = alert.buttons["Allow"]
+    XCTAssertTrue(allow.exists, "Unexpected system permission alert while starting a recording.")
+    allow.tap()
+    XCTAssertFalse(alert.waitForExistence(timeout: 5), "Microphone permission alert did not close.")
+  }
+
+  private func waitForDurablePostRecordingState(timeout: TimeInterval) -> Bool {
+    let home = app.staticTexts["RECENT"]
+    let detailNotes = app.staticTexts["Notes"]
+    let detailTranscript = app.descendants(matching: .any).matching(NSPredicate(format: "label == %@", "Transcript")).firstMatch
+    let detailTodos = app.descendants(matching: .any).matching(NSPredicate(format: "label == %@", "To-dos")).firstMatch
+    let deadline = Date().addingTimeInterval(timeout)
+    repeat {
+      if home.exists || (detailNotes.exists && detailTranscript.exists && detailTodos.exists) {
+        return true
+      }
+      RunLoop.current.run(until: Date().addingTimeInterval(0.2))
+    } while Date() < deadline
+    return false
   }
 
   private func tapTab(named name: String, fallbackX: CGFloat) {

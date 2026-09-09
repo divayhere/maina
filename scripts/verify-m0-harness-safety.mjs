@@ -54,6 +54,23 @@ if (stop && ui) {
   }
   const attachBranch = ui.slice(ui.indexOf('if attachesToRunningApp'), ui.indexOf('app.launch()'));
   if (!attachBranch.includes('return')) throw new Error('Attach-only setup does not return before app.launch().');
+
+  for (const token of [
+    'authorizeMicrophoneIfPresented()',
+    'XCUIApplication(bundleIdentifier: "com.apple.springboard")',
+    'alert.buttons["Allow"]',
+    'waitForDurablePostRecordingState(timeout:',
+    'let home = app.staticTexts["RECENT"]',
+    'let detailNotes = app.staticTexts["Notes"]',
+    'label == %@", "Transcript"',
+    'label == %@", "To-dos"',
+    'home.exists || (detailNotes.exists && detailTranscript.exists && detailTodos.exists)',
+  ]) {
+    if (!ui.includes(token)) throw new Error(`iOS UI test is missing a bounded recording-lifecycle oracle: ${token}`);
+  }
+  if (ui.includes("label CONTAINS[c] 'Recent' OR label CONTAINS[c] 'recording'")) {
+    throw new Error('iOS UI test still uses the stale post-recording substring oracle.');
+  }
 }
 
 if (iosUiConfigurator) {
