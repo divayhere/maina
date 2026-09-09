@@ -1,4 +1,8 @@
 import { Platform } from 'react-native';
+import {
+  decodeIOSNativePostProcessingResult,
+  type IOSNativePostProcessingResult,
+} from '@/services/nativePostProcessingCore';
 
 import {
   MainaRecorder,
@@ -10,6 +14,11 @@ import {
   type NativePostProcessingRequest,
   type NativePostProcessingResult,
   type NativePostProcessingChangedEvent,
+  type IOSNativePostProcessingAudioDescriptor,
+  type IOSNativePostProcessingImportFence,
+  type IOSNativePostProcessingReadRequest,
+  type IOSNativePostProcessingStartOutcome,
+  type IOSNativePostProcessingStartRequest,
   type IOSPostProcessingDeferralEvent,
   type NativeCaptureStatus,
   type QwenAsrResult,
@@ -97,6 +106,51 @@ export async function stopNativeCapture(): Promise<void> {
 
 export async function abortNativeCapture(): Promise<void> {
   await requireRecorderModule().abortNativeCapture();
+}
+
+export async function prepareIOSNativePostProcessingAudio(
+  meetingId: string,
+  directory: string,
+): Promise<IOSNativePostProcessingAudioDescriptor> {
+  const module = requireRecorderModule();
+  if (Platform.OS !== 'ios' || !module.prepareIOSNativePostProcessingAudio) {
+    throw new Error('The iOS native post-processing audio planner is unavailable');
+  }
+  return module.prepareIOSNativePostProcessingAudio(meetingId, directory);
+}
+
+export async function startIOSNativePostProcessing(
+  request: IOSNativePostProcessingStartRequest,
+  directory: string,
+): Promise<IOSNativePostProcessingStartOutcome> {
+  const module = requireRecorderModule();
+  if (Platform.OS !== 'ios' || !module.startIOSNativePostProcessing) {
+    throw new Error('The iOS native post-processing coordinator is unavailable');
+  }
+  return module.startIOSNativePostProcessing(request, directory);
+}
+
+export async function readIOSNativePostProcessingResult(
+  request: IOSNativePostProcessingReadRequest,
+): Promise<IOSNativePostProcessingResult | null> {
+  if (Platform.OS !== 'ios' || !MainaRecorder?.readIOSNativePostProcessingResult) return null;
+  const value = await MainaRecorder.readIOSNativePostProcessingResult(request);
+  return value === null ? null : decodeIOSNativePostProcessingResult(value, request);
+}
+
+export async function acknowledgeIOSNativePostProcessingResult(
+  fence: IOSNativePostProcessingImportFence,
+): Promise<boolean> {
+  if (Platform.OS !== 'ios' || !MainaRecorder?.acknowledgeIOSNativePostProcessingResult) return false;
+  return (await MainaRecorder.acknowledgeIOSNativePostProcessingResult(fence)).acknowledged;
+}
+
+export async function releaseIOSNativePostProcessingAsr(
+  runtimeOwnerToken: string,
+  generation: number,
+): Promise<boolean> {
+  if (Platform.OS !== 'ios' || !MainaRecorder?.releaseIOSNativePostProcessingAsr) return false;
+  return (await MainaRecorder.releaseIOSNativePostProcessingAsr({ runtimeOwnerToken, generation })).released;
 }
 
 export async function startNativePostProcessing(request: NativePostProcessingRequest): Promise<void> {

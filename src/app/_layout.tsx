@@ -371,7 +371,7 @@ function RootLayout() {
     const unsubscribeNative = subscribeNativePostProcessingChanges((event) => {
       log.info('recovery', 'native post-processing state changed', {
         meetingId: event.meetingId,
-        state: event.state,
+        state: 'state' in event ? event.state : 'wake',
       });
       runNativeProgressPipeline();
     });

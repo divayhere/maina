@@ -17,6 +17,8 @@ struct MainaNativePostProcessingWindowConfig: Codable, Equatable {
 struct MainaNativePostProcessingWindowPlan: Codable, Equatable {
   let index: Int
   let audioURI: String
+  let audioStartMs: Int
+  let audioEndMs: Int
   let coverageStartMs: Int
   let coverageEndMs: Int
   let analysisStartMs: Int
@@ -55,6 +57,8 @@ struct MainaNativePostProcessingClaim: Equatable {
   let windowKey: String
   let windowIndex: Int
   let audioURI: String
+  let audioStartMs: Int
+  let audioEndMs: Int
   let coverageStartMs: Int
   let coverageEndMs: Int
   let analysisStartMs: Int
@@ -328,6 +332,8 @@ final class MainaNativePostProcessingStore {
         windowKey: window.windowKey,
         windowIndex: window.index,
         audioURI: try audioURI(input, windowKey: window.windowKey),
+        audioStartMs: input.windows[window.index].audioStartMs,
+        audioEndMs: input.windows[window.index].audioEndMs,
         coverageStartMs: window.coverageStartMs,
         coverageEndMs: window.coverageEndMs,
         analysisStartMs: window.analysisStartMs,
@@ -491,15 +497,38 @@ final class MainaNativePostProcessingStore {
       return nil
     }
     return try locked {
-      guard let data = try queryText(
-        "SELECT result_json FROM runs WHERE owner_user_id = ? AND meeting_id = ? "
+      guard let row = try queryStrings(
+        "SELECT result_json, result_payload_sha256 FROM runs WHERE owner_user_id = ? AND meeting_id = ? "
           + "AND run_id = ? AND generation = ? AND state IN ('complete', 'partial') AND result_json IS NOT NULL LIMIT 1",
-        [.text(ownerUserId), .text(meetingId), .text(runId), .int(Int64(generation))]
+        [.text(ownerUserId), .text(meetingId), .text(runId), .int(Int64(generation))],
+        columns: 2
       ) else { return nil }
-      guard let decoded = try JSONSerialization.jsonObject(with: Data(data.utf8)) as? [String: Any] else {
+      guard var decoded = try JSONSerialization.jsonObject(with: Data(row[0].utf8)) as? [String: Any],
+        let embeddedSha = decoded.removeValue(forKey: "resultPayloadSha256") as? String,
+        embeddedSha == row[1], Self.sha256(canonicalData(decoded)) == embeddedSha
+      else {
         throw MainaNativePostProcessingStoreError.storageFailure("terminal_result_invalid")
       }
+      decoded["resultPayloadSha256"] = embeddedSha
       return decoded
+    }
+  }
+
+  func precedingTranscriptText(for claim: MainaNativePostProcessingClaim) throws -> String {
+    guard claim.analysisStartMs < claim.coverageStartMs, claim.windowIndex > 0 else { return "" }
+    return try locked {
+      guard let blocksJSON = try queryText(
+        "SELECT blocks_json FROM windows WHERE owner_user_id = ? AND meeting_id = ? AND run_id = ? "
+          + "AND generation = ? AND window_index = ? AND status = 'completed' LIMIT 1",
+        [
+          .text(claim.ownerUserId), .text(claim.meetingId), .text(claim.runId),
+          .int(Int64(claim.generation)), .int(Int64(claim.windowIndex - 1)),
+        ]
+      ), let data = blocksJSON.data(using: .utf8),
+        let blocks = try JSONSerialization.jsonObject(with: data) as? [[String: Any]],
+        let text = blocks.last?["text"] as? String
+      else { return "" }
+      return text.trimmingCharacters(in: .whitespacesAndNewlines)
     }
   }
 
@@ -687,9 +716,24 @@ final class MainaNativePostProcessingStore {
       !input.windows.isEmpty, input.windows.count <= 10_000
     else { throw MainaNativePostProcessingStoreError.invalidInput("start_shape_invalid") }
     var cursor = 0
+    var currentAudioURI: String?
+    var currentAudioGlobalStart = 0
+    var closedAudioURIs = Set<String>()
     for (expectedIndex, window) in input.windows.enumerated() {
+      if currentAudioURI != window.audioURI {
+        if let currentAudioURI { closedAudioURIs.insert(currentAudioURI) }
+        guard !closedAudioURIs.contains(window.audioURI) else {
+          throw MainaNativePostProcessingStoreError.invalidInput("window_partition_invalid")
+        }
+        currentAudioURI = window.audioURI
+        currentAudioGlobalStart = window.coverageStartMs
+      }
       guard window.index == expectedIndex, !window.audioURI.isEmpty, window.audioURI.count <= 4_096,
         URL(string: window.audioURI)?.isFileURL == true,
+        window.audioStartMs >= 0, window.audioEndMs > window.audioStartMs,
+        window.audioEndMs - window.audioStartMs == window.analysisEndMs - window.analysisStartMs,
+        window.audioStartMs == window.analysisStartMs - currentAudioGlobalStart,
+        window.audioEndMs == window.analysisEndMs - currentAudioGlobalStart,
         window.coverageStartMs == cursor, window.coverageEndMs > window.coverageStartMs,
         window.coverageEndMs - window.coverageStartMs <= input.windowConfig.targetWindowMs,
         window.analysisStartMs >= 0, window.analysisStartMs <= window.coverageStartMs,
@@ -774,7 +818,6 @@ final class MainaNativePostProcessingStore {
       && run.segmentCount == input.segmentCount && run.targetWindowMs == input.windowConfig.targetWindowMs
       && run.analysisOverlapMs == input.windowConfig.analysisOverlapMs
       && run.maxAttempts == input.windowConfig.maxAttempts && run.windowPlanSha256 == windowPlanSha256(input)
-      && run.createdAtMs == input.createdAtMs
   }
 
   private func persistedOwner(meetingId: String) throws -> String? {
@@ -846,9 +889,10 @@ final class MainaNativePostProcessingStore {
 
   private func persistedWindow(_ row: [String]) -> PersistedWindow {
     PersistedWindow(
-      windowKey: row[0], index: Int(row[1]) ?? -1, coverageStartMs: Int(row[2]) ?? -1,
-      coverageEndMs: Int(row[3]) ?? -1, analysisStartMs: Int(row[4]) ?? -1,
-      analysisEndMs: Int(row[5]) ?? -1, status: row[6], attemptCount: Int(row[7]) ?? -1,
+      windowKey: row[0], index: Int(row[1]) ?? -1,
+      coverageStartMs: Int(row[2]) ?? -1, coverageEndMs: Int(row[3]) ?? -1,
+      analysisStartMs: Int(row[4]) ?? -1, analysisEndMs: Int(row[5]) ?? -1,
+      status: row[6], attemptCount: Int(row[7]) ?? -1,
       reasonCode: row[8], blocksJSON: row[9].isEmpty ? nil : row[9],
       vadStatus: row[10].isEmpty ? nil : row[10], vadEvidenceSha256: row[11].isEmpty ? nil : row[11]
     )
@@ -879,6 +923,9 @@ final class MainaNativePostProcessingStore {
     return MainaNativePostProcessingClaim(
       ownerUserId: row[0], meetingId: row[1], runId: row[2], generation: Int(row[3]) ?? -1,
       windowKey: row[4], windowIndex: Int(row[5]) ?? -1, audioURI: row[6],
+      // A recovered stale claim is only fenced/released, never decoded. The
+      // exact decoder-local bounds are reconstructed on the next fresh claim.
+      audioStartMs: Int(row[9]) ?? -1, audioEndMs: Int(row[10]) ?? -1,
       coverageStartMs: Int(row[7]) ?? -1, coverageEndMs: Int(row[8]) ?? -1,
       analysisStartMs: Int(row[9]) ?? -1, analysisEndMs: Int(row[10]) ?? -1,
       runtimeOwnerToken: row[11], claimNonce: row[12], attemptCount: Int(row[13]) ?? -1,
@@ -944,12 +991,17 @@ final class MainaNativePostProcessingStore {
   }
 
   private func sealIfTerminal(_ input: MainaNativePostProcessingStart) throws {
-    try seal(input: input, windows: allWindows(input))
+    guard let run = try findRun(ownerUserId: input.ownerUserId, meetingId: input.meetingId) else { return }
+    try seal(input: canonicalStart(run), windows: allWindows(input))
   }
 
   private func sealIfTerminal(_ claim: MainaNativePostProcessingClaim) throws {
     guard let run = try findRun(ownerUserId: claim.ownerUserId, meetingId: claim.meetingId) else { return }
-    let input = MainaNativePostProcessingStart(
+    try seal(input: canonicalStart(run), windows: allWindows(claim))
+  }
+
+  private func canonicalStart(_ run: PersistedRun) -> MainaNativePostProcessingStart {
+    MainaNativePostProcessingStart(
       ownerUserId: run.ownerUserId, meetingId: run.meetingId, runId: run.runId, generation: run.generation,
       audioFingerprintSha256: run.audioFingerprintSha256, contractVersion: run.contractVersion,
       modelId: run.modelId, modelVersion: run.modelVersion, runtimeVersion: run.runtimeVersion,
@@ -957,7 +1009,6 @@ final class MainaNativePostProcessingStore {
       windowConfig: .init(targetWindowMs: run.targetWindowMs, analysisOverlapMs: run.analysisOverlapMs, maxAttempts: run.maxAttempts),
       windows: [], createdAtMs: run.createdAtMs
     )
-    try seal(input: input, windows: allWindows(claim))
   }
 
   private func seal(input: MainaNativePostProcessingStart, windows: [PersistedWindow]) throws {

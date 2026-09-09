@@ -16,6 +16,31 @@ public final class MainaRecorderModule: Module {
   private let qwen = MainaQwenAsr.shared
   private let continuedProcessing = MainaIOSContinuedProcessing.shared
   private let pipelineWake = MainaIOSPipelineWake.shared
+  private lazy var nativePostProcessing: MainaNativePostProcessingCoordinator? = {
+    guard let store = try? MainaNativePostProcessingStore(
+      databaseURL: MainaNativePostProcessingStore.defaultDatabaseURL()
+    ) else { return nil }
+    return MainaNativePostProcessingCoordinator(
+      store: store,
+      transcribe: { [weak self] claim, completion in
+        guard let self else { completion(.failure(.runtimeInterrupted)); return }
+        self.qwen.transcribe(
+          uri: claim.audioURI,
+          startMs: Double(claim.audioStartMs),
+          endMs: Double(claim.audioEndMs)
+        ) { result in
+          switch result {
+          case .success(let payload):
+            completion(MainaNativePostProcessingQwenAdapter.recognition(payload: payload, claim: claim))
+          case .failure(let error):
+            completion(.failure(MainaNativePostProcessingQwenAdapter.failure(error)))
+          }
+        }
+      },
+      releaseRecognizer: { [weak self] in self?.qwen.release() },
+      onChanged: { [weak self] event in self?.sendEvent("onNativePostProcessingChanged", event) }
+    )
+  }()
 
   public func definition() -> ModuleDefinition {
     Name("MainaRecorder")
@@ -67,17 +92,27 @@ public final class MainaRecorderModule: Module {
     Function("stopForegroundSession") { }
     Function("setCaptureState") { (_: String) in }
     AsyncFunction("startNativeCapture") { (meetingId: String, directory: String, _: String, chunkDurationMs: Int, meetingStartedAt: Double) in
-      try self.capture.start(
+      let result = try self.capture.start(
         meetingId: meetingId,
         directoryValue: directory,
         chunkDurationMs: chunkDurationMs,
         meetingStartedAt: meetingStartedAt
       )
+      self.nativePostProcessing?.setRecordingActive(true)
+      return result
     }
     AsyncFunction("pauseNativeCapture") { try self.capture.pause() }
     AsyncFunction("resumeNativeCapture") { try self.capture.resume() }
-    AsyncFunction("stopNativeCapture") { self.capture.stop() }
-    AsyncFunction("abortNativeCapture") { self.capture.abort() }
+    AsyncFunction("stopNativeCapture") {
+      let result = self.capture.stop()
+      self.nativePostProcessing?.setRecordingActive(false)
+      return result
+    }
+    AsyncFunction("abortNativeCapture") {
+      let result = self.capture.abort()
+      self.nativePostProcessing?.setRecordingActive(false)
+      return result
+    }
     Function("getNativeCaptureStatus") { self.capture.status() }
     // `status()` serializes against the capture queue. Exposing an async form
     // keeps that wait off React Native's JavaScript thread while AVAudioSession
@@ -170,11 +205,142 @@ public final class MainaRecorderModule: Module {
     AsyncFunction("isPipelineWakeAttemptActive") { (attemptToken: String) in
       ["active": self.pipelineWake.isActive(attemptToken: attemptToken)]
     }
+    makePrepareIOSNativePostProcessingAudioDefinition()
+    makeStartIOSNativePostProcessingDefinition()
+    makeReadIOSNativePostProcessingResultDefinition()
+    makeAcknowledgeIOSNativePostProcessingResultDefinition()
+    makeReleaseIOSNativePostProcessingAsrDefinition()
     Function("startNativePostProcessing") { (_: [String: Any]) in
       throw NSError(domain: "MainaRecorder", code: 1002, userInfo: [NSLocalizedDescriptionKey: "The iOS local ASR runtime has not been installed yet."])
     }
     Function("readNativePostProcessingResult") { (_: String) -> [String: Any]? in nil }
     Function("acknowledgeNativePostProcessingResult") { (_: String, _: String) in ["acknowledged": false] }
+  }
+
+  private func makePrepareIOSNativePostProcessingAudioDefinition() -> any AnyDefinition {
+    AsyncFunction("prepareIOSNativePostProcessingAudio") { (meetingId: String, directory: String) -> [String: Any] in
+      do {
+        try Self.requireExactCaptureDirectory(meetingId: meetingId, directory: directory)
+        let inspection = self.capture.inspectDirectory(directory, recoverPartials: false)
+        guard let finalized = inspection["finalizedUris"] as? [String],
+          let partials = inspection["partialUris"] as? [String], partials.isEmpty
+        else { throw Self.bridgeFailure("audio_finalization_incomplete") }
+        let segments = try MainaNativePostProcessingAudioPlanner.loadSegments(
+          uris: finalized,
+          durations: self.capture.durations(finalized)
+        )
+        return [
+          "schemaVersion": "maina.native-post-processing-audio.v1",
+          "audioFingerprintSha256": try MainaNativePostProcessingAudioPlanner.fingerprint(segments),
+          "audioDurationMs": segments.reduce(0) { $0 + $1.durationMs },
+          "segmentCount": segments.count,
+        ]
+      } catch {
+        throw Self.bridgeFailure("native_audio_plan_unavailable")
+      }
+    }
+  }
+
+  private func makeStartIOSNativePostProcessingDefinition() -> any AnyDefinition {
+    AsyncFunction("startIOSNativePostProcessing") { (requestValue: [String: Any], directory: String, promise: Promise) in
+      self.startIOSNativePostProcessing(requestValue: requestValue, directory: directory, promise: promise)
+    }
+  }
+
+  private func startIOSNativePostProcessing(
+    requestValue: [String: Any],
+    directory: String,
+    promise: Promise
+  ) {
+    do {
+      let request = try MainaNativePostProcessingBridgeCodec.start(requestValue)
+      try Self.requireExactCaptureDirectory(meetingId: request.meetingId, directory: directory)
+      let inspection = capture.inspectDirectory(directory, recoverPartials: false)
+      guard let finalized = inspection["finalizedUris"] as? [String],
+        let partials = inspection["partialUris"] as? [String], partials.isEmpty
+      else { throw Self.bridgeFailure("audio_finalization_incomplete") }
+      let segments = try MainaNativePostProcessingAudioPlanner.loadSegments(
+        uris: finalized,
+        durations: capture.durations(finalized)
+      )
+      let start = try MainaNativePostProcessingAudioPlanner.makeStart(
+        request: request,
+        segments: segments,
+        modelVersion: "1",
+        runtimeVersion: "sherpa-onnx-1.13.4-ios-no-tts",
+        createdAtMs: Int64(Date().timeIntervalSince1970 * 1_000)
+      )
+      guard let coordinator = nativePostProcessing else {
+        throw Self.bridgeFailure("native_store_unavailable")
+      }
+      coordinator.start(start) { result in
+        switch result {
+        case .success(let value):
+          let payload: [String: Any] = [
+            "requested": true,
+            "resumed": value.resumed,
+            "state": value.state,
+            "firstIncompleteWindowKey": value.firstIncompleteWindowKey ?? NSNull(),
+          ]
+          promise.resolve(payload)
+        case .failure:
+          promise.reject(Self.bridgeFailure("native_post_processing_start_failed"))
+        }
+      }
+    } catch {
+      promise.reject(Self.bridgeFailure("native_post_processing_start_failed"))
+    }
+  }
+
+  private func makeReadIOSNativePostProcessingResultDefinition() -> any AnyDefinition {
+    AsyncFunction("readIOSNativePostProcessingResult") { (requestValue: [String: Any], promise: Promise) in
+      do {
+        let request = try MainaNativePostProcessingBridgeCodec.read(requestValue)
+        guard let coordinator = self.nativePostProcessing else {
+          throw Self.bridgeFailure("native_store_unavailable")
+        }
+        let result = try coordinator.readResult(
+          ownerUserId: request.ownerUserId,
+          meetingId: request.meetingId,
+          runId: request.runId,
+          generation: request.generation
+        )
+        promise.resolve(result ?? NSNull())
+      } catch {
+        promise.reject(Self.bridgeFailure("native_post_processing_read_failed"))
+      }
+    }
+  }
+
+  private func makeAcknowledgeIOSNativePostProcessingResultDefinition() -> any AnyDefinition {
+    AsyncFunction("acknowledgeIOSNativePostProcessingResult") { (fenceValue: [String: Any]) -> [String: Any] in
+      do {
+        let fence = try MainaNativePostProcessingBridgeCodec.acknowledge(fenceValue)
+        guard let coordinator = self.nativePostProcessing else {
+          throw Self.bridgeFailure("native_store_unavailable")
+        }
+        return ["acknowledged": try coordinator.acknowledge(fence)]
+      } catch {
+        throw Self.bridgeFailure("native_post_processing_acknowledgement_failed")
+      }
+    }
+  }
+
+  private func makeReleaseIOSNativePostProcessingAsrDefinition() -> any AnyDefinition {
+    AsyncFunction("releaseIOSNativePostProcessingAsr") { (requestValue: [String: Any]) -> [String: Any] in
+      do {
+        let request = try MainaNativePostProcessingBridgeCodec.release(requestValue)
+        guard let coordinator = self.nativePostProcessing else {
+          throw Self.bridgeFailure("native_store_unavailable")
+        }
+        return ["released": try coordinator.releaseAsr(
+          runtimeOwnerToken: request.runtimeOwnerToken,
+          generation: request.generation
+        )]
+      } catch {
+        throw Self.bridgeFailure("native_post_processing_release_failed")
+      }
+    }
   }
 
   private static func microphonePermissionLabel() -> String {
@@ -188,5 +354,23 @@ public final class MainaRecorderModule: Module {
     @unknown default:
       return "unknown"
     }
+  }
+
+  private static func requireExactCaptureDirectory(meetingId: String, directory: String) throws {
+    guard meetingId.range(
+      of: "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$",
+      options: .regularExpression
+    ) != nil, let supplied = URL(string: directory), supplied.isFileURL else {
+      throw bridgeFailure("capture_directory_invalid")
+    }
+    let expected = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+      .appendingPathComponent("rec-\(meetingId)", isDirectory: true)
+    guard supplied.standardizedFileURL.resolvingSymlinksInPath().path
+      == expected.standardizedFileURL.resolvingSymlinksInPath().path
+    else { throw bridgeFailure("capture_directory_invalid") }
+  }
+
+  private static func bridgeFailure(_ code: String) -> NSError {
+    NSError(domain: "MainaNativePostProcessing", code: 2_001, userInfo: [NSLocalizedDescriptionKey: code])
   }
 }

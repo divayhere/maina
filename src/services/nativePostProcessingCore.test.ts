@@ -1,13 +1,131 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  decodeIOSNativePostProcessingResult,
   deriveNativeTranscriptOutcome,
   nativeProgress,
   shouldImportNativePostProcessingResult,
   shouldRepairNativeTranscriptStatus,
 } from './nativePostProcessingCore';
 
+const nativeResultIdentity = {
+  ownerUserId: 'owner-a',
+  meetingId: 'meeting-a',
+  runId: 'run-a',
+  generation: 1,
+};
+
+function completeNativeResult(): Record<string, unknown> {
+  return {
+    schemaVersion: 'maina.native-post-processing-result.v1',
+    identity: {
+      ...nativeResultIdentity,
+      resultId: `npr_${'a'.repeat(32)}`,
+      audioFingerprintSha256: 'b'.repeat(64),
+      contractVersion: '1.0',
+      modelId: 'qwen3-0.6b-int8',
+      modelVersion: '1',
+      runtimeVersion: 'sherpa-onnx-1.13.4-ios-no-tts',
+      createdAt: '2026-09-09T00:00:00.000Z',
+    },
+    disposition: 'complete',
+    audio: { durationMs: 20_000, segmentCount: 1 },
+    windowConfig: { targetWindowMs: 10_000, analysisOverlapMs: 1_000, maxAttempts: 2 },
+    windows: [
+      {
+        windowKey: 'window-0', index: 0,
+        coverageStartMs: 0, coverageEndMs: 10_000,
+        analysisStartMs: 0, analysisEndMs: 11_000,
+        status: 'completed',
+        blocks: [{
+          blockKey: 'block-0', sequence: 0, startedAtMs: 0, endedAtMs: 10_000,
+          text: 'first block', language: 'en',
+        }],
+        retry: { attemptCount: 1, maxAttempts: 2, lastReasonCode: 'NONE' },
+        vad: { status: 'unavailable', evidenceSha256: 'c'.repeat(64) },
+      },
+      {
+        windowKey: 'window-1', index: 1,
+        coverageStartMs: 10_000, coverageEndMs: 20_000,
+        analysisStartMs: 9_000, analysisEndMs: 20_000,
+        status: 'completed',
+        blocks: [{
+          blockKey: 'block-1', sequence: 1, startedAtMs: 10_000, endedAtMs: 20_000,
+          text: 'second block', language: 'en',
+        }],
+        retry: { attemptCount: 1, maxAttempts: 2, lastReasonCode: 'NONE' },
+        vad: { status: 'unavailable', evidenceSha256: 'd'.repeat(64) },
+      },
+    ],
+    unresolvedIntervals: [],
+    coverage: {
+      windowCount: 2, completedWindows: 2, failedWindows: 0,
+      unresolvedWindows: 0, coverageComplete: true,
+    },
+    resultPayloadSha256: 'e'.repeat(64),
+  };
+}
+
 describe('native transcript truth model', () => {
+  it('accepts only an exact owner-bound complete native result partition', () => {
+    const decoded = decodeIOSNativePostProcessingResult(completeNativeResult(), nativeResultIdentity);
+    expect(decoded.disposition).toBe('complete');
+    expect(decoded.coverage).toEqual({
+      windowCount: 2, completedWindows: 2, failedWindows: 0,
+      unresolvedWindows: 0, coverageComplete: true,
+    });
+  });
+
+  it('rejects unknown fields and a cross-owner native result before import', () => {
+    expect(() => decodeIOSNativePostProcessingResult({
+      ...completeNativeResult(), rawPath: '/private/container',
+    }, nativeResultIdentity)).toThrow('contract mismatch');
+    expect(() => decodeIOSNativePostProcessingResult(completeNativeResult(), {
+      ...nativeResultIdentity, ownerUserId: 'owner-b',
+    })).toThrow('contract mismatch');
+  });
+
+  it('rejects coverage gaps and internally inconsistent completeness', () => {
+    const gap = completeNativeResult();
+    (gap.windows as Array<Record<string, unknown>>)[1] = {
+      ...(gap.windows as Array<Record<string, unknown>>)[1], coverageStartMs: 10_001,
+    };
+    expect(() => decodeIOSNativePostProcessingResult(gap, nativeResultIdentity))
+      .toThrow('contract mismatch');
+
+    const falseComplete = completeNativeResult();
+    falseComplete.coverage = {
+      windowCount: 2, completedWindows: 2, failedWindows: 0,
+      unresolvedWindows: 0, coverageComplete: false,
+    };
+    expect(() => decodeIOSNativePostProcessingResult(falseComplete, nativeResultIdentity))
+      .toThrow('contract mismatch');
+  });
+
+  it('accepts a partial result only when its failed interval is exact', () => {
+    const partial = completeNativeResult();
+    partial.disposition = 'partial';
+    const windows = partial.windows as Array<Record<string, unknown>>;
+    windows[1] = {
+      ...windows[1], status: 'failed', blocks: [],
+      retry: { attemptCount: 2, maxAttempts: 2, lastReasonCode: 'AUDIO_UNREADABLE' },
+    };
+    partial.unresolvedIntervals = [{
+      windowKey: 'window-1', startMs: 10_000, endMs: 20_000,
+      outcome: 'failed', reasonCode: 'AUDIO_UNREADABLE',
+    }];
+    partial.coverage = {
+      windowCount: 2, completedWindows: 1, failedWindows: 1,
+      unresolvedWindows: 0, coverageComplete: false,
+    };
+    expect(decodeIOSNativePostProcessingResult(partial, nativeResultIdentity).disposition)
+      .toBe('partial');
+
+    (partial.unresolvedIntervals as Array<Record<string, unknown>>)[0].startMs = 9_999;
+    expect(() => decodeIOSNativePostProcessingResult(partial, nativeResultIdentity))
+      .toThrow('contract mismatch');
+  });
+
   it('does not promote a 190 of 216 transcript to complete or cloud-eligible', () => {
     expect(deriveNativeTranscriptOutcome({
       hasText: true,

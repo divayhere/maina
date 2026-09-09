@@ -133,10 +133,68 @@ export interface NativePostProcessingResult {
   blocks: Array<{ sequence: number; segmentIndex: number; startedAt: number; endedAt: number; language: string; text: string }>;
 }
 
-export interface NativePostProcessingChangedEvent {
+export interface LegacyNativePostProcessingChangedEvent {
   meetingId: string;
   state: 'running' | 'complete' | 'partial' | 'deferred' | string;
   occurredAt: number;
+}
+
+export interface IOSNativePostProcessingChangedEvent {
+  schemaVersion: 'maina.native-post-processing-changed.v1';
+  meetingId: string;
+  runId: string;
+  generation: number;
+  eventSequence: number;
+}
+
+export type NativePostProcessingChangedEvent =
+  | LegacyNativePostProcessingChangedEvent
+  | IOSNativePostProcessingChangedEvent;
+
+export interface IOSNativePostProcessingWindowConfig {
+  targetWindowMs: number;
+  analysisOverlapMs: number;
+  maxAttempts: number;
+}
+
+export interface IOSNativePostProcessingStartRequest {
+  ownerUserId: string;
+  meetingId: string;
+  runId: string;
+  generation: number;
+  audioFingerprintSha256: string;
+  windowConfig: IOSNativePostProcessingWindowConfig;
+  runtimeOwnerToken: string;
+}
+
+export interface IOSNativePostProcessingReadRequest {
+  ownerUserId: string;
+  meetingId: string;
+  runId: string;
+  generation: number;
+}
+
+export interface IOSNativePostProcessingImportFence extends IOSNativePostProcessingReadRequest {
+  schemaVersion: 'maina.native-post-processing-import-fence.v1';
+  state: 'DURABLE';
+  resultId: string;
+  resultPayloadSha256: string;
+  importedAt: string;
+  transactionCommitSha256: string;
+}
+
+export interface IOSNativePostProcessingAudioDescriptor {
+  schemaVersion: 'maina.native-post-processing-audio.v1';
+  audioFingerprintSha256: string;
+  audioDurationMs: number;
+  segmentCount: number;
+}
+
+export interface IOSNativePostProcessingStartOutcome {
+  requested: true;
+  resumed: boolean;
+  state: string;
+  firstIncompleteWindowKey: string | null;
 }
 
 export interface NativePipelineWakeRequestedEvent {
@@ -186,6 +244,7 @@ export interface QwenAsrResult {
   speechExpected: boolean;
   truncationSuspected: boolean;
   tokenCount: number;
+  maxNewTokens: 128;
 }
 
 export interface NativeEventSubscription {
@@ -315,6 +374,17 @@ interface MainaRecorderNativeModule {
   resumeNativeCapture(): Promise<{ requested: boolean }>;
   stopNativeCapture(): Promise<{ requested: boolean }>;
   abortNativeCapture(): Promise<{ requested: boolean }>;
+  prepareIOSNativePostProcessingAudio?(meetingId: string, directory: string): Promise<IOSNativePostProcessingAudioDescriptor>;
+  startIOSNativePostProcessing?(
+    request: IOSNativePostProcessingStartRequest,
+    directory: string,
+  ): Promise<IOSNativePostProcessingStartOutcome>;
+  readIOSNativePostProcessingResult?(request: IOSNativePostProcessingReadRequest): Promise<Record<string, unknown> | null>;
+  acknowledgeIOSNativePostProcessingResult?(fence: IOSNativePostProcessingImportFence): Promise<{ acknowledged: boolean }>;
+  releaseIOSNativePostProcessingAsr?(request: {
+    runtimeOwnerToken: string;
+    generation: number;
+  }): Promise<{ released: boolean }>;
   startNativePostProcessing(request: NativePostProcessingRequest): Promise<{ requested: boolean }>;
   isNativePostProcessingServiceRunning?(): boolean;
   readNativePostProcessingResult(meetingId: string): Promise<NativePostProcessingResult | null>;

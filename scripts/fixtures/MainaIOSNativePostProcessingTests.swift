@@ -1,4 +1,5 @@
 import Foundation
+import SQLite3
 
 private var assertions = 0
 
@@ -86,6 +87,31 @@ private func expectThrows(
   }
 }
 
+private func expectBridgeThrows(_ message: String, _ operation: () throws -> Void) {
+  assertions += 1
+  do {
+    try operation()
+    FileHandle.standardError.write(Data("FAIL: \(message) did not throw\n".utf8))
+    exit(1)
+  } catch is MainaNativePostProcessingBridgeError {
+    return
+  } catch {
+    FileHandle.standardError.write(Data("FAIL: \(message) threw unexpected \(error)\n".utf8))
+    exit(1)
+  }
+}
+
+private func executeSQLite(_ databaseURL: URL, _ sql: String) throws {
+  var database: OpaquePointer?
+  guard sqlite3_open_v2(databaseURL.path, &database, SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX, nil) == SQLITE_OK,
+    let database
+  else { throw MainaNativePostProcessingStoreError.storageFailure("test_database_open_failed") }
+  defer { sqlite3_close(database) }
+  guard sqlite3_exec(database, sql, nil, nil, nil) == SQLITE_OK else {
+    throw MainaNativePostProcessingStoreError.storageFailure("test_database_mutation_failed")
+  }
+}
+
 private func makeStart(
   owner: String = "owner-a",
   meeting: String = "meeting-a",
@@ -94,7 +120,8 @@ private func makeStart(
   token: String = "runtime-a",
   maxAttempts: Int = 2,
   fingerprint: String = String(repeating: "a", count: 64),
-  firstAudioURI: String = "file:///synthetic/capture-00000.wav"
+  firstAudioURI: String = "file:///synthetic/capture-00000.wav",
+  createdAtMs: Int64 = 1_788_000_000_000
 ) -> MainaNativePostProcessingStart {
   MainaNativePostProcessingStart(
     ownerUserId: owner,
@@ -114,6 +141,8 @@ private func makeStart(
       .init(
         index: 0,
         audioURI: firstAudioURI,
+        audioStartMs: 0,
+        audioEndMs: 11_000,
         coverageStartMs: 0,
         coverageEndMs: 10_000,
         analysisStartMs: 0,
@@ -121,14 +150,16 @@ private func makeStart(
       ),
       .init(
         index: 1,
-        audioURI: "file:///synthetic/capture-00000.wav",
+        audioURI: firstAudioURI,
+        audioStartMs: 9_000,
+        audioEndMs: 20_000,
         coverageStartMs: 10_000,
         coverageEndMs: 20_000,
         analysisStartMs: 9_000,
         analysisEndMs: 20_000
       ),
     ],
-    createdAtMs: 1_788_000_000_000
+    createdAtMs: createdAtMs
   )
 }
 
@@ -159,6 +190,113 @@ private func resultIdentity(_ result: [String: Any]) -> [String: Any] {
 }
 
 private func run() throws {
+  let exactStartDictionary: [String: Any] = [
+    "ownerUserId": "owner-a",
+    "meetingId": "meeting-a",
+    "runId": "run-a",
+    "generation": 1,
+    "audioFingerprintSha256": String(repeating: "a", count: 64),
+    "windowConfig": ["targetWindowMs": 10_000, "analysisOverlapMs": 1_000, "maxAttempts": 2],
+    "runtimeOwnerToken": "runtime-a",
+  ]
+  let decodedStart = try MainaNativePostProcessingBridgeCodec.start(exactStartDictionary)
+  expect(decodedStart.meetingId == "meeting-a", "closed Expo start request decodes")
+  var bridgedStart = exactStartDictionary
+  bridgedStart["generation"] = 1.0
+  bridgedStart["windowConfig"] = ["targetWindowMs": 10_000.0, "analysisOverlapMs": 1_000.0, "maxAttempts": 2.0]
+  expect(try MainaNativePostProcessingBridgeCodec.start(bridgedStart) == decodedStart,
+    "integral JavaScript doubles decode without rounding drift")
+  var fractionalStart = bridgedStart
+  fractionalStart["generation"] = 1.5
+  expectBridgeThrows("fractional JavaScript generation fails closed") {
+    _ = try MainaNativePostProcessingBridgeCodec.start(fractionalStart)
+  }
+  var extraStart = exactStartDictionary
+  extraStart["directory"] = "file:///private"
+  expectBridgeThrows("start request rejects undeclared transport fields") {
+    _ = try MainaNativePostProcessingBridgeCodec.start(extraStart)
+  }
+  var invalidWindowStart = exactStartDictionary
+  invalidWindowStart["windowConfig"] = ["targetWindowMs": 10_000, "analysisOverlapMs": 10_000, "maxAttempts": 2]
+  expectBridgeThrows("analysis overlap must be shorter than coverage window") {
+    _ = try MainaNativePostProcessingBridgeCodec.start(invalidWindowStart)
+  }
+  let read = try MainaNativePostProcessingBridgeCodec.read([
+    "ownerUserId": "owner-a", "meetingId": "meeting-a", "runId": "run-a", "generation": 1,
+  ])
+  expect(read.ownerUserId == "owner-a", "closed read request decodes")
+  expectBridgeThrows("read request rejects unknown fields") {
+    _ = try MainaNativePostProcessingBridgeCodec.read([
+      "ownerUserId": "owner-a", "meetingId": "meeting-a", "runId": "run-a", "generation": 1,
+      "result": "private",
+    ])
+  }
+  let release = try MainaNativePostProcessingBridgeCodec.release([
+    "runtimeOwnerToken": "runtime-a", "generation": 1,
+  ])
+  expect(release.generation == 1, "closed runtime-release request decodes")
+  let decodedFence = try MainaNativePostProcessingBridgeCodec.acknowledge([
+    "schemaVersion": "maina.native-post-processing-import-fence.v1",
+    "state": "DURABLE",
+    "ownerUserId": "owner-a",
+    "meetingId": "meeting-a",
+    "runId": "run-a",
+    "generation": 1,
+    "resultId": "result-a",
+    "resultPayloadSha256": String(repeating: "b", count: 64),
+    "importedAt": "2026-09-09T00:00:00.000Z",
+    "transactionCommitSha256": String(repeating: "c", count: 64),
+  ])
+  expect(decodedFence.state == "DURABLE", "closed durable import fence decodes")
+  expect(
+    MainaNativePostProcessingTranscriptStitcher.removeExactOverlap(
+      previous: "Send the final notes to Rahul",
+      current: "notes to Rahul before lunch"
+    ) == "before lunch",
+    "native overlap stitching removes only the exact normalized boundary"
+  )
+  expect(
+    MainaNativePostProcessingTranscriptStitcher.removeExactOverlap(
+      previous: "send it to Rahul",
+      current: "Rahul will review it"
+    ) == "Rahul will review it",
+    "native overlap stitching never drops a one-word coincidence"
+  )
+
+  let sourceSegments = [
+    MainaNativePostProcessingAudioSegment(
+      audioURI: "file:///synthetic/capture-00000.wav", byteCount: 1_000,
+      durationMs: 12_000, sha256: String(repeating: "1", count: 64)
+    ),
+    MainaNativePostProcessingAudioSegment(
+      audioURI: "file:///synthetic/capture-00001.wav", byteCount: 2_000,
+      durationMs: 8_000, sha256: String(repeating: "2", count: 64)
+    ),
+  ]
+  let sourceFingerprint = try MainaNativePostProcessingAudioPlanner.fingerprint(sourceSegments)
+  var plannedRequestDictionary = exactStartDictionary
+  plannedRequestDictionary["audioFingerprintSha256"] = sourceFingerprint
+  let planned = try MainaNativePostProcessingAudioPlanner.makeStart(
+    request: MainaNativePostProcessingBridgeCodec.start(plannedRequestDictionary),
+    segments: sourceSegments,
+    modelVersion: "1",
+    runtimeVersion: "sherpa-onnx-1.13.4-ios-no-tts",
+    createdAtMs: 1_788_000_000_000
+  )
+  expect(planned.audioDurationMs == 20_000 && planned.windows.count == 3,
+    "multi-segment planner covers every finalized WAV")
+  expect(planned.windows[2].coverageStartMs == 12_000 && planned.windows[2].audioStartMs == 0,
+    "second WAV keeps global coverage and resets its decoder-local offset")
+  expectBridgeThrows("planner rejects a caller fingerprint that differs from immutable audio") {
+    _ = try MainaNativePostProcessingAudioPlanner.makeStart(
+      request: decodedStart,
+      segments: sourceSegments,
+      modelVersion: "1",
+      runtimeVersion: "sherpa-onnx-1.13.4-ios-no-tts",
+      createdAtMs: 1_788_000_000_000
+    )
+  }
+
   let root = FileManager.default.temporaryDirectory
     .appendingPathComponent("maina-native-post-processing-\(UUID().uuidString)", isDirectory: true)
   defer { try? FileManager.default.removeItem(at: root) }
@@ -191,6 +329,8 @@ private func run() throws {
   expect(first.windowIndex == 0, "first incomplete checkpoint is claimed")
   let sameProcessReplay = try store.begin(start)
   expect(sameProcessReplay.resumed && sameProcessReplay.state == "running", "same-process start replay preserves the live claim")
+  let laterReplay = try store.begin(makeStart(createdAtMs: 1_788_000_999_999))
+  expect(laterReplay.resumed, "replay uses the WAL-frozen creation time rather than a new caller clock")
   expect(try store.claimFirstIncomplete(secondStart, recordingActive: false) == nil,
     "one runtime owner prevents a second recognizer claim")
 
@@ -241,6 +381,11 @@ private func run() throws {
   expect(intervals?.first?["endMs"] as? Int == 20_000, "failed interval keeps exact end")
 
   let identity = resultIdentity(partial)
+  let frozenCreatedAt = ISO8601DateFormatter()
+  frozenCreatedAt.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+  expect(identity["createdAt"] as? String == frozenCreatedAt.string(
+    from: Date(timeIntervalSince1970: Double(start.createdAtMs) / 1_000)
+  ), "terminal result retains the first WAL creation time after replay")
   let resultId = identity["resultId"] as! String
   let resultSha = partial["resultPayloadSha256"] as! String
   let fence = MainaNativePostProcessingImportFence(
@@ -340,6 +485,26 @@ private func run() throws {
     try data.write(to: URL(fileURLWithPath: output), options: .atomic)
   }
 
+  let integrityURL = root.appendingPathComponent("integrity.sqlite3")
+  let integrityStore = try MainaNativePostProcessingStore(databaseURL: integrityURL)
+  let integrityStart = makeStart(meeting: "meeting-integrity", run: "run-integrity", token: "runtime-integrity")
+  _ = try integrityStore.begin(integrityStart)
+  try complete(integrityStore, try integrityStore.claimFirstIncomplete(integrityStart, recordingActive: false)!, text: "first")
+  try complete(integrityStore, try integrityStore.claimFirstIncomplete(integrityStart, recordingActive: false)!, text: "second")
+  _ = try integrityStore.readResult(
+    ownerUserId: "owner-a", meetingId: "meeting-integrity", runId: "run-integrity", generation: 1
+  )
+  try executeSQLite(
+    integrityURL,
+    "UPDATE runs SET result_json = replace(result_json, '\"disposition\":\"complete\"', '\"disposition\":\"partial\"') "
+      + "WHERE meeting_id = 'meeting-integrity'"
+  )
+  expectThrows(.storageFailure("terminal_result_invalid"), "tampered terminal payload is rejected before disclosure") {
+    _ = try integrityStore.readResult(
+      ownerUserId: "owner-a", meetingId: "meeting-integrity", runId: "run-integrity", generation: 1
+    )
+  }
+
   let releaseStart = makeStart(meeting: "meeting-release", run: "run-release", token: "runtime-release")
   _ = try reopened.begin(releaseStart)
   _ = try reopened.claimFirstIncomplete(releaseStart, recordingActive: false)
@@ -394,7 +559,7 @@ private func run() throws {
   )))
   waitUntil("coordinator serially claims the second window") { fake.pendingCount == 1 }
   fake.completeNext(.success(.init(
-    text: "second coordinator window", language: "en", vadStatus: "speech",
+    text: "coordinator window continues safely", language: "en", vadStatus: "speech",
     vadEvidenceSha256: String(repeating: "c", count: 64)
   )))
   waitUntil("coordinator seals the exact terminal result") {
@@ -403,6 +568,50 @@ private func run() throws {
     )) != nil
   }
   expect(fake.maximumPending == 1, "coordinator never overlaps recognizer callbacks")
+  let stitchedResult = try coordinatorStore.readResult(
+    ownerUserId: "owner-a", meetingId: "meeting-coordinator", runId: "run-coordinator", generation: 1
+  )!
+  let stitchedWindows = stitchedResult["windows"] as? [[String: Any]]
+  let stitchedBlocks = stitchedWindows?[1]["blocks"] as? [[String: Any]]
+  expect(stitchedBlocks?.first?["text"] as? String == "continues safely",
+    "coordinator removes exact overlap before the durable window commit")
+
+  let adapterClaim = MainaNativePostProcessingClaim(
+    ownerUserId: "owner-a", meetingId: "meeting-adapter", runId: "run-adapter", generation: 1,
+    windowKey: "window-adapter", windowIndex: 0,
+    audioURI: "file:///synthetic/capture-00001.wav", audioStartMs: 500, audioEndMs: 2_500,
+    coverageStartMs: 12_500, coverageEndMs: 14_500,
+    analysisStartMs: 12_500, analysisEndMs: 14_500,
+    runtimeOwnerToken: "runtime-adapter", claimNonce: "claim-adapter", attemptCount: 1, maxAttempts: 2
+  )
+  let qwenPayload: [String: Any] = [
+    "outcome": "success", "text": "bounded transcript", "language": "en",
+    "processingMs": 4, "durationMs": 2_000, "windowStartMs": 500, "windowEndMs": 2_500,
+    "rmsDbfs": -32.0, "peakDbfs": -10.0, "speechExpected": true,
+    "truncationSuspected": false, "tokenCount": 2, "maxNewTokens": 128,
+    "engineId": "qwen3-0.6b-int8", "engineVersion": "sherpa-onnx-1.13.4-ios-no-tts",
+  ]
+  switch MainaNativePostProcessingQwenAdapter.recognition(payload: qwenPayload, claim: adapterClaim) {
+  case .success(let recognition):
+    expect(recognition.text == "bounded transcript" && recognition.vadStatus == "unavailable",
+      "Qwen output maps to bounded native result evidence")
+  case .failure:
+    expect(false, "valid Qwen output must not fail")
+  }
+  var truncatedPayload = qwenPayload
+  truncatedPayload["truncationSuspected"] = true
+  expect(
+    MainaNativePostProcessingQwenAdapter.recognition(payload: truncatedPayload, claim: adapterClaim)
+      == .failure(.runtimeInterrupted),
+    "token-cap output stays retryable instead of becoming durable text"
+  )
+  var extraPayload = qwenPayload
+  extraPayload["rawError"] = "private"
+  expect(
+    MainaNativePostProcessingQwenAdapter.recognition(payload: extraPayload, claim: adapterClaim)
+      == .failure(.runtimeInterrupted),
+    "Qwen adapter rejects undeclared payload fields"
+  )
 }
 
 @main
