@@ -10,6 +10,8 @@ import {
 
 const mocks = vi.hoisted(() => ({
   requireScope: vi.fn(),
+  pinExecutionContext: vi.fn(),
+  assertExecutionContext: vi.fn(),
   request: vi.fn(),
   getCache: vi.fn(),
   putCache: vi.fn(),
@@ -24,8 +26,11 @@ vi.mock('./mainaCloudSession', () => {
   }
   return {
     MainaCloudApiError,
+    MainaCloudSessionMismatchError: class MainaCloudSessionMismatchError extends Error {},
+    assertMainaCloudExecutionContext: mocks.assertExecutionContext,
     MainaCloudScopeError,
     requireMainaCloudScope: mocks.requireScope,
+    pinMainaCloudExecutionContext: mocks.pinExecutionContext,
     mainaCloudRequestJson: mocks.request,
   };
 });
@@ -49,8 +54,12 @@ import {
 describe('MKC Memory Pulse and saved Recall client', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mocks.pinExecutionContext.mockReturnValue({
+      ownerUserId: 'owner-a', accessToken: 'redacted-test-token', scopesVerifiedAt: 1,
+    });
+    mocks.assertExecutionContext.mockResolvedValue(undefined);
     mocks.requireScope.mockResolvedValue({
-      scopes: ['recall:read'], scopesVerifiedAt: 1,
+      accessToken: 'redacted-test-token', scopes: ['recall:read'], scopesVerifiedAt: 1,
       user: { userId: 'owner-a', email: 'owner@example.test' },
     });
   });
@@ -81,12 +90,22 @@ describe('MKC Memory Pulse and saved Recall client', () => {
     await expect(getMemoryPulse({ enabled: true, timezone: 'Asia/Kolkata' })).resolves.toEqual(expect.objectContaining({
       data: memoryPulseFixture, source: 'network',
     }));
-    expect(mocks.request).toHaveBeenNthCalledWith(1, '/v1/memory-pulse?timezone=Asia%2FKolkata', expect.objectContaining({ method: 'GET' }));
+    expect(mocks.request).toHaveBeenNthCalledWith(
+      1,
+      '/v1/memory-pulse?timezone=Asia%2FKolkata',
+      expect.objectContaining({ method: 'GET' }),
+      { executionContext: expect.objectContaining({ ownerUserId: 'owner-a' }) },
+    );
     expect(mocks.putCache).toHaveBeenCalledWith(expect.objectContaining({ ownerUserId: 'owner-a', kind: 'pulse' }));
     await expect(markMemoryPulseViewed({ observedAt: memoryPulseFixture.observed_at, enabled: true })).resolves.toEqual({
       viewed_at: memoryPulseFixture.observed_at,
     });
-    expect(mocks.request).toHaveBeenNthCalledWith(2, '/v1/memory-pulse/viewed', expect.objectContaining({ method: 'POST' }));
+    expect(mocks.request).toHaveBeenNthCalledWith(
+      2,
+      '/v1/memory-pulse/viewed',
+      expect.objectContaining({ method: 'POST' }),
+      { executionContext: expect.objectContaining({ ownerUserId: 'owner-a' }) },
+    );
   });
 
   it('uses only the same owner cache for an offline read and labels it as cached', async () => {
@@ -106,8 +125,18 @@ describe('MKC Memory Pulse and saved Recall client', () => {
     await expect(getSavedSmartRecall({ definitionId: 'smart-recall-1', enabled: true })).resolves.toEqual(expect.objectContaining({ data: smartRecallDefinitionFixture }));
     await expect(runSavedSmartRecall({ definitionId: 'smart-recall-1', timezone: 'UTC', enabled: true })).resolves.toEqual(smartRecallRunFixture);
     await expect(prepareSavedSmartRecall({ definitionId: 'smart-recall-1', timezone: 'UTC', enabled: true })).resolves.toEqual(smartRecallRunFixture);
-    expect(mocks.request).toHaveBeenNthCalledWith(2, '/v1/smart-recalls/smart-recall-1/run', expect.objectContaining({ method: 'POST', body: JSON.stringify({ timezone: 'UTC' }) }));
-    expect(mocks.request).toHaveBeenNthCalledWith(3, '/v1/smart-recalls/smart-recall-1/prepare', expect.objectContaining({ method: 'POST', body: JSON.stringify({ timezone: 'UTC' }) }));
+    expect(mocks.request).toHaveBeenNthCalledWith(
+      2,
+      '/v1/smart-recalls/smart-recall-1/run',
+      expect.objectContaining({ method: 'POST', body: JSON.stringify({ timezone: 'UTC' }) }),
+      { executionContext: expect.objectContaining({ ownerUserId: 'owner-a' }) },
+    );
+    expect(mocks.request).toHaveBeenNthCalledWith(
+      3,
+      '/v1/smart-recalls/smart-recall-1/prepare',
+      expect.objectContaining({ method: 'POST', body: JSON.stringify({ timezone: 'UTC' }) }),
+      { executionContext: expect.objectContaining({ ownerUserId: 'owner-a' }) },
+    );
   });
 
   it('fails closed on a foreign or checksum-drifted run and never falls back to cache', async () => {

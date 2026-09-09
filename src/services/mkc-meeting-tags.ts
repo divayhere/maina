@@ -9,6 +9,7 @@ import {
   MainaCloudSessionMismatchError,
   MainaCloudScopeError,
   mainaCloudRequestJson,
+  pinMainaCloudExecutionContext,
   requireMainaCloudScope,
   type MainaCloudExecutionContext,
 } from './mainaCloudSession';
@@ -101,13 +102,13 @@ function safeError(cause: unknown): MkcMeetingTagsError {
 async function requireScope(
   scope: 'sources:read' | 'sources:write',
   executionContext?: MainaCloudExecutionContext,
-): Promise<void> {
+): Promise<MainaCloudExecutionContext> {
   try {
     if (executionContext) {
       await requireMainaCloudScope(scope, executionContext);
-    } else {
-      await requireMainaCloudScope(scope);
+      return executionContext;
     }
+    return pinMainaCloudExecutionContext(await requireMainaCloudScope(scope));
   } catch (cause) {
     throw safeError(cause);
   }
@@ -134,12 +135,12 @@ export async function listMkcMeetingTags(
   boundary: RequestBoundary = {},
 ): Promise<MeetingTagDefinitionListV1> {
   requireEnabled(boundary.enabled);
-  await requireScope('sources:read', boundary.executionContext);
+  const executionContext = await requireScope('sources:read', boundary.executionContext);
   try {
     const response = await requestJson('/v1/meeting-tags', {
       method: 'GET',
       signal: boundary.signal,
-    }, boundary.executionContext);
+    }, executionContext);
     return decodeMeetingTagDefinitions(response.data);
   } catch (cause) {
     throw safeError(cause);
@@ -152,12 +153,12 @@ export async function readMkcMeetingTagState(
 ): Promise<MeetingTagStateV1> {
   requireEnabled(boundary.enabled);
   const path = sourceKeyPath(sourceKey);
-  await requireScope('sources:read', boundary.executionContext);
+  const executionContext = await requireScope('sources:read', boundary.executionContext);
   try {
     const response = await requestJson(path, {
       method: 'GET',
       signal: boundary.signal,
-    }, boundary.executionContext);
+    }, executionContext);
     return decodeMeetingTagState(response.data, sourceKey);
   } catch (cause) {
     throw safeError(cause);
@@ -175,14 +176,14 @@ export async function mutateMkcMeetingTags(
   } catch (cause) {
     throw safeError(cause);
   }
-  await requireScope('sources:write', boundary.executionContext);
+  const executionContext = await requireScope('sources:write', boundary.executionContext);
   try {
     const response = await requestJson('/v1/meeting-tags/mutations', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(request),
       signal: boundary.signal,
-    }, boundary.executionContext);
+    }, executionContext);
     return decodeMeetingTagMutationReceipt(response.data, request);
   } catch (cause) {
     throw safeError(cause);

@@ -1,7 +1,10 @@
 import {
+  assertMainaCloudExecutionContext,
   MainaCloudApiError,
+  MainaCloudSessionMismatchError,
   MainaCloudScopeError,
   mainaCloudRequestJson,
+  pinMainaCloudExecutionContext,
   requireMainaCloudScope,
 } from './mainaCloudSession';
 import { getMkcMemoryCacheEntry, putMkcMemoryCacheEntry } from './mkc-memory-cache';
@@ -60,6 +63,13 @@ function requireEnabled(input: Pick<CachedReadInput<unknown>, 'enabled' | 'defau
 
 export function asMkcMemoryReadError(cause: unknown, mapContractError?: MkcMemoryContractErrorMapper): MkcMemoryReadError {
   if (cause instanceof MkcMemoryReadError) return cause;
+  if (cause instanceof MainaCloudSessionMismatchError) {
+    return new MkcMemoryReadError(
+      'session_changed',
+      true,
+      'Maina Cloud account changed. Refresh to continue.',
+    );
+  }
   if (cause instanceof MainaCloudScopeError) return new MkcMemoryReadError('auth', false, cause.message);
   const contractFailure = mapContractError?.(cause);
   if (contractFailure) return contractFailure;
@@ -78,13 +88,18 @@ export async function readCachedMkcMemory<T>(input: CachedReadInput<T>): Promise
   } catch (cause) {
     throw asMkcMemoryReadError(cause, input.mapContractError);
   }
+  const executionContext = pinMainaCloudExecutionContext(session);
   const cacheKey = makeMkcMemoryCacheKey({
     ownerUserId: session.user.userId,
     kind: input.kind,
     scope: input.scope,
   });
   try {
-    const response = await mainaCloudRequestJson(input.path, { method: 'GET', signal: input.signal });
+    const response = await mainaCloudRequestJson(
+      input.path,
+      { method: 'GET', signal: input.signal },
+      { executionContext },
+    );
     const data = input.decode(response.data);
     const fetchedAt = Date.now();
     try {
@@ -101,6 +116,7 @@ export async function readCachedMkcMemory<T>(input: CachedReadInput<T>): Promise
       // This cache is rebuildable. A local cache write failure must not turn a
       // verified network response into a failed memory read.
     }
+    await assertMainaCloudExecutionContext(executionContext);
     return { data, source: 'network', fetchedAt };
   } catch (cause) {
     const failure = asMkcMemoryReadError(cause, input.mapContractError);
@@ -113,6 +129,11 @@ export async function readCachedMkcMemory<T>(input: CachedReadInput<T>): Promise
       throw cachedFailure.kind === 'expired'
         ? cachedFailure
         : new MkcMemoryReadError('integrity', false, 'Maina could not verify this saved memory safely.');
+    }
+    try {
+      await assertMainaCloudExecutionContext(executionContext);
+    } catch (sessionCause) {
+      throw asMkcMemoryReadError(sessionCause, input.mapContractError);
     }
     if (!cached) throw failure;
     if (cached.expiresAt != null && cached.expiresAt <= Date.now()) {
@@ -142,13 +163,14 @@ export async function mutateMkcMemory<T>(input: {
   requireEnabled(input);
   assertReadPath(input.path);
   try {
-    await requireMainaCloudScope('recall:read');
+    const session = await requireMainaCloudScope('recall:read');
+    const executionContext = pinMainaCloudExecutionContext(session);
     const response = await mainaCloudRequestJson(input.path, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(input.body ?? {}),
       signal: input.signal,
-    });
+    }, { executionContext });
     return input.decode(response.data);
   } catch (cause) {
     throw asMkcMemoryReadError(cause, input.mapContractError);
@@ -168,8 +190,13 @@ export async function readMkcMemory<T>(input: {
 }): Promise<T> {
   assertReadPath(input.path);
   try {
-    await requireMainaCloudScope('recall:read');
-    const response = await mainaCloudRequestJson(input.path, { method: 'GET', signal: input.signal });
+    const session = await requireMainaCloudScope('recall:read');
+    const executionContext = pinMainaCloudExecutionContext(session);
+    const response = await mainaCloudRequestJson(
+      input.path,
+      { method: 'GET', signal: input.signal },
+      { executionContext },
+    );
     const decoded = input.decode(response.data);
     const integrity = assessMkcMemoryIntegrity(decoded.integrity);
     if (integrity.state !== 'verified') {

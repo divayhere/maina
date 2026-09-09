@@ -24,6 +24,8 @@ import {
 
 const mocks = vi.hoisted(() => ({
   requireScope: vi.fn(),
+  pinExecutionContext: vi.fn(),
+  assertExecutionContext: vi.fn(),
   fetch: vi.fn(),
   getCache: vi.fn(),
   putCache: vi.fn(),
@@ -39,7 +41,10 @@ vi.mock('./mainaCloudSession', () => {
   return {
     MainaCloudApiError,
     MainaCloudScopeError: class MainaCloudScopeError extends Error {},
+    MainaCloudSessionMismatchError: class MainaCloudSessionMismatchError extends Error {},
+    assertMainaCloudExecutionContext: mocks.assertExecutionContext,
     requireMainaCloudScope: mocks.requireScope,
+    pinMainaCloudExecutionContext: mocks.pinExecutionContext,
     mainaCloudRequestJson: mocks.fetch,
   };
 });
@@ -55,6 +60,10 @@ describe('MKC Release A Meetings client', () => {
     mocks.fetch.mockReset();
     mocks.getCache.mockReset();
     mocks.putCache.mockReset();
+    mocks.pinExecutionContext.mockReset().mockReturnValue({
+      ownerUserId: 'owner-a', accessToken: 'redacted-test-token', scopesVerifiedAt: 1,
+    });
+    mocks.assertExecutionContext.mockReset().mockResolvedValue(undefined);
     mocks.requireScope.mockResolvedValue({
       accessToken: 'redacted-test-token',
       scopes: ['recall:read'],
@@ -82,7 +91,11 @@ describe('MKC Release A Meetings client', () => {
       source: 'network',
       fetchedAt: expect.any(Number),
     });
-    expect(mocks.fetch).toHaveBeenCalledWith('/v1/meetings?sort=newest', expect.objectContaining({ method: 'GET' }));
+    expect(mocks.fetch).toHaveBeenCalledWith(
+      '/v1/meetings?sort=newest',
+      expect.objectContaining({ method: 'GET' }),
+      { executionContext: expect.objectContaining({ ownerUserId: 'owner-a' }) },
+    );
     expect(mocks.putCache).toHaveBeenCalledWith(expect.objectContaining({
       ownerUserId: 'owner-a',
       kind: 'meeting-list',
@@ -118,6 +131,7 @@ describe('MKC Release A Meetings client', () => {
       2,
       '/v1/meetings/meeting%3Amaina%3Asynthetic-release-a/transcript?page_size=25',
       expect.objectContaining({ method: 'GET' }),
+      { executionContext: expect.objectContaining({ ownerUserId: 'owner-a' }) },
     );
   });
 
