@@ -189,9 +189,31 @@ private func testResultMappingUsesEngineIdentity() {
       resultId: "npr_0123456789abcdef0123456789abcdef",
       resultPayloadSha256: String(repeating: "e", count: 64)
     )), "one result identity cannot be rebound to another payload")
+    let secondResultId = "npr_11111111111111111111111111111111"
+    expect(try! lifecycle.noteExactResult(
+      modelId: "qwen3-0.6b-int8",
+      modelVersion: "synthetic-1",
+      runtimeVersion: "sherpa-onnx-1.13.4-ios-no-tts",
+      manifestSha256: manifestSHA,
+      activationGeneration: 1,
+      resultId: secondResultId,
+      resultPayloadSha256: String(repeating: "e", count: 64)
+    ), "a second exact result mapping is recorded")
+    expect(!(try! lifecycle.noteExactResult(
+      modelId: "qwen3-0.6b-int8",
+      modelVersion: "synthetic-1",
+      runtimeVersion: "sherpa-onnx-1.13.4-ios-no-tts",
+      manifestSha256: manifestSHA,
+      activationGeneration: 1,
+      resultId: secondResultId,
+      resultPayloadSha256: String(repeating: "f", count: 64)
+    )), "a non-first result identity cannot be rebound to another payload")
     let resultURL = root.appendingPathComponent("results/\(manifestSHA)-1.json")
     let result = try! JSONSerialization.jsonObject(with: Data(contentsOf: resultURL)) as! [String: Any]
     expect(result["modelId"] as? String == "qwen3-0.6b-int8", "result mapping uses engine identity, not pack identity")
+    let payloads = result["resultPayloadSha256ById"] as! [String: String]
+    expect(payloads[secondResultId] == String(repeating: "e", count: 64),
+      "every retained result ID binds its full terminal payload SHA")
 
     let successor = syntheticManifest(packVersion: "synthetic-1", hashCharacter: "a")
     let successorSHA = successor["manifestSha256"] as! String
@@ -214,11 +236,250 @@ private func testResultMappingUsesEngineIdentity() {
   passed += 1
 }
 
+private func testLegacyResultMappingMigrationFailsClosed() {
+  withTemporaryRoot("legacy-result") { root in
+    let manifest = syntheticManifest()
+    let manifestSHA = manifest["manifestSha256"] as! String
+    let pack = root.appendingPathComponent("packs/\(manifestSHA)", isDirectory: true)
+    try! FileManager.default.createDirectory(at: pack, withIntermediateDirectories: true)
+    writeJSON(manifest, to: pack.appendingPathComponent("manifest.json"))
+    writeJSON(record(manifest, state: "ready", reason: "NONE", generation: 1),
+      to: root.appendingPathComponent("records/\(manifestSHA).json"))
+    writeJSON(pointer(manifest, generation: 1), to: root.appendingPathComponent("ready.json"))
+    let firstResultId = "npr_22222222222222222222222222222222"
+    let unverifiedResultId = "npr_33333333333333333333333333333333"
+    let recordSHA = sha256(String(data: try! Data(contentsOf: root.appendingPathComponent("records/\(manifestSHA).json")), encoding: .utf8)!)
+    let resultURL = root.appendingPathComponent("results/\(manifestSHA)-1.json")
+    writeJSON([
+      "manifestSha256": manifestSHA,
+      "platform": "ios",
+      "activationGeneration": 1,
+      "modelId": "qwen3-0.6b-int8",
+      "modelVersion": "synthetic-1",
+      "runtimeVersion": "sherpa-onnx-1.13.4-ios-no-tts",
+      "lifecycleRecordSha256": recordSHA,
+      "packRetained": true,
+      "firstExactResultId": firstResultId,
+      "firstExactResultSha256": String(repeating: "d", count: 64),
+      "referencedResultIds": [unverifiedResultId, firstResultId],
+    ], to: resultURL)
+
+    let lifecycle = MainaModelPackLifecycle(root: root)
+    expect(!(try! lifecycle.noteExactResult(
+      modelId: "qwen3-0.6b-int8",
+      modelVersion: "synthetic-1",
+      runtimeVersion: "sherpa-onnx-1.13.4-ios-no-tts",
+      manifestSha256: manifestSHA,
+      activationGeneration: 1,
+      resultId: unverifiedResultId,
+      resultPayloadSha256: String(repeating: "e", count: 64)
+    )), "legacy non-first references without a retained SHA never become proven")
+    let migratedData = try! Data(contentsOf: resultURL)
+    let migrated = try! JSONSerialization.jsonObject(with: migratedData) as! [String: Any]
+    expect(migrated["schemaVersion"] as? String == "maina.model-pack-result-record.v2",
+      "legacy migration publishes an explicit successor schema")
+    expect((migrated["resultPayloadSha256ById"] as? [String: String])?[firstResultId]
+      == String(repeating: "d", count: 64), "legacy migration preserves the exact first result binding")
+    expect(migrated["unverifiedLegacyResultIds"] as? [String] == [unverifiedResultId],
+      "legacy migration retains unhashed references only as fail-closed evidence")
+    expect(migrated["referencedResultIds"] as? [String] == [firstResultId, unverifiedResultId],
+      "legacy migration canonicalizes reference order deterministically")
+    expect(!(try! lifecycle.noteExactResult(
+      modelId: "qwen3-0.6b-int8",
+      modelVersion: "synthetic-1",
+      runtimeVersion: "sherpa-onnx-1.13.4-ios-no-tts",
+      manifestSha256: manifestSHA,
+      activationGeneration: 1,
+      resultId: unverifiedResultId,
+      resultPayloadSha256: String(repeating: "e", count: 64)
+    )), "replay cannot promote an unverified legacy result")
+    expect(try! Data(contentsOf: resultURL) == migratedData,
+      "rejected legacy promotion does not rewrite durable evidence")
+    expect(try! lifecycle.noteExactResult(
+      modelId: "qwen3-0.6b-int8",
+      modelVersion: "synthetic-1",
+      runtimeVersion: "sherpa-onnx-1.13.4-ios-no-tts",
+      manifestSha256: manifestSHA,
+      activationGeneration: 1,
+      resultId: firstResultId,
+      resultPayloadSha256: String(repeating: "d", count: 64)
+    ), "the one legacy result with an exact retained digest remains replayable")
+    expect(try! Data(contentsOf: resultURL) == migratedData,
+      "exact replay is idempotent and does not rewrite the migrated record")
+    let newResultId = "npr_44444444444444444444444444444444"
+    expect(try! lifecycle.noteExactResult(
+      modelId: "qwen3-0.6b-int8",
+      modelVersion: "synthetic-1",
+      runtimeVersion: "sherpa-onnx-1.13.4-ios-no-tts",
+      manifestSha256: manifestSHA,
+      activationGeneration: 1,
+      resultId: newResultId,
+      resultPayloadSha256: String(repeating: "f", count: 64)
+    ), "new exact results may extend a migrated record without promoting legacy unknowns")
+    let replayed = MainaModelPackLifecycle(root: root)
+    expect(try! replayed.noteExactResult(
+      modelId: "qwen3-0.6b-int8",
+      modelVersion: "synthetic-1",
+      runtimeVersion: "sherpa-onnx-1.13.4-ios-no-tts",
+      manifestSha256: manifestSHA,
+      activationGeneration: 1,
+      resultId: newResultId,
+      resultPayloadSha256: String(repeating: "f", count: 64)
+    ), "process replay preserves the newly bound exact result")
+    let extended = try! JSONSerialization.jsonObject(with: Data(contentsOf: resultURL)) as! [String: Any]
+    expect((extended["resultPayloadSha256ById"] as? [String: String])?[newResultId]
+      == String(repeating: "f", count: 64), "the post-migration result digest is durable")
+    expect(extended["unverifiedLegacyResultIds"] as? [String] == [unverifiedResultId],
+      "extending a migrated record preserves the legacy uncertainty fence")
+  }
+  passed += 1
+}
+
+private func testResultRecordSchemaAndLocationFailClosed() {
+  withTemporaryRoot("result-schema") { root in
+    let prepared = prepareReadyLifecycle(root)
+    let firstResultId = "npr_55555555555555555555555555555555"
+    let secondResultId = "npr_66666666666666666666666666666666"
+    expect(try! bindResult(prepared.lifecycle, manifestSHA: prepared.manifestSHA,
+      resultId: firstResultId, payloadSHA: String(repeating: "a", count: 64)),
+      "schema fixture records its first result")
+    expect(try! bindResult(prepared.lifecycle, manifestSHA: prepared.manifestSHA,
+      resultId: secondResultId, payloadSHA: String(repeating: "b", count: 64)),
+      "schema fixture records its second result")
+    let canonicalData = try! Data(contentsOf: prepared.resultURL)
+    let thirdResultId = "npr_77777777777777777777777777777777"
+
+    func assertCorruptionRejected(_ message: String, mutate: (inout [String: Any]) -> Void) {
+      var object = try! JSONSerialization.jsonObject(with: canonicalData) as! [String: Any]
+      mutate(&object)
+      writeJSON(object, to: prepared.resultURL)
+      expect(bindResultRejected(prepared.lifecycle, manifestSHA: prepared.manifestSHA,
+        resultId: thirdResultId, payloadSHA: String(repeating: "c", count: 64)), message)
+      try! canonicalData.write(to: prepared.resultURL)
+    }
+
+    assertCorruptionRejected("an unknown top-level field fails closed") { object in
+      object["unexpected"] = true
+    }
+    assertCorruptionRejected("a missing v2 field cannot masquerade as legacy") { object in
+      object.removeValue(forKey: "unverifiedLegacyResultIds")
+    }
+    assertCorruptionRejected("an unknown result schema version fails closed") { object in
+      object["schemaVersion"] = "maina.model-pack-result-record.v3"
+    }
+    assertCorruptionRejected("duplicate referenced result IDs fail closed") { object in
+      object["referencedResultIds"] = [firstResultId, firstResultId, secondResultId]
+    }
+    assertCorruptionRejected("verified and unverified identity sets may not overlap") { object in
+      object["unverifiedLegacyResultIds"] = [secondResultId]
+    }
+    assertCorruptionRejected("every referenced result must have verified or legacy evidence") { object in
+      object["resultPayloadSha256ById"] = [firstResultId: String(repeating: "a", count: 64)]
+    }
+    assertCorruptionRejected("the first result digest cannot drift from its map entry") { object in
+      object["firstExactResultSha256"] = String(repeating: "d", count: 64)
+    }
+
+    let foreignURL = root.appendingPathComponent("results/\(String(repeating: "e", count: 64))-1.json")
+    try! canonicalData.write(to: foreignURL)
+    expect(bindResultRejected(prepared.lifecycle, manifestSHA: prepared.manifestSHA,
+      resultId: thirdResultId, payloadSHA: String(repeating: "c", count: 64)),
+      "a valid record under a mismatched manifest-generation filename fails closed")
+    expect(try! Data(contentsOf: foreignURL) == canonicalData,
+      "a location mismatch cannot rewrite or migrate the foreign record")
+    try! FileManager.default.removeItem(at: foreignURL)
+
+    let hiddenURL = root.appendingPathComponent("results/.unexpected-result-state")
+    try! Data("{}".utf8).write(to: hiddenURL)
+    expect(bindResultRejected(prepared.lifecycle, manifestSHA: prepared.manifestSHA,
+      resultId: thirdResultId, payloadSHA: String(repeating: "c", count: 64)),
+      "hidden result-state entries are not skipped")
+  }
+
+  withTemporaryRoot("legacy-corruption") { root in
+    let prepared = prepareReadyLifecycle(root)
+    let firstResultId = "npr_88888888888888888888888888888888"
+    let legacy: [String: Any] = [
+      "manifestSha256": prepared.manifestSHA,
+      "platform": "ios",
+      "activationGeneration": 1,
+      "modelId": "qwen3-0.6b-int8",
+      "modelVersion": "synthetic-1",
+      "runtimeVersion": "sherpa-onnx-1.13.4-ios-no-tts",
+      "lifecycleRecordSha256": prepared.lifecycleRecordSHA,
+      "packRetained": true,
+      "firstExactResultId": firstResultId,
+      "firstExactResultSha256": String(repeating: "a", count: 64),
+      "referencedResultIds": [firstResultId, firstResultId],
+    ]
+    writeJSON(legacy, to: prepared.resultURL)
+    let corruptData = try! Data(contentsOf: prepared.resultURL)
+    expect(bindResultRejected(prepared.lifecycle, manifestSHA: prepared.manifestSHA,
+      resultId: firstResultId, payloadSHA: String(repeating: "a", count: 64)),
+      "a malformed legacy record fails before migration")
+    expect(try! Data(contentsOf: prepared.resultURL) == corruptData,
+      "failed legacy validation leaves the original evidence byte-exact")
+  }
+  passed += 1
+}
+
 private func withTemporaryRoot(_ suffix: String, body: (URL) -> Void) {
   let root = FileManager.default.temporaryDirectory.appendingPathComponent("maina-model-pack-ios-\(suffix)-\(UUID().uuidString)", isDirectory: true)
   try! FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
   defer { try? FileManager.default.removeItem(at: root) }
   body(root)
+}
+
+private func prepareReadyLifecycle(_ root: URL) -> (
+  lifecycle: MainaModelPackLifecycle,
+  manifestSHA: String,
+  lifecycleRecordSHA: String,
+  resultURL: URL
+) {
+  let manifest = syntheticManifest()
+  let manifestSHA = manifest["manifestSha256"] as! String
+  let pack = root.appendingPathComponent("packs/\(manifestSHA)", isDirectory: true)
+  try! FileManager.default.createDirectory(at: pack, withIntermediateDirectories: true)
+  writeJSON(manifest, to: pack.appendingPathComponent("manifest.json"))
+  let lifecycleRecordURL = root.appendingPathComponent("records/\(manifestSHA).json")
+  writeJSON(record(manifest, state: "ready", reason: "NONE", generation: 1), to: lifecycleRecordURL)
+  writeJSON(pointer(manifest, generation: 1), to: root.appendingPathComponent("ready.json"))
+  return (
+    MainaModelPackLifecycle(root: root),
+    manifestSHA,
+    sha256(String(data: try! Data(contentsOf: lifecycleRecordURL), encoding: .utf8)!),
+    root.appendingPathComponent("results/\(manifestSHA)-1.json")
+  )
+}
+
+private func bindResult(
+  _ lifecycle: MainaModelPackLifecycle,
+  manifestSHA: String,
+  resultId: String,
+  payloadSHA: String
+) throws -> Bool {
+  try lifecycle.noteExactResult(
+    modelId: "qwen3-0.6b-int8",
+    modelVersion: "synthetic-1",
+    runtimeVersion: "sherpa-onnx-1.13.4-ios-no-tts",
+    manifestSha256: manifestSHA,
+    activationGeneration: 1,
+    resultId: resultId,
+    resultPayloadSha256: payloadSHA
+  )
+}
+
+private func bindResultRejected(
+  _ lifecycle: MainaModelPackLifecycle,
+  manifestSHA: String,
+  resultId: String,
+  payloadSHA: String
+) -> Bool {
+  do {
+    return try bindResult(lifecycle, manifestSHA: manifestSHA, resultId: resultId, payloadSHA: payloadSHA) == false
+  } catch {
+    return true
+  }
 }
 
 private let requiredFiles: [(String, UInt64)] = [
@@ -337,6 +598,8 @@ private struct MainaIOSModelPackLifecycleTests {
     testPreRenameCrashUsesStagingAndClearsWriter()
     testStatusExposesAcquisitionAndTerminalFailure()
     testResultMappingUsesEngineIdentity()
-    print("Maina iOS model-pack lifecycle policy tests passed: \(passed)/9")
+    testLegacyResultMappingMigrationFailsClosed()
+    testResultRecordSchemaAndLocationFailClosed()
+    print("Maina iOS model-pack lifecycle policy tests passed: \(passed)/11")
   }
 }

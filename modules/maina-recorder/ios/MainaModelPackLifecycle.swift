@@ -221,6 +221,23 @@ final class MainaModelPackLifecycle {
   }
 
   private struct ResultRecord: Codable {
+    let schemaVersion: String
+    let manifestSha256: String
+    let platform: String
+    let activationGeneration: UInt64
+    let modelId: String
+    let modelVersion: String
+    let runtimeVersion: String
+    let lifecycleRecordSha256: String
+    let packRetained: Bool
+    let firstExactResultId: String
+    let firstExactResultSha256: String
+    let referencedResultIds: [String]
+    let resultPayloadSha256ById: [String: String]
+    let unverifiedLegacyResultIds: [String]
+  }
+
+  private struct LegacyResultRecord: Codable {
     let manifestSha256: String
     let platform: String
     let activationGeneration: UInt64
@@ -546,15 +563,14 @@ final class MainaModelPackLifecycle {
       let resultFiles = try fileManager.contentsOfDirectory(
         at: resultsRoot,
         includingPropertiesForKeys: [.isRegularFileKey, .isSymbolicLinkKey],
-        options: [.skipsHiddenFiles]
+        options: []
       )
       for resultFile in resultFiles {
         guard resultFile.lastPathComponent.range(
           of: "^[a-f0-9]{64}-[1-9][0-9]*\\.json$",
           options: .regularExpression
         ) != nil, try regularFile(resultFile),
-          let recorded: ResultRecord = try readExact(resultFile, keys: resultKeys),
-          validResultRecord(recorded)
+          let recorded = try readResultRecord(resultFile), validResultRecord(recorded)
         else { return false }
         let sameTuple = recorded.modelId == Self.engineID
           && recorded.modelVersion == modelVersion && recorded.runtimeVersion == runtimeVersion
@@ -565,7 +581,7 @@ final class MainaModelPackLifecycle {
             || recorded.activationGeneration != pointer.activationGeneration) { return false }
       }
       let url = resultURL(pointer)
-      let existing: ResultRecord? = try readExact(url, keys: resultKeys)
+      let existing = try readResultRecord(url)
       if let existing {
         guard validResultRecord(existing), existing.manifestSha256 == pointer.manifestSha256,
           existing.activationGeneration == pointer.activationGeneration,
@@ -575,17 +591,26 @@ final class MainaModelPackLifecycle {
       }
       let firstId = existing?.firstExactResultId ?? resultId
       let firstSha = existing?.firstExactResultSha256 ?? resultPayloadSha256
-      if firstId == resultId && firstSha != resultPayloadSha256 { return false }
+      if existing?.unverifiedLegacyResultIds.contains(resultId) == true { return false }
+      if let recordedSha = existing?.resultPayloadSha256ById[resultId] {
+        return recordedSha == resultPayloadSha256
+      }
       var references = existing?.referencedResultIds ?? []
       if !references.contains(resultId) { references.append(resultId) }
-      try writeAtomic(ResultRecord(
+      var resultPayloads = existing?.resultPayloadSha256ById ?? [:]
+      resultPayloads[resultId] = resultPayloadSha256
+      let updated = ResultRecord(
+        schemaVersion: Self.resultRecordSchemaVersion,
         manifestSha256: pointer.manifestSha256, platform: Self.platformName,
         activationGeneration: pointer.activationGeneration, modelId: Self.engineID,
         modelVersion: modelVersion, runtimeVersion: runtimeVersion,
         lifecycleRecordSha256: lifecycleSha, packRetained: true,
         firstExactResultId: firstId, firstExactResultSha256: firstSha,
-        referencedResultIds: references.sorted()
-      ), to: url)
+        referencedResultIds: references.sorted(), resultPayloadSha256ById: resultPayloads,
+        unverifiedLegacyResultIds: existing?.unverifiedLegacyResultIds ?? []
+      )
+      guard validResultRecord(updated) else { return false }
+      try writeAtomic(updated, to: url)
       return true
     }
   }
@@ -782,6 +807,28 @@ final class MainaModelPackLifecycle {
   }
 
   private func validResultRecord(_ record: ResultRecord) -> Bool {
+    let references = Set(record.referencedResultIds)
+    let payloadIds = Set(record.resultPayloadSha256ById.keys)
+    let unverifiedIds = Set(record.unverifiedLegacyResultIds)
+    return record.schemaVersion == Self.resultRecordSchemaVersion
+      && record.platform == Self.platformName && validSHA(record.manifestSha256)
+      && record.activationGeneration > 0 && record.modelId == Self.engineID
+      && validID(record.modelVersion) && record.runtimeVersion == Self.runtimeVersion
+      && validSHA(record.lifecycleRecordSha256) && record.packRetained
+      && validID(record.firstExactResultId) && validSHA(record.firstExactResultSha256)
+      && !record.referencedResultIds.isEmpty && record.referencedResultIds.allSatisfy(validID)
+      && references.count == record.referencedResultIds.count
+      && record.referencedResultIds == record.referencedResultIds.sorted()
+      && record.resultPayloadSha256ById.allSatisfy { validID($0.key) && validSHA($0.value) }
+      && record.unverifiedLegacyResultIds.allSatisfy(validID)
+      && unverifiedIds.count == record.unverifiedLegacyResultIds.count
+      && record.unverifiedLegacyResultIds == record.unverifiedLegacyResultIds.sorted()
+      && payloadIds.isDisjoint(with: unverifiedIds)
+      && payloadIds.union(unverifiedIds) == references
+      && record.resultPayloadSha256ById[record.firstExactResultId] == record.firstExactResultSha256
+  }
+
+  private func validLegacyResultRecord(_ record: LegacyResultRecord) -> Bool {
     record.platform == Self.platformName && validSHA(record.manifestSha256)
       && record.activationGeneration > 0 && record.modelId == Self.engineID
       && validID(record.modelVersion) && record.runtimeVersion == Self.runtimeVersion
@@ -789,6 +836,49 @@ final class MainaModelPackLifecycle {
       && validID(record.firstExactResultId) && validSHA(record.firstExactResultSha256)
       && !record.referencedResultIds.isEmpty && record.referencedResultIds.allSatisfy(validID)
       && Set(record.referencedResultIds).count == record.referencedResultIds.count
+      && record.referencedResultIds.contains(record.firstExactResultId)
+  }
+
+  private func readResultRecord(_ url: URL) throws -> ResultRecord? {
+    guard fileManager.fileExists(atPath: url.path) else { return nil }
+    guard try regularFile(url) else { throw failure("MODEL_PACK_RECORD_INVALID") }
+    let data = try Data(contentsOf: url)
+    guard data.count <= 1_000_000,
+      let object = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+    else { throw failure("MODEL_PACK_RECORD_INVALID") }
+    if Set(object.keys) == resultKeys {
+      let record = try JSONDecoder().decode(ResultRecord.self, from: data)
+      guard validResultRecord(record), validResultRecordLocation(
+        manifestSha256: record.manifestSha256,
+        activationGeneration: record.activationGeneration,
+        url: url
+      ) else { throw failure("MODEL_PACK_RECORD_INVALID") }
+      return record
+    }
+    guard Set(object.keys) == legacyResultKeys else { throw failure("MODEL_PACK_RECORD_INVALID") }
+    let legacy = try JSONDecoder().decode(LegacyResultRecord.self, from: data)
+    guard validLegacyResultRecord(legacy), validResultRecordLocation(
+      manifestSha256: legacy.manifestSha256,
+      activationGeneration: legacy.activationGeneration,
+      url: url
+    ) else { throw failure("MODEL_PACK_RECORD_INVALID") }
+    let migrated = ResultRecord(
+      schemaVersion: Self.resultRecordSchemaVersion,
+      manifestSha256: legacy.manifestSha256, platform: legacy.platform,
+      activationGeneration: legacy.activationGeneration, modelId: legacy.modelId,
+      modelVersion: legacy.modelVersion, runtimeVersion: legacy.runtimeVersion,
+      lifecycleRecordSha256: legacy.lifecycleRecordSha256, packRetained: legacy.packRetained,
+      firstExactResultId: legacy.firstExactResultId,
+      firstExactResultSha256: legacy.firstExactResultSha256,
+      referencedResultIds: legacy.referencedResultIds.sorted(),
+      resultPayloadSha256ById: [legacy.firstExactResultId: legacy.firstExactResultSha256],
+      unverifiedLegacyResultIds: legacy.referencedResultIds
+        .filter { $0 != legacy.firstExactResultId }
+        .sorted()
+    )
+    guard validResultRecord(migrated) else { throw failure("MODEL_PACK_RECORD_INVALID") }
+    try writeAtomic(migrated, to: url)
+    return migrated
   }
 
   private func enumerateFiles(_ directory: URL) throws -> [String] {
@@ -1034,10 +1124,30 @@ final class MainaModelPackLifecycle {
   private func packDirectory(_ sha: String) -> URL { packsRoot.appendingPathComponent(sha, isDirectory: true) }
   private func recordURL(_ sha: String) -> URL { recordsRoot.appendingPathComponent("\(sha).json") }
   private func resultURL(_ pointer: Pointer) -> URL {
-    resultsRoot.appendingPathComponent("\(pointer.manifestSha256)-\(pointer.activationGeneration).json")
+    resultsRoot.appendingPathComponent(resultRecordFilename(
+      manifestSha256: pointer.manifestSha256,
+      activationGeneration: pointer.activationGeneration
+    ))
+  }
+
+  private func resultRecordFilename(manifestSha256: String, activationGeneration: UInt64) -> String {
+    "\(manifestSha256)-\(activationGeneration).json"
+  }
+
+  private func validResultRecordLocation(
+    manifestSha256: String,
+    activationGeneration: UInt64,
+    url: URL
+  ) -> Bool {
+    url.deletingLastPathComponent().standardizedFileURL == resultsRoot.standardizedFileURL
+      && url.lastPathComponent == resultRecordFilename(
+        manifestSha256: manifestSha256,
+        activationGeneration: activationGeneration
+      )
   }
 
   private static let packID = "qwen3-asr-0.6b-int8"
+  private static let resultRecordSchemaVersion = "maina.model-pack-result-record.v2"
   private static let engineID = "qwen3-0.6b-int8"
   private static let platformName = "ios"
   private static let runtimeVersion = "sherpa-onnx-1.13.4-ios-no-tts"
@@ -1053,7 +1163,8 @@ final class MainaModelPackLifecycle {
   private let pointerKeys = Set(["packId", "packVersion", "manifestSha256", "platform", "activationGeneration", "runtimeVersion"])
   private let writerKeys = Set(["manifestSha256", "platform"])
   private let recordKeys = Set(["schemaVersion", "packId", "packVersion", "manifestSha256", "platform", "activationGeneration", "state", "bytesComplete", "bytesTotal", "reasonCode", "verifiedChunks"])
-  private let resultKeys = Set(["manifestSha256", "platform", "activationGeneration", "modelId", "modelVersion", "runtimeVersion", "lifecycleRecordSha256", "packRetained", "firstExactResultId", "firstExactResultSha256", "referencedResultIds"])
+  private let legacyResultKeys = Set(["manifestSha256", "platform", "activationGeneration", "modelId", "modelVersion", "runtimeVersion", "lifecycleRecordSha256", "packRetained", "firstExactResultId", "firstExactResultSha256", "referencedResultIds"])
+  private let resultKeys = Set(["schemaVersion", "manifestSha256", "platform", "activationGeneration", "modelId", "modelVersion", "runtimeVersion", "lifecycleRecordSha256", "packRetained", "firstExactResultId", "firstExactResultSha256", "referencedResultIds", "resultPayloadSha256ById", "unverifiedLegacyResultIds"])
   private let lifecycleStates = Set([
     "unavailable", "downloading", "verifying", "staged", "smoke_testing", "ready",
     "failed_download", "failed_verification", "failed_smoke", "rollback_pending",
