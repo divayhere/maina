@@ -78,6 +78,11 @@ public final class MainaIOSContinuedProcessing {
     var completedAt: TimeInterval?
   }
 
+  private struct FallbackTaskLease {
+    let leaseId: UUID
+    var task: UIBackgroundTaskIdentifier
+  }
+
   private enum Key {
     static let registry = "maina.continuedProcessing.registry.v3"
     static let legacyRegistry = "maina.continuedProcessing.registry.v2"
@@ -91,7 +96,9 @@ public final class MainaIOSContinuedProcessing {
   private var registeredIdentifiers = Set<String>()
   private var gates: [String: CompletionGate] = [:]
   private var claimedIdentifiers = Set<String>()
-  private var fallbackTasks: [String: UIBackgroundTaskIdentifier] = [:]
+  private let fallbackTaskLock = NSLock()
+  private var fallbackTasks: [String: FallbackTaskLease] = [:]
+  private var latestFallbackLeaseIds: [String: UUID] = [:]
   private var progressByIdentifier: [String: (completed: Int64, total: Int64)] = [:]
   private var deferralHandler: (([String: Any]) -> Void)?
 
@@ -162,11 +169,12 @@ public final class MainaIOSContinuedProcessing {
 
         guard registerExactIdentifierIfNeeded(identity.identifier) else {
           beginFallbackTask(identifier: identity.identifier)
-          if fallbackTasks[identity.identifier] == nil {
+          let fallbackActive = fallbackTaskIsActive(identifier: identity.identifier)
+          if !fallbackActive {
             markSubmission(identity.identifier, state: .deferred)
           }
           return [
-            "started": fallbackTasks[identity.identifier] != nil,
+            "started": fallbackActive,
             "mode": "fallback",
             "reason": "continued-processing-handler-unregistered",
             "requestId": identity.identifier,
@@ -190,11 +198,12 @@ public final class MainaIOSContinuedProcessing {
           ]
         } catch {
           beginFallbackTask(identifier: identity.identifier)
-          if fallbackTasks[identity.identifier] == nil {
+          let fallbackActive = fallbackTaskIsActive(identifier: identity.identifier)
+          if !fallbackActive {
             markSubmission(identity.identifier, state: .deferred)
           }
           return [
-            "started": fallbackTasks[identity.identifier] != nil,
+            "started": fallbackActive,
             "mode": "fallback",
             "reason": "continued-processing-submit-\((error as NSError).code)",
             "requestId": identity.identifier,
@@ -260,7 +269,7 @@ public final class MainaIOSContinuedProcessing {
     let applicationIsActive = Self.applicationIsActiveOnMainThread()
     return queue.sync {
       guard !identifier.isEmpty else { return false }
-      if fallbackTasks[identifier] != nil { return true }
+      if fallbackTaskIsActive(identifier: identifier) { return true }
       guard let submission = loadRegistry().last(where: {
         $0.identifier == identifier
           && $0.meetingId == meetingId
@@ -459,29 +468,108 @@ public final class MainaIOSContinuedProcessing {
   }
 
   private func beginFallbackTask(identifier: String) {
-    guard fallbackTasks[identifier] == nil else { return }
-    var task = UIBackgroundTaskIdentifier.invalid
-    let start = {
-      task = UIApplication.shared.beginBackgroundTask(withName: "Maina transcription") { [weak self] in
-        self?.expireFallbackTaskSynchronously(identifier: identifier)
-      }
+    let leaseId = UUID()
+    guard reserveFallbackTask(identifier: identifier, leaseId: leaseId) else { return }
+    let task = UIApplication.shared.beginBackgroundTask(withName: "Maina transcription") { [weak self] in
+      self?.expireFallbackTaskSynchronously(identifier: identifier, leaseId: leaseId)
     }
-    if Thread.isMainThread { start() } else { DispatchQueue.main.sync(execute: start) }
-    if task != .invalid { fallbackTasks[identifier] = task }
+    let activated = activateFallbackTask(identifier: identifier, leaseId: leaseId, task: task)
+    if !activated, task != .invalid {
+      // Expiration may race beginBackgroundTask's return. The expiration path
+      // owns state reconciliation, while this path balances the late task ID.
+      UIApplication.shared.endBackgroundTask(task)
+    }
   }
 
-  private func expireFallbackTaskSynchronously(identifier: String) {
-    let task: UIBackgroundTaskIdentifier = queue.sync {
-      let value = fallbackTasks.removeValue(forKey: identifier) ?? .invalid
-      markSubmission(identifier, state: .deferred)
-      return value
+  private func expireFallbackTaskSynchronously(identifier: String, leaseId: UUID) {
+    guard let expired = takeFallbackTask(identifier: identifier, expectedLeaseId: leaseId) else { return }
+    if expired.task != .invalid {
+      // UIKit invokes expiration synchronously. Return the assertion before
+      // registry work and never wait for the private queue from main.
+      UIApplication.shared.endBackgroundTask(expired.task)
     }
-    if task != .invalid { UIApplication.shared.endBackgroundTask(task) }
+    queue.async { [weak self] in
+      guard let self,
+        self.latestFallbackLeaseMatches(identifier: identifier, leaseId: leaseId),
+        !self.fallbackTaskIsActive(identifier: identifier)
+      else { return }
+      let registry = self.loadRegistry()
+      guard registry.contains(where: {
+        $0.identifier == identifier && ($0.state == .pending || $0.state == .attached)
+      }) else {
+        self.retireFallbackLease(identifier: identifier, leaseId: leaseId)
+        return
+      }
+      self.markSubmission(identifier, state: .deferred)
+      self.retireFallbackLease(identifier: identifier, leaseId: leaseId)
+    }
   }
 
   private func endFallbackTask(identifier: String) {
-    guard let task = fallbackTasks.removeValue(forKey: identifier), task != .invalid else { return }
-    let end = { UIApplication.shared.endBackgroundTask(task) }
-    if Thread.isMainThread { end() } else { DispatchQueue.main.async(execute: end) }
+    guard let ended = takeFallbackTask(identifier: identifier, expectedLeaseId: nil) else { return }
+    retireFallbackLease(identifier: identifier, leaseId: ended.leaseId)
+    if ended.task != .invalid { UIApplication.shared.endBackgroundTask(ended.task) }
+  }
+
+  private func fallbackTaskIsActive(identifier: String) -> Bool {
+    fallbackTaskLock.lock()
+    defer { fallbackTaskLock.unlock() }
+    return fallbackTasks[identifier]?.task != .invalid
+  }
+
+  private func reserveFallbackTask(identifier: String, leaseId: UUID) -> Bool {
+    fallbackTaskLock.lock()
+    defer { fallbackTaskLock.unlock() }
+    guard fallbackTasks[identifier] == nil else { return false }
+    fallbackTasks[identifier] = FallbackTaskLease(leaseId: leaseId, task: .invalid)
+    latestFallbackLeaseIds[identifier] = leaseId
+    return true
+  }
+
+  private func activateFallbackTask(
+    identifier: String,
+    leaseId: UUID,
+    task: UIBackgroundTaskIdentifier
+  ) -> Bool {
+    fallbackTaskLock.lock()
+    defer { fallbackTaskLock.unlock() }
+    guard task != .invalid, fallbackTasks[identifier]?.leaseId == leaseId else {
+      if fallbackTasks[identifier]?.leaseId == leaseId {
+        fallbackTasks.removeValue(forKey: identifier)
+        if latestFallbackLeaseIds[identifier] == leaseId {
+          latestFallbackLeaseIds.removeValue(forKey: identifier)
+        }
+      }
+      return false
+    }
+    fallbackTasks[identifier]?.task = task
+    return true
+  }
+
+  private func takeFallbackTask(
+    identifier: String,
+    expectedLeaseId: UUID?
+  ) -> FallbackTaskLease? {
+    fallbackTaskLock.lock()
+    defer { fallbackTaskLock.unlock() }
+    guard let current = fallbackTasks[identifier],
+      expectedLeaseId == nil || expectedLeaseId == current.leaseId
+    else { return nil }
+    fallbackTasks.removeValue(forKey: identifier)
+    return current
+  }
+
+  private func latestFallbackLeaseMatches(identifier: String, leaseId: UUID) -> Bool {
+    fallbackTaskLock.lock()
+    defer { fallbackTaskLock.unlock() }
+    return latestFallbackLeaseIds[identifier] == leaseId
+  }
+
+  private func retireFallbackLease(identifier: String, leaseId: UUID) {
+    fallbackTaskLock.lock()
+    defer { fallbackTaskLock.unlock() }
+    if latestFallbackLeaseIds[identifier] == leaseId {
+      latestFallbackLeaseIds.removeValue(forKey: identifier)
+    }
   }
 }

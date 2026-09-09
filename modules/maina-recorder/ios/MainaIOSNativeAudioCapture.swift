@@ -29,6 +29,7 @@ final class MainaIOSNativeAudioCapture: NSObject, AVAudioRecorderDelegate, CXCal
   private var interruptionObserver: NSObjectProtocol?
   private var mediaServicesResetObserver: NSObjectProtocol?
   private var appActiveObserver: NSObjectProtocol?
+  private var appInactiveObserver: NSObjectProtocol?
   private let callObserver = CXCallObserver()
   private var state: CaptureState = .idle
   private var meetingId: String?
@@ -51,6 +52,8 @@ final class MainaIOSNativeAudioCapture: NSObject, AVAudioRecorderDelegate, CXCal
   private var deliberatelyPaused = false
   private var interrupted = false
   private var communicationActive = false
+  private let applicationActivityLock = NSLock()
+  private var applicationIsActive = false
   private var recoveryGeneration = 0
   private let recoveryBackgroundTaskLock = NSLock()
   private var recoveryBackgroundTask: UIBackgroundTaskIdentifier = .invalid
@@ -128,6 +131,7 @@ final class MainaIOSNativeAudioCapture: NSObject, AVAudioRecorderDelegate, CXCal
       self.interruptionBridgeExpirationCount = 0
       self.platformHoldCount = 0
       self.recoverySignalCount = 0
+      self.setApplicationActive(true)
       self.recoveryGeneration += 1
       self.lastStorageCheckUptime = 0
       self.freeStorageBytes = Self.availableStorageBytes(at: directory)
@@ -576,9 +580,19 @@ final class MainaIOSNativeAudioCapture: NSObject, AVAudioRecorderDelegate, CXCal
       appActiveObserver = NotificationCenter.default.addObserver(
         forName: UIApplication.didBecomeActiveNotification,
         object: nil,
-        queue: nil
+        queue: .main
       ) { [weak self] _ in
+        self?.setApplicationActive(true)
         self?.queue.async { self?.recoverWhenAppBecomesActive() }
+      }
+    }
+    if appInactiveObserver == nil {
+      appInactiveObserver = NotificationCenter.default.addObserver(
+        forName: UIApplication.willResignActiveNotification,
+        object: nil,
+        queue: .main
+      ) { [weak self] _ in
+        self?.setApplicationActive(false)
       }
     }
   }
@@ -737,12 +751,14 @@ final class MainaIOSNativeAudioCapture: NSObject, AVAudioRecorderDelegate, CXCal
       beginRecoveryBackgroundTaskIfNeeded(reason: reason)
     }
     let generation = recoveryGeneration
+    let cycle = interruptionCycle
     let boundedAttempt = min(attempt, Self.recoveryDelaysMs.count - 1)
     let delayMs = Self.recoveryDelaysMs[boundedAttempt]
     routeRecoveryActive = true
     queue.asyncAfter(deadline: .now() + .milliseconds(delayMs)) { [weak self] in
       guard let self,
         self.recoveryGeneration == generation,
+        self.recoveryAttemptIsAuthorized(generation: generation, interruptionCycle: cycle),
         self.state == .paused,
         self.interrupted,
         !self.deliberatelyPaused
@@ -839,7 +855,24 @@ final class MainaIOSNativeAudioCapture: NSObject, AVAudioRecorderDelegate, CXCal
     // so the capture queue does not need to query UIApplication state or
     // remaining time from a background thread. This keeps the watcher bounded
     // without violating UIKit's main-thread contract.
-    return recoveryBackgroundTaskIsActive()
+    return applicationActiveSnapshot() || recoveryBackgroundTaskIsActive()
+  }
+
+  private func recoveryAttemptIsAuthorized(generation: Int, interruptionCycle: Int) -> Bool {
+    if applicationActiveSnapshot() { return true }
+    return recoveryBackgroundTaskMatches(generation: generation, interruptionCycle: interruptionCycle)
+  }
+
+  private func applicationActiveSnapshot() -> Bool {
+    applicationActivityLock.lock()
+    defer { applicationActivityLock.unlock() }
+    return applicationIsActive
+  }
+
+  private func setApplicationActive(_ active: Bool) {
+    applicationActivityLock.lock()
+    applicationIsActive = active
+    applicationActivityLock.unlock()
   }
 
   private func beginRecoveryBackgroundTaskIfNeeded(reason: String) {
@@ -940,6 +973,15 @@ final class MainaIOSNativeAudioCapture: NSObject, AVAudioRecorderDelegate, CXCal
     recoveryBackgroundTaskLock.lock()
     defer { recoveryBackgroundTaskLock.unlock() }
     return recoveryBackgroundTask != .invalid
+  }
+
+  private func recoveryBackgroundTaskMatches(generation: Int, interruptionCycle: Int) -> Bool {
+    recoveryBackgroundTaskLock.lock()
+    defer { recoveryBackgroundTaskLock.unlock() }
+    return recoveryBackgroundTaskLeaseId != nil
+      && recoveryBackgroundTask != .invalid
+      && recoveryBackgroundTaskGeneration == generation
+      && recoveryBackgroundTaskInterruptionCycle == interruptionCycle
   }
 
   private func reserveRecoveryBackgroundTask(

@@ -79,7 +79,7 @@ for (const token of [
   'interruptionBridgeStartCount',
   'interruptionBridgeExpirationCount',
   'capture-recovery-signal-coalesced',
-  'return recoveryBackgroundTaskIsActive()',
+  'applicationActiveSnapshot() || recoveryBackgroundTaskIsActive()',
   'expireRecoveryBackgroundTaskSynchronously',
   'route-change-observed',
   'recorder?.isRecording != true',
@@ -191,6 +191,33 @@ const continuedApplicationStateReads = readFileSync(continuedProcessing, 'utf8')
 if (continuedApplicationStateReads.length !== 2) {
   throw new Error('iOS continued processing must isolate UIApplication state reads to one main-thread helper.');
 }
+const fallbackTaskStart = readFileSync(continuedProcessing, 'utf8').indexOf('private func beginFallbackTask');
+const fallbackTaskEnd = readFileSync(continuedProcessing, 'utf8').lastIndexOf('\n}');
+const fallbackTaskSource = readFileSync(continuedProcessing, 'utf8').slice(fallbackTaskStart, fallbackTaskEnd);
+for (const token of [
+  'reserveFallbackTask(identifier: identifier, leaseId: leaseId)',
+  'activateFallbackTask(identifier: identifier, leaseId: leaseId, task: task)',
+  'takeFallbackTask(identifier: identifier, expectedLeaseId: leaseId)',
+  'UIApplication.shared.endBackgroundTask(expired.task)',
+  'queue.async',
+  'latestFallbackLeaseMatches(identifier: identifier, leaseId: leaseId)',
+]) {
+  if (!fallbackTaskSource.includes(token)) {
+    throw new Error(`iOS fallback background-task lease invariant missing: ${token}`);
+  }
+}
+if (fallbackTaskSource.includes('DispatchQueue.main.sync') ||
+    fallbackTaskSource.includes('queue.sync')) {
+  throw new Error('iOS fallback background-task handling must not synchronously invert main and registry queues.');
+}
+const fallbackExpiryStart = fallbackTaskSource.indexOf('private func expireFallbackTaskSynchronously');
+const fallbackExpiryEnd = fallbackTaskSource.indexOf('private func endFallbackTask', fallbackExpiryStart);
+const fallbackExpirySource = fallbackTaskSource.slice(fallbackExpiryStart, fallbackExpiryEnd);
+if (fallbackExpirySource.indexOf('UIApplication.shared.endBackgroundTask(expired.task)') < 0 ||
+    fallbackExpirySource.indexOf('UIApplication.shared.endBackgroundTask(expired.task)') >=
+      fallbackExpirySource.indexOf('queue.async')) {
+  throw new Error('iOS fallback expiration must end its exact UIKit task before asynchronous registry work.');
+}
 for (const methodName of ['func begin(', 'func isActive(']) {
   const methodStart = readFileSync(continuedProcessing, 'utf8').indexOf(methodName);
   const queueStart = readFileSync(continuedProcessing, 'utf8').indexOf('queue.sync', methodStart);
@@ -209,9 +236,22 @@ if (captureSource.includes('UIApplication.shared.applicationState') ||
 const recoveryWatcherStart = captureSource.indexOf('private func canContinueRecoveryWatcher');
 const recoveryWatcherEnd = captureSource.indexOf('private func beginRecoveryBackgroundTaskIfNeeded', recoveryWatcherStart);
 const recoveryWatcherSource = captureSource.slice(recoveryWatcherStart, recoveryWatcherEnd);
-for (const token of ['refreshCommunicationActiveFromObserver()', 'return recoveryBackgroundTaskIsActive()']) {
+for (const token of [
+  'refreshCommunicationActiveFromObserver()',
+  'applicationActiveSnapshot() || recoveryBackgroundTaskIsActive()',
+]) {
   if (!recoveryWatcherSource.includes(token)) {
     throw new Error(`iOS recovery watcher finite-lease invariant missing: ${token}`);
+  }
+}
+for (const token of [
+  'UIApplication.willResignActiveNotification',
+  'setApplicationActive(false)',
+  'recoveryAttemptIsAuthorized(generation: generation, interruptionCycle: cycle)',
+  'recoveryBackgroundTaskMatches(generation: generation, interruptionCycle: interruptionCycle)',
+]) {
+  if (!captureSource.includes(token)) {
+    throw new Error(`iOS recovery attempt lease/foreground invariant missing: ${token}`);
   }
 }
 for (const token of [
