@@ -50,6 +50,9 @@ for (const token of [
   'MODEL_PACK_WRITER_CONFLICT',
   'MODEL_PACK_READER_PIN_FAILED',
   'rollbackAfterOpenFailure',
+  'noteExactResult',
+  'lifecycleRecordSha256',
+  'packRetained',
   'moveItem(at: stagingDirectory',
   'volumeAvailableCapacityForImportantUsageKey',
   'd8baaa925248e8e8ad23870208cdaf3d093623e6733aede2c23862f30c5aac62',
@@ -66,6 +69,8 @@ for (const token of [
   'activePack?.release()',
   'func smoke(root: URL, uri: String)',
   'precomposedStringWithCanonicalMapping',
+  'func modelIdentity()',
+  'func bindExactResult(',
 ]) {
   if (!qwenSource.includes(token)) {
     throw new Error(`iOS Qwen model-pack integration invariant missing: ${token}`);
@@ -77,6 +82,7 @@ for (const token of [
   'beginNativeModelPackAcquisition',
   'stageNativeModelPackChunk',
   'verifyAndPromoteNativeModelPack',
+  'native_model_result_binding_failed',
 ]) {
   if (!moduleSource.includes(token)) {
     throw new Error(`iOS model-pack bridge invariant missing: ${token}`);

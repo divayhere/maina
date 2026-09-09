@@ -296,13 +296,17 @@ public final class MainaRecorderModule: Module {
         uris: finalized,
         durations: capture.durations(finalized)
       )
+      let modelIdentity = try qwen.modelIdentity()
       let start = try MainaNativePostProcessingAudioPlanner.makeStart(
         request: request,
         segments: segments,
-        modelVersion: "1",
-        runtimeVersion: "sherpa-onnx-1.13.4-ios-no-tts",
+        modelVersion: modelIdentity.modelVersion,
+        runtimeVersion: modelIdentity.runtimeVersion,
         createdAtMs: Int64(Date().timeIntervalSince1970 * 1_000)
       )
+      guard modelIdentity.modelId == start.modelId else {
+        throw Self.bridgeFailure("native_model_identity_mismatch")
+      }
       guard let coordinator = nativePostProcessing else {
         throw Self.bridgeFailure("native_store_unavailable")
       }
@@ -338,6 +342,20 @@ public final class MainaRecorderModule: Module {
           runId: request.runId,
           generation: request.generation
         )
+        if let result {
+          guard let identity = result["identity"] as? [String: Any],
+            let modelVersion = identity["modelVersion"] as? String,
+            let runtimeVersion = identity["runtimeVersion"] as? String,
+            let resultId = identity["resultId"] as? String,
+            let resultPayloadSha256 = result["resultPayloadSha256"] as? String,
+            try self.qwen.bindExactResult(
+              modelVersion: modelVersion,
+              runtimeVersion: runtimeVersion,
+              resultId: resultId,
+              resultPayloadSha256: resultPayloadSha256
+            )
+          else { throw Self.bridgeFailure("native_model_result_binding_failed") }
+        }
         promise.resolve(result ?? NSNull())
       } catch {
         promise.reject(Self.bridgeFailure("native_post_processing_read_failed"))

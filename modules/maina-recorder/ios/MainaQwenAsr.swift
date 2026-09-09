@@ -12,6 +12,12 @@ import UIKit
 final class MainaQwenAsr {
   static let shared = MainaQwenAsr()
 
+  struct ModelIdentity {
+    let modelId: String
+    let modelVersion: String
+    let runtimeVersion: String
+  }
+
   private let inferenceQueue = DispatchQueue(label: "com.divay.maina.ios.qwen", qos: .utility)
   private let modelPacks = MainaModelPackLifecycle.shared
   private var recognizer: OpaquePointer?
@@ -102,6 +108,45 @@ final class MainaQwenAsr {
 
   func release() {
     inferenceQueue.sync { releaseNow() }
+  }
+
+  func modelIdentity() throws -> ModelIdentity {
+    try inferenceQueue.sync {
+      _ = try resolveModelRoot()
+      return ModelIdentity(
+        modelId: "qwen3-0.6b-int8",
+        modelVersion: activePack?.packVersion ?? "1",
+        runtimeVersion: activePack?.runtimeVersion ?? "sherpa-onnx-1.13.4-ios-no-tts"
+      )
+    }
+  }
+
+  func bindExactResult(
+    modelVersion: String,
+    runtimeVersion: String,
+    resultId: String,
+    resultPayloadSha256: String
+  ) throws -> Bool {
+    try inferenceQueue.sync {
+      if let activePack {
+        return try modelPacks.noteExactResult(
+          handle: activePack,
+          modelVersion: modelVersion,
+          runtimeVersion: runtimeVersion,
+          resultId: resultId,
+          resultPayloadSha256: resultPayloadSha256
+        )
+      }
+      let lifecycleStatus = try modelPacks.status()
+      if lifecycleStatus.state == "unavailable" { return modelVersion == "1" && runtimeVersion == "sherpa-onnx-1.13.4-ios-no-tts" }
+      return try modelPacks.noteExactResult(
+        handle: activePack,
+        modelVersion: modelVersion,
+        runtimeVersion: runtimeVersion,
+        resultId: resultId,
+        resultPayloadSha256: resultPayloadSha256
+      )
+    }
   }
 
   private func transcribeNow(uri: String, startMs: Double, endMs: Double) throws -> [String: Any] {
@@ -244,6 +289,10 @@ final class MainaQwenAsr {
   }
 
   private func resolveModelRoot() throws -> URL {
+    if let activePack, let activeRoot {
+      guard activePack.root == activeRoot else { throw failure(1101, "MODEL_PACK_STATE_INVALID") }
+      return activeRoot
+    }
     if recognizer != nil, let activeRoot { return activeRoot }
     let lifecycleStatus = try modelPacks.status()
     if lifecycleStatus.state == "ready", let handle = try modelPacks.acquireReady() {

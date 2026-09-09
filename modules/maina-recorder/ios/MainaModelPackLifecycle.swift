@@ -220,6 +220,20 @@ final class MainaModelPackLifecycle {
     let verifiedChunks: [String: [String]]
   }
 
+  private struct ResultRecord: Codable {
+    let manifestSha256: String
+    let platform: String
+    let activationGeneration: UInt64
+    let modelId: String
+    let modelVersion: String
+    let runtimeVersion: String
+    let lifecycleRecordSha256: String
+    let packRetained: Bool
+    let firstExactResultId: String
+    let firstExactResultSha256: String
+    let referencedResultIds: [String]
+  }
+
   private let fileManager: FileManager
   private let root: URL
 
@@ -469,6 +483,64 @@ final class MainaModelPackLifecycle {
     }
   }
 
+  func noteExactResult(
+    handle: ReadyHandle?,
+    modelVersion: String,
+    runtimeVersion: String,
+    resultId: String,
+    resultPayloadSha256: String
+  ) throws -> Bool {
+    try withWriterLock {
+      guard validID(modelVersion), runtimeVersion == Self.runtimeVersion,
+        validID(resultId), validSHA(resultPayloadSha256)
+      else { return false }
+      var candidates: [Pointer] = []
+      if let handle {
+        candidates.append(Pointer(
+          packId: Self.packID, packVersion: handle.packVersion,
+          manifestSha256: handle.manifestSha256, platform: Self.platformName,
+          activationGeneration: handle.activationGeneration, runtimeVersion: handle.runtimeVersion
+        ))
+      } else {
+        for url in [readyPointer, previousPointer] {
+          if let pointer: Pointer = try readExact(url, keys: pointerKeys), validPointer(pointer) {
+            candidates.append(pointer)
+          }
+        }
+      }
+      let exact = candidates.filter { $0.packVersion == modelVersion && $0.runtimeVersion == runtimeVersion }
+      let unique = Dictionary(grouping: exact, by: { "\($0.manifestSha256):\($0.activationGeneration)" }).values.compactMap(\.first)
+      guard unique.count == 1, let pointer = unique.first,
+        let lifecycle = try readRecord(pointer.manifestSha256), lifecycle.state == "ready",
+        lifecycle.activationGeneration == pointer.activationGeneration,
+        lifecycle.packVersion == pointer.packVersion
+      else { return false }
+      let lifecycleSha = try sha256(recordURL(pointer.manifestSha256))
+      let url = resultURL(pointer)
+      let existing: ResultRecord? = try readExact(url, keys: resultKeys)
+      if let existing {
+        guard validResultRecord(existing), existing.manifestSha256 == pointer.manifestSha256,
+          existing.activationGeneration == pointer.activationGeneration,
+          existing.modelVersion == modelVersion, existing.runtimeVersion == runtimeVersion,
+          existing.lifecycleRecordSha256 == lifecycleSha
+        else { return false }
+      }
+      let firstId = existing?.firstExactResultId ?? resultId
+      let firstSha = existing?.firstExactResultSha256 ?? resultPayloadSha256
+      var references = existing?.referencedResultIds ?? []
+      if !references.contains(resultId) { references.append(resultId) }
+      try writeAtomic(ResultRecord(
+        manifestSha256: pointer.manifestSha256, platform: Self.platformName,
+        activationGeneration: pointer.activationGeneration, modelId: Self.packID,
+        modelVersion: modelVersion, runtimeVersion: runtimeVersion,
+        lifecycleRecordSha256: lifecycleSha, packRetained: true,
+        firstExactResultId: firstId, firstExactResultSha256: firstSha,
+        referencedResultIds: references.sorted()
+      ), to: url)
+      return true
+    }
+  }
+
   private func parseManifest(_ text: String) throws -> Manifest {
     guard let data = text.data(using: .utf8),
       let object = try JSONSerialization.jsonObject(with: data) as? [String: Any]
@@ -614,6 +686,16 @@ final class MainaModelPackLifecycle {
     pointer.packId == Self.packID && validID(pointer.packVersion) && validSHA(pointer.manifestSha256)
       && pointer.platform == Self.platformName && pointer.activationGeneration > 0
       && pointer.runtimeVersion == Self.runtimeVersion
+  }
+
+  private func validResultRecord(_ record: ResultRecord) -> Bool {
+    record.platform == Self.platformName && validSHA(record.manifestSha256)
+      && record.activationGeneration > 0 && record.modelId == Self.packID
+      && validID(record.modelVersion) && record.runtimeVersion == Self.runtimeVersion
+      && validSHA(record.lifecycleRecordSha256) && record.packRetained
+      && validID(record.firstExactResultId) && validSHA(record.firstExactResultSha256)
+      && !record.referencedResultIds.isEmpty && record.referencedResultIds.allSatisfy(validID)
+      && Set(record.referencedResultIds).count == record.referencedResultIds.count
   }
 
   private func enumerateFiles(_ directory: URL) throws -> [String] {
@@ -830,6 +912,9 @@ final class MainaModelPackLifecycle {
   private func stagingDirectory(_ sha: String) -> URL { stagingRoot.appendingPathComponent(sha, isDirectory: true) }
   private func packDirectory(_ sha: String) -> URL { packsRoot.appendingPathComponent(sha, isDirectory: true) }
   private func recordURL(_ sha: String) -> URL { recordsRoot.appendingPathComponent("\(sha).json") }
+  private func resultURL(_ pointer: Pointer) -> URL {
+    resultsRoot.appendingPathComponent("\(pointer.manifestSha256)-\(pointer.activationGeneration).json")
+  }
 
   private static let packID = "qwen3-asr-0.6b-int8"
   private static let platformName = "ios"
@@ -846,6 +931,7 @@ final class MainaModelPackLifecycle {
   private let pointerKeys = Set(["packId", "packVersion", "manifestSha256", "platform", "activationGeneration", "runtimeVersion"])
   private let writerKeys = Set(["manifestSha256", "platform"])
   private let recordKeys = Set(["schemaVersion", "packId", "packVersion", "manifestSha256", "platform", "activationGeneration", "state", "bytesComplete", "bytesTotal", "reasonCode", "verifiedChunks"])
+  private let resultKeys = Set(["manifestSha256", "platform", "activationGeneration", "modelId", "modelVersion", "runtimeVersion", "lifecycleRecordSha256", "packRetained", "firstExactResultId", "firstExactResultSha256", "referencedResultIds"])
   private let lifecycleStates = Set([
     "unavailable", "downloading", "verifying", "staged", "smoke_testing", "ready",
     "failed_download", "failed_verification", "failed_smoke", "rollback_pending",
