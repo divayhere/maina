@@ -16,6 +16,8 @@ final class MainaQwenAsr {
     let modelId: String
     let modelVersion: String
     let runtimeVersion: String
+    let manifestSha256: String?
+    let activationGeneration: UInt64?
   }
 
   private let inferenceQueue = DispatchQueue(label: "com.divay.maina.ios.qwen", qos: .utility)
@@ -116,33 +118,29 @@ final class MainaQwenAsr {
       return ModelIdentity(
         modelId: "qwen3-0.6b-int8",
         modelVersion: activePack?.packVersion ?? "1",
-        runtimeVersion: activePack?.runtimeVersion ?? "sherpa-onnx-1.13.4-ios-no-tts"
+        runtimeVersion: activePack?.runtimeVersion ?? "sherpa-onnx-1.13.4-ios-no-tts",
+        manifestSha256: activePack?.manifestSha256,
+        activationGeneration: activePack?.activationGeneration
       )
     }
   }
 
   func bindExactResult(
+    modelId: String,
     modelVersion: String,
     runtimeVersion: String,
+    manifestSha256: String?,
+    activationGeneration: UInt64?,
     resultId: String,
     resultPayloadSha256: String
   ) throws -> Bool {
     try inferenceQueue.sync {
-      if let activePack {
-        return try modelPacks.noteExactResult(
-          handle: activePack,
-          modelVersion: modelVersion,
-          runtimeVersion: runtimeVersion,
-          resultId: resultId,
-          resultPayloadSha256: resultPayloadSha256
-        )
-      }
-      let lifecycleStatus = try modelPacks.status()
-      if lifecycleStatus.state == "unavailable" { return modelVersion == "1" && runtimeVersion == "sherpa-onnx-1.13.4-ios-no-tts" }
       return try modelPacks.noteExactResult(
-        handle: activePack,
+        modelId: modelId,
         modelVersion: modelVersion,
         runtimeVersion: runtimeVersion,
+        manifestSha256: manifestSha256,
+        activationGeneration: activationGeneration,
         resultId: resultId,
         resultPayloadSha256: resultPayloadSha256
       )

@@ -319,6 +319,11 @@ for (const token of [
   'func acknowledge',
   'func releaseRuntime',
   'result_payload_sha256',
+  'model_manifest_sha256',
+  'model_activation_generation',
+  'func readResultModelBinding(',
+  'ALTER TABLE runs ADD COLUMN model_manifest_sha256 TEXT',
+  'ALTER TABLE runs ADD COLUMN model_activation_generation INTEGER',
   'unresolvedIntervals',
   'Owner-first lookup keeps cross-owner access indistinguishable from absence.',
 ]) {

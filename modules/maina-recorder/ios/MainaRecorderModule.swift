@@ -302,6 +302,8 @@ public final class MainaRecorderModule: Module {
         segments: segments,
         modelVersion: modelIdentity.modelVersion,
         runtimeVersion: modelIdentity.runtimeVersion,
+        modelManifestSha256: modelIdentity.manifestSha256,
+        modelActivationGeneration: modelIdentity.activationGeneration,
         createdAtMs: Int64(Date().timeIntervalSince1970 * 1_000)
       )
       guard modelIdentity.modelId == start.modelId else {
@@ -344,13 +346,28 @@ public final class MainaRecorderModule: Module {
         )
         if let result {
           guard let identity = result["identity"] as? [String: Any],
+            let modelId = identity["modelId"] as? String,
             let modelVersion = identity["modelVersion"] as? String,
             let runtimeVersion = identity["runtimeVersion"] as? String,
             let resultId = identity["resultId"] as? String,
             let resultPayloadSha256 = result["resultPayloadSha256"] as? String,
+            let modelBinding = try coordinator.readResultModelBinding(
+              ownerUserId: request.ownerUserId,
+              meetingId: request.meetingId,
+              runId: request.runId,
+              generation: request.generation,
+              resultId: resultId,
+              resultPayloadSha256: resultPayloadSha256
+            ),
+            modelBinding.modelId == modelId,
+            modelBinding.modelVersion == modelVersion,
+            modelBinding.runtimeVersion == runtimeVersion,
             try self.qwen.bindExactResult(
+              modelId: modelBinding.modelId,
               modelVersion: modelVersion,
               runtimeVersion: runtimeVersion,
+              manifestSha256: modelBinding.manifestSha256,
+              activationGeneration: modelBinding.activationGeneration,
               resultId: resultId,
               resultPayloadSha256: resultPayloadSha256
             )

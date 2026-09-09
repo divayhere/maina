@@ -510,37 +510,38 @@ final class MainaModelPackLifecycle {
   }
 
   func noteExactResult(
-    handle: ReadyHandle?,
+    modelId: String,
     modelVersion: String,
     runtimeVersion: String,
+    manifestSha256: String?,
+    activationGeneration: UInt64?,
     resultId: String,
     resultPayloadSha256: String
   ) throws -> Bool {
     try withWriterLock {
-      guard validID(modelVersion), runtimeVersion == Self.runtimeVersion,
+      guard modelId == Self.engineID, validID(modelVersion), runtimeVersion == Self.runtimeVersion,
         validID(resultId), validSHA(resultPayloadSha256)
       else { return false }
-      var candidates: [Pointer] = []
-      if let handle {
-        candidates.append(Pointer(
-          packId: Self.packID, packVersion: handle.packVersion,
-          manifestSha256: handle.manifestSha256, platform: Self.platformName,
-          activationGeneration: handle.activationGeneration, runtimeVersion: handle.runtimeVersion
-        ))
-      } else {
-        for url in [readyPointer, previousPointer] {
-          if let pointer: Pointer = try readExact(url, keys: pointerKeys), validPointer(pointer) {
-            candidates.append(pointer)
-          }
-        }
+      if manifestSha256 == nil || activationGeneration == nil {
+        let ready: Pointer? = try readExact(readyPointer, keys: pointerKeys)
+        return manifestSha256 == nil && activationGeneration == nil && modelVersion == "1"
+          && ready == nil
       }
-      let exact = candidates.filter { $0.packVersion == modelVersion && $0.runtimeVersion == runtimeVersion }
-      let unique = Dictionary(grouping: exact, by: { "\($0.manifestSha256):\($0.activationGeneration)" }).values.compactMap(\.first)
-      guard unique.count == 1, let pointer = unique.first,
-        let lifecycle = try readRecord(pointer.manifestSha256), lifecycle.state == "ready",
-        lifecycle.activationGeneration == pointer.activationGeneration,
-        lifecycle.packVersion == pointer.packVersion
+      guard let manifestSha256, let activationGeneration,
+        validSHA(manifestSha256), activationGeneration > 0,
+        let manifest = try readManifest(packDirectory(manifestSha256)),
+        manifest.manifestSha256 == manifestSha256, manifest.packVersion == modelVersion,
+        manifest.platform.runtimeVersion == runtimeVersion,
+        let lifecycle = try readRecord(manifestSha256), lifecycle.state == "ready",
+        lifecycle.activationGeneration == activationGeneration,
+        lifecycle.packVersion == modelVersion
       else { return false }
+      let pointer = Pointer(
+        packId: Self.packID, packVersion: modelVersion,
+        manifestSha256: manifestSha256, platform: Self.platformName,
+        activationGeneration: activationGeneration, runtimeVersion: runtimeVersion
+      )
+      guard validPointer(pointer) else { return false }
       let lifecycleSha = try sha256(recordURL(pointer.manifestSha256))
       let resultFiles = try fileManager.contentsOfDirectory(
         at: resultsRoot,

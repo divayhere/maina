@@ -35,12 +35,22 @@ struct MainaNativePostProcessingStart: Equatable {
   let modelId: String
   let modelVersion: String
   let runtimeVersion: String
+  let modelManifestSha256: String?
+  let modelActivationGeneration: UInt64?
   let runtimeOwnerToken: String
   let audioDurationMs: Int
   let segmentCount: Int
   let windowConfig: MainaNativePostProcessingWindowConfig
   let windows: [MainaNativePostProcessingWindowPlan]
   let createdAtMs: Int64
+}
+
+struct MainaNativePostProcessingModelBinding: Equatable {
+  let modelId: String
+  let modelVersion: String
+  let runtimeVersion: String
+  let manifestSha256: String?
+  let activationGeneration: UInt64?
 }
 
 struct MainaNativePostProcessingStartResult: Equatable {
@@ -117,6 +127,8 @@ final class MainaNativePostProcessingStore {
     let modelId: String
     let modelVersion: String
     let runtimeVersion: String
+    let modelManifestSha256: String?
+    let modelActivationGeneration: UInt64?
     let runtimeOwnerToken: String
     let audioDurationMs: Int
     let segmentCount: Int
@@ -234,13 +246,15 @@ final class MainaNativePostProcessingStore {
 
       try execute(
         "INSERT INTO runs (owner_user_id, meeting_id, run_id, generation, state, audio_fingerprint_sha256, "
-          + "contract_version, model_id, model_version, runtime_version, runtime_owner_token, audio_duration_ms, "
+          + "contract_version, model_id, model_version, runtime_version, model_manifest_sha256, "
+          + "model_activation_generation, runtime_owner_token, audio_duration_ms, "
           + "segment_count, target_window_ms, analysis_overlap_ms, max_attempts, window_plan_sha256, created_at, updated_at, event_sequence) "
-          + "VALUES (?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)",
+          + "VALUES (?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)",
         [
           .text(input.ownerUserId), .text(input.meetingId), .text(input.runId), .int(Int64(input.generation)),
           .text(input.audioFingerprintSha256), .text(input.contractVersion), .text(input.modelId),
-          .text(input.modelVersion), .text(input.runtimeVersion), .text(input.runtimeOwnerToken),
+          .text(input.modelVersion), .text(input.runtimeVersion), input.modelManifestSha256.map(Value.text) ?? .null,
+          input.modelActivationGeneration.map { .int(Int64($0)) } ?? .null, .text(input.runtimeOwnerToken),
           .int(Int64(input.audioDurationMs)), .int(Int64(input.segmentCount)),
           .int(Int64(input.windowConfig.targetWindowMs)), .int(Int64(input.windowConfig.analysisOverlapMs)),
           .int(Int64(input.windowConfig.maxAttempts)), .text(windowPlanSha256(input)),
@@ -514,6 +528,38 @@ final class MainaNativePostProcessingStore {
     }
   }
 
+  func readResultModelBinding(
+    ownerUserId: String,
+    meetingId: String,
+    runId: String,
+    generation: Int,
+    resultId: String,
+    resultPayloadSha256: String
+  ) throws -> MainaNativePostProcessingModelBinding? {
+    guard Self.validIdentifier(ownerUserId), Self.validIdentifier(meetingId),
+      Self.validIdentifier(runId), generation > 0, Self.validIdentifier(resultId),
+      Self.validSha(resultPayloadSha256)
+    else { return nil }
+    return try locked {
+      guard let row = try queryStrings(
+        "SELECT model_id, model_version, runtime_version, COALESCE(model_manifest_sha256,''), "
+          + "COALESCE(CAST(model_activation_generation AS TEXT),'') FROM runs WHERE owner_user_id = ? "
+          + "AND meeting_id = ? AND run_id = ? AND generation = ? AND state IN ('complete','partial') "
+          + "AND result_id = ? AND result_payload_sha256 = ? AND result_json IS NOT NULL LIMIT 1",
+        [
+          .text(ownerUserId), .text(meetingId), .text(runId), .int(Int64(generation)),
+          .text(resultId), .text(resultPayloadSha256),
+        ],
+        columns: 5
+      ) else { return nil }
+      let binding = try decodeModelBinding(
+        modelId: row[0], modelVersion: row[1], runtimeVersion: row[2],
+        manifestSha256: row[3], activationGeneration: row[4]
+      )
+      return binding
+    }
+  }
+
   func precedingTranscriptText(for claim: MainaNativePostProcessingClaim) throws -> String {
     guard claim.analysisStartMs < claim.coverageStartMs, claim.windowIndex > 0 else { return "" }
     return try locked {
@@ -598,6 +644,8 @@ final class MainaNativePostProcessingStore {
         model_id TEXT NOT NULL,
         model_version TEXT NOT NULL,
         runtime_version TEXT NOT NULL,
+        model_manifest_sha256 TEXT,
+        model_activation_generation INTEGER,
         runtime_owner_token TEXT NOT NULL,
         audio_duration_ms INTEGER NOT NULL CHECK(audio_duration_ms > 0),
         segment_count INTEGER NOT NULL CHECK(segment_count > 0),
@@ -667,6 +715,57 @@ final class MainaNativePostProcessingStore {
         claimed_at INTEGER NOT NULL
       );
       """
+    )
+    try addRunModelIdentityColumns()
+  }
+
+  private func addRunModelIdentityColumns() throws {
+    let columns = Set(try queryRows("PRAGMA table_info(runs)", [], columns: 6).map { $0[1] })
+    if !columns.contains("model_manifest_sha256") {
+      try execute("ALTER TABLE runs ADD COLUMN model_manifest_sha256 TEXT")
+    }
+    if !columns.contains("model_activation_generation") {
+      try execute("ALTER TABLE runs ADD COLUMN model_activation_generation INTEGER")
+    }
+  }
+
+  private func validModelIdentityPair(
+    modelVersion: String,
+    manifestSha256: String?,
+    activationGeneration: UInt64?
+  ) -> Bool {
+    if manifestSha256 == nil || activationGeneration == nil {
+      return manifestSha256 == nil && activationGeneration == nil && modelVersion == "1"
+    }
+    return Self.validSha(manifestSha256!) && activationGeneration! > 0
+      && activationGeneration! <= UInt64(Int64.max)
+  }
+
+  private func decodeModelBinding(
+    modelId: String,
+    modelVersion: String,
+    runtimeVersion: String,
+    manifestSha256: String,
+    activationGeneration: String
+  ) throws -> MainaNativePostProcessingModelBinding {
+    guard Self.validIdentifier(modelId), Self.validIdentifier(modelVersion),
+      Self.validIdentifier(runtimeVersion)
+    else { throw MainaNativePostProcessingStoreError.storageFailure("model_identity_invalid") }
+    if manifestSha256.isEmpty || activationGeneration.isEmpty {
+      guard manifestSha256.isEmpty, activationGeneration.isEmpty, modelVersion == "1" else {
+        throw MainaNativePostProcessingStoreError.storageFailure("model_identity_invalid")
+      }
+      return .init(
+        modelId: modelId, modelVersion: modelVersion, runtimeVersion: runtimeVersion,
+        manifestSha256: nil, activationGeneration: nil
+      )
+    }
+    guard Self.validSha(manifestSha256), let generation = UInt64(activationGeneration),
+      generation > 0, generation <= UInt64(Int64.max)
+    else { throw MainaNativePostProcessingStoreError.storageFailure("model_identity_invalid") }
+    return .init(
+      modelId: modelId, modelVersion: modelVersion, runtimeVersion: runtimeVersion,
+      manifestSha256: manifestSha256, activationGeneration: generation
     )
   }
 
@@ -752,7 +851,12 @@ final class MainaNativePostProcessingStore {
     guard Self.validIdentifier(input.ownerUserId), Self.validIdentifier(input.meetingId),
       Self.validIdentifier(input.runId), Self.validIdentifier(input.modelId),
       Self.validIdentifier(input.modelVersion), Self.validIdentifier(input.runtimeVersion),
-      Self.validIdentifier(input.runtimeOwnerToken), Self.validSha(input.audioFingerprintSha256), input.generation > 0
+      Self.validIdentifier(input.runtimeOwnerToken), Self.validSha(input.audioFingerprintSha256), input.generation > 0,
+      validModelIdentityPair(
+        modelVersion: input.modelVersion,
+        manifestSha256: input.modelManifestSha256,
+        activationGeneration: input.modelActivationGeneration
+      )
     else { throw MainaNativePostProcessingStoreError.invalidInput("start_identity_invalid") }
   }
 
@@ -814,6 +918,8 @@ final class MainaNativePostProcessingStore {
       && run.generation == input.generation && run.audioFingerprintSha256 == input.audioFingerprintSha256
       && run.contractVersion == input.contractVersion && run.modelId == input.modelId
       && run.modelVersion == input.modelVersion && run.runtimeVersion == input.runtimeVersion
+      && run.modelManifestSha256 == input.modelManifestSha256
+      && run.modelActivationGeneration == input.modelActivationGeneration
       && run.runtimeOwnerToken == input.runtimeOwnerToken && run.audioDurationMs == input.audioDurationMs
       && run.segmentCount == input.segmentCount && run.targetWindowMs == input.windowConfig.targetWindowMs
       && run.analysisOverlapMs == input.windowConfig.analysisOverlapMs
@@ -827,20 +933,26 @@ final class MainaNativePostProcessingStore {
   private func findRun(ownerUserId: String, meetingId: String) throws -> PersistedRun? {
     guard let row = try queryStrings(
       "SELECT owner_user_id, meeting_id, run_id, generation, state, audio_fingerprint_sha256, contract_version, "
-        + "model_id, model_version, runtime_version, runtime_owner_token, audio_duration_ms, segment_count, "
+        + "model_id, model_version, runtime_version, COALESCE(model_manifest_sha256,''), "
+        + "COALESCE(CAST(model_activation_generation AS TEXT),''), runtime_owner_token, audio_duration_ms, segment_count, "
         + "target_window_ms, analysis_overlap_ms, max_attempts, window_plan_sha256, created_at "
         + "FROM runs WHERE owner_user_id = ? AND meeting_id = ? ORDER BY generation DESC LIMIT 1",
-      [.text(ownerUserId), .text(meetingId)], columns: 18
+      [.text(ownerUserId), .text(meetingId)], columns: 20
     ) else { return nil }
-    guard let generation = Int(row[3]), let audioDuration = Int(row[11]), let segments = Int(row[12]),
-      let target = Int(row[13]), let overlap = Int(row[14]), let attempts = Int(row[15]), let created = Int64(row[17])
+    guard let generation = Int(row[3]), let audioDuration = Int(row[13]), let segments = Int(row[14]),
+      let target = Int(row[15]), let overlap = Int(row[16]), let attempts = Int(row[17]), let created = Int64(row[19])
     else { throw MainaNativePostProcessingStoreError.storageFailure("run_record_invalid") }
+    let binding = try decodeModelBinding(
+      modelId: row[7], modelVersion: row[8], runtimeVersion: row[9],
+      manifestSha256: row[10], activationGeneration: row[11]
+    )
     return PersistedRun(
       ownerUserId: row[0], meetingId: row[1], runId: row[2], generation: generation, state: row[4],
       audioFingerprintSha256: row[5], contractVersion: row[6], modelId: row[7], modelVersion: row[8],
-      runtimeVersion: row[9], runtimeOwnerToken: row[10], audioDurationMs: audioDuration,
+      runtimeVersion: row[9], modelManifestSha256: binding.manifestSha256,
+      modelActivationGeneration: binding.activationGeneration, runtimeOwnerToken: row[12], audioDurationMs: audioDuration,
       segmentCount: segments, targetWindowMs: target, analysisOverlapMs: overlap, maxAttempts: attempts,
-      windowPlanSha256: row[16], createdAtMs: created
+      windowPlanSha256: row[18], createdAtMs: created
     )
   }
 
@@ -1005,6 +1117,8 @@ final class MainaNativePostProcessingStore {
       ownerUserId: run.ownerUserId, meetingId: run.meetingId, runId: run.runId, generation: run.generation,
       audioFingerprintSha256: run.audioFingerprintSha256, contractVersion: run.contractVersion,
       modelId: run.modelId, modelVersion: run.modelVersion, runtimeVersion: run.runtimeVersion,
+      modelManifestSha256: run.modelManifestSha256,
+      modelActivationGeneration: run.modelActivationGeneration,
       runtimeOwnerToken: run.runtimeOwnerToken, audioDurationMs: run.audioDurationMs, segmentCount: run.segmentCount,
       windowConfig: .init(targetWindowMs: run.targetWindowMs, analysisOverlapMs: run.analysisOverlapMs, maxAttempts: run.maxAttempts),
       windows: [], createdAtMs: run.createdAtMs

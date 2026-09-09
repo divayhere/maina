@@ -172,16 +172,20 @@ private func testResultMappingUsesEngineIdentity() {
     let lifecycle = MainaModelPackLifecycle(root: root)
 
     expect(try! lifecycle.noteExactResult(
-      handle: nil,
+      modelId: "qwen3-0.6b-int8",
       modelVersion: "synthetic-1",
       runtimeVersion: "sherpa-onnx-1.13.4-ios-no-tts",
+      manifestSha256: manifestSHA,
+      activationGeneration: 1,
       resultId: "npr_0123456789abcdef0123456789abcdef",
       resultPayloadSha256: String(repeating: "d", count: 64)
     ), "exact result mapping is recorded")
     expect(!(try! lifecycle.noteExactResult(
-      handle: nil,
+      modelId: "qwen3-0.6b-int8",
       modelVersion: "synthetic-1",
       runtimeVersion: "sherpa-onnx-1.13.4-ios-no-tts",
+      manifestSha256: manifestSHA,
+      activationGeneration: 1,
       resultId: "npr_0123456789abcdef0123456789abcdef",
       resultPayloadSha256: String(repeating: "e", count: 64)
     )), "one result identity cannot be rebound to another payload")
@@ -198,9 +202,11 @@ private func testResultMappingUsesEngineIdentity() {
     writeJSON(pointer(successor, generation: 2), to: root.appendingPathComponent("ready.json"))
     writeJSON(writer(successorSHA), to: root.appendingPathComponent("current.json"))
     expect(!(try! lifecycle.noteExactResult(
-      handle: nil,
+      modelId: "qwen3-0.6b-int8",
       modelVersion: "synthetic-1",
       runtimeVersion: "sherpa-onnx-1.13.4-ios-no-tts",
+      manifestSha256: successorSHA,
+      activationGeneration: 2,
       resultId: "npr_abcdef0123456789abcdef0123456789",
       resultPayloadSha256: String(repeating: "f", count: 64)
     )), "one P2 model tuple cannot be rebound to another manifest generation")

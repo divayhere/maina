@@ -212,6 +212,8 @@ enum MainaNativePostProcessingAudioPlanner {
     segments: [MainaNativePostProcessingAudioSegment],
     modelVersion: String,
     runtimeVersion: String,
+    modelManifestSha256: String? = nil,
+    modelActivationGeneration: UInt64? = nil,
     createdAtMs: Int64
   ) throws -> MainaNativePostProcessingStart {
     guard try fingerprint(segments) == request.audioFingerprintSha256 else {
@@ -248,6 +250,8 @@ enum MainaNativePostProcessingAudioPlanner {
       modelId: "qwen3-0.6b-int8",
       modelVersion: modelVersion,
       runtimeVersion: runtimeVersion,
+      modelManifestSha256: modelManifestSha256,
+      modelActivationGeneration: modelActivationGeneration,
       runtimeOwnerToken: request.runtimeOwnerToken,
       audioDurationMs: globalSegmentStart,
       segmentCount: segments.count,
@@ -471,6 +475,24 @@ final class MainaNativePostProcessingCoordinator {
       meetingId: meetingId,
       runId: runId,
       generation: generation
+    )
+  }
+
+  func readResultModelBinding(
+    ownerUserId: String,
+    meetingId: String,
+    runId: String,
+    generation: Int,
+    resultId: String,
+    resultPayloadSha256: String
+  ) throws -> MainaNativePostProcessingModelBinding? {
+    try store.readResultModelBinding(
+      ownerUserId: ownerUserId,
+      meetingId: meetingId,
+      runId: runId,
+      generation: generation,
+      resultId: resultId,
+      resultPayloadSha256: resultPayloadSha256
     )
   }
 

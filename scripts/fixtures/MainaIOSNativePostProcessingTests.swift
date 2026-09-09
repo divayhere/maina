@@ -103,7 +103,12 @@ private func expectBridgeThrows(_ message: String, _ operation: () throws -> Voi
 
 private func executeSQLite(_ databaseURL: URL, _ sql: String) throws {
   var database: OpaquePointer?
-  guard sqlite3_open_v2(databaseURL.path, &database, SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX, nil) == SQLITE_OK,
+  guard sqlite3_open_v2(
+    databaseURL.path,
+    &database,
+    SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX,
+    nil
+  ) == SQLITE_OK,
     let database
   else { throw MainaNativePostProcessingStoreError.storageFailure("test_database_open_failed") }
   defer { sqlite3_close(database) }
@@ -143,6 +148,8 @@ private func makeStart(
   maxAttempts: Int = 2,
   fingerprint: String = String(repeating: "a", count: 64),
   firstAudioURI: String = "file:///synthetic/capture-00000.wav",
+  modelManifestSha256: String? = String(repeating: "f", count: 64),
+  modelActivationGeneration: UInt64? = 7,
   createdAtMs: Int64 = 1_788_000_000_000
 ) -> MainaNativePostProcessingStart {
   MainaNativePostProcessingStart(
@@ -155,6 +162,8 @@ private func makeStart(
     modelId: "qwen3-0.6b-int8",
     modelVersion: "model-v1",
     runtimeVersion: "sherpa-1.13.4-ios",
+    modelManifestSha256: modelManifestSha256,
+    modelActivationGeneration: modelActivationGeneration,
     runtimeOwnerToken: token,
     audioDurationMs: 20_000,
     segmentCount: 1,
@@ -322,6 +331,52 @@ private func run() throws {
   let root = FileManager.default.temporaryDirectory
     .appendingPathComponent("maina-native-post-processing-\(UUID().uuidString)", isDirectory: true)
   defer { try? FileManager.default.removeItem(at: root) }
+  try FileManager.default.createDirectory(
+    at: root,
+    withIntermediateDirectories: false,
+    attributes: [.posixPermissions: 0o700]
+  )
+
+  let migrationURL = root.appendingPathComponent("pre-model-binding.sqlite3")
+  try executeSQLite(
+    migrationURL,
+    """
+    CREATE TABLE runs (
+      owner_user_id TEXT NOT NULL,
+      meeting_id TEXT NOT NULL UNIQUE,
+      run_id TEXT NOT NULL,
+      generation INTEGER NOT NULL CHECK(generation > 0),
+      state TEXT NOT NULL CHECK(state IN ('queued','running','preempted','partial','complete','acknowledged')),
+      audio_fingerprint_sha256 TEXT NOT NULL,
+      contract_version TEXT NOT NULL,
+      model_id TEXT NOT NULL,
+      model_version TEXT NOT NULL,
+      runtime_version TEXT NOT NULL,
+      runtime_owner_token TEXT NOT NULL,
+      audio_duration_ms INTEGER NOT NULL CHECK(audio_duration_ms > 0),
+      segment_count INTEGER NOT NULL CHECK(segment_count > 0),
+      target_window_ms INTEGER NOT NULL,
+      analysis_overlap_ms INTEGER NOT NULL,
+      max_attempts INTEGER NOT NULL,
+      window_plan_sha256 TEXT NOT NULL,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      event_sequence INTEGER NOT NULL,
+      result_id TEXT,
+      result_payload_sha256 TEXT,
+      result_json TEXT,
+      acknowledged_at INTEGER,
+      PRIMARY KEY(owner_user_id, meeting_id, run_id, generation)
+    );
+    """
+  )
+  _ = try MainaNativePostProcessingStore(databaseURL: migrationURL)
+  expect(try querySQLiteRow(
+    migrationURL,
+    "SELECT CAST(COUNT(*) AS TEXT) FROM pragma_table_info('runs') "
+      + "WHERE name IN ('model_manifest_sha256','model_activation_generation')"
+  ) == ["2"], "preserved stores add both internal model-result binding columns")
+
   let databaseURL = root.appendingPathComponent("store.sqlite3")
 
   let store = try MainaNativePostProcessingStore(databaseURL: databaseURL)
@@ -343,6 +398,20 @@ private func run() throws {
   }
   expectThrows(.identityConflict, "frozen window plan cannot drift") {
     _ = try store.begin(makeStart(firstAudioURI: "file:///synthetic/substituted.wav"))
+  }
+  expectThrows(.identityConflict, "producing model manifest cannot drift on replay") {
+    _ = try store.begin(makeStart(modelManifestSha256: String(repeating: "e", count: 64)))
+  }
+  expectThrows(.identityConflict, "producing model activation generation cannot drift on replay") {
+    _ = try store.begin(makeStart(modelActivationGeneration: 8))
+  }
+  expectThrows(.invalidInput("start_identity_invalid"), "one-sided model identity fails closed") {
+    _ = try store.begin(makeStart(
+      meeting: "meeting-one-sided",
+      run: "run-one-sided",
+      modelManifestSha256: nil,
+      modelActivationGeneration: 7
+    ))
   }
 
   let secondStart = makeStart(meeting: "meeting-b", run: "run-b", token: "runtime-b")
@@ -410,6 +479,29 @@ private func run() throws {
   ), "terminal result retains the first WAL creation time after replay")
   let resultId = identity["resultId"] as! String
   let resultSha = partial["resultPayloadSha256"] as! String
+  let modelBinding = try store.readResultModelBinding(
+    ownerUserId: "owner-a",
+    meetingId: "meeting-a",
+    runId: "run-a",
+    generation: 1,
+    resultId: resultId,
+    resultPayloadSha256: resultSha
+  )
+  expect(modelBinding == .init(
+    modelId: "qwen3-0.6b-int8",
+    modelVersion: "model-v1",
+    runtimeVersion: "sherpa-1.13.4-ios",
+    manifestSha256: String(repeating: "f", count: 64),
+    activationGeneration: 7
+  ), "terminal result retains its internal manifest and activation generation across reads")
+  expect(try store.readResultModelBinding(
+    ownerUserId: "owner-a",
+    meetingId: "meeting-a",
+    runId: "run-a",
+    generation: 1,
+    resultId: "npr_00000000000000000000000000000000",
+    resultPayloadSha256: resultSha
+  ) == nil, "result binding rejects a substituted terminal identity")
   let fence = MainaNativePostProcessingImportFence(
     schemaVersion: "maina.native-post-processing-import-fence.v1",
     state: "DURABLE",
