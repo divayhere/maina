@@ -251,6 +251,27 @@ final class MainaModelPackLifecycle {
   func status() throws -> PublicStatus {
     try withWriterLock {
       try reconcileInterruptedPromotion()
+      let writer: Writer? = try readExact(writerURL, keys: writerKeys)
+      let current: Writer? = try readExact(currentAcquisitionURL, keys: writerKeys)
+      if let writer, !validWriter(writer) || (current.map { !sameWriter(writer, $0) } ?? false) {
+        return invalidLifecycleStatus("MODEL_PACK_WRITER_IDENTITY_MISMATCH")
+      }
+      if let acquisition = current ?? writer {
+        guard validWriter(acquisition) else {
+          return invalidLifecycleStatus("MODEL_PACK_CURRENT_IDENTITY_INVALID")
+        }
+        guard let record = try readRecord(acquisition.manifestSha256) else {
+          return invalidLifecycleStatus("MODEL_PACK_CURRENT_RECORD_MISSING")
+        }
+        guard let manifest = try readLifecycleManifest(acquisition.manifestSha256),
+          record.manifestSha256 == manifest.manifestSha256,
+          record.packVersion == manifest.packVersion,
+          record.bytesTotal == manifest.bytesTotal
+        else { return invalidLifecycleStatus("MODEL_PACK_CURRENT_IDENTITY_INVALID") }
+        if record.state != "ready" {
+          return publicStatus(manifest, state: record.state, bytes: record.bytesComplete, reason: record.reasonCode)
+        }
+      }
       guard let pointer: Pointer = try readExact(readyPointer, keys: pointerKeys) else {
         return .init(packVersion: nil, state: "unavailable", bytesComplete: 0, bytesTotal: 0, reasonCode: "NONE", platformCompatible: platformCompatible())
       }
@@ -286,13 +307,12 @@ final class MainaModelPackLifecycle {
         safetyMarginBytes: safetyMarginBytes
       ), try availableBytes() >= required else { throw failure("STORAGE_PREFLIGHT_FAILED") }
 
-      try writeAtomic(Writer(manifestSha256: manifest.manifestSha256, platform: Self.platformName), to: writerURL)
+      let acquisition = Writer(manifestSha256: manifest.manifestSha256, platform: Self.platformName)
+      try writeAtomic(acquisition, to: writerURL)
+      try writeAtomic(acquisition, to: currentAcquisitionURL)
       let stage = stagingDirectory(manifest.manifestSha256)
       let previous = try readRecord(manifest.manifestSha256)
-      if previous?.state == "failed_verification", fileManager.fileExists(atPath: stage.path) {
-        try fileManager.removeItem(at: stage)
-        try fsyncDirectory(stagingRoot)
-      }
+      try prepareStageForResume(stage, manifest: manifest, previous: previous)
       try ensureDirectory(stage)
       try writeDataAtomic(Data(manifestJSON.utf8), to: stage.appendingPathComponent("manifest.json"))
       let priorState = previous?.state ?? "unavailable"
@@ -339,20 +359,25 @@ final class MainaModelPackLifecycle {
       if !exists, !fileManager.createFile(atPath: target.path, contents: nil) {
         throw failure("MODEL_PACK_STORAGE_INVALID")
       }
-      let output = try FileHandle(forWritingTo: target)
-      defer { try? output.close() }
-      try output.seekToEnd()
-      let input = try FileHandle(forReadingFrom: source)
-      defer { try? input.close() }
-      var copied: UInt64 = 0
-      while true {
-        let data = try input.read(upToCount: 1024 * 1024) ?? Data()
-        if data.isEmpty { break }
-        try output.write(contentsOf: data)
-        copied += UInt64(data.count)
+      do {
+        let output = try FileHandle(forWritingTo: target)
+        defer { try? output.close() }
+        try output.seekToEnd()
+        let input = try FileHandle(forReadingFrom: source)
+        defer { try? input.close() }
+        var copied: UInt64 = 0
+        while true {
+          let data = try input.read(upToCount: 1024 * 1024) ?? Data()
+          if data.isEmpty { break }
+          try output.write(contentsOf: data)
+          copied += UInt64(data.count)
+        }
+        guard copied == expectedBytes else { throw failure("CHUNK_SOURCE_INVALID") }
+        try output.synchronize()
+      } catch {
+        try fail(manifest, state: "failed_download", reason: "DOWNLOAD_WRITE_FAILED", progress: progress)
+        throw failure("DOWNLOAD_WRITE_FAILED")
       }
-      guard copied == expectedBytes else { throw failure("CHUNK_SOURCE_INVALID") }
-      try output.synchronize()
       var next = progress
       next[relativePath] = completed + [spec.chunkSha256[chunkIndex]]
       let bytes = verifiedBytes(next, manifest: manifest)
@@ -470,6 +495,7 @@ final class MainaModelPackLifecycle {
         current.activationGeneration == handle.activationGeneration,
         let currentManifest = try? parseManifest(String(contentsOf: packDirectory(handle.manifestSha256).appendingPathComponent("manifest.json"), encoding: .utf8))
       else { return false }
+      try writeAtomic(Writer(manifestSha256: handle.manifestSha256, platform: Self.platformName), to: currentAcquisitionURL)
       try writeRecord(currentManifest, state: "rollback_pending", bytesComplete: currentManifest.bytesTotal, reasonCode: "MODEL_OPEN_FAILED", progress: completeProgress(currentManifest), activationGeneration: handle.activationGeneration)
       if let previous: Pointer = try readExact(previousPointer, keys: pointerKeys) {
         try writeAtomic(previous, to: readyPointer)
@@ -516,6 +542,27 @@ final class MainaModelPackLifecycle {
         lifecycle.packVersion == pointer.packVersion
       else { return false }
       let lifecycleSha = try sha256(recordURL(pointer.manifestSha256))
+      let resultFiles = try fileManager.contentsOfDirectory(
+        at: resultsRoot,
+        includingPropertiesForKeys: [.isRegularFileKey, .isSymbolicLinkKey],
+        options: [.skipsHiddenFiles]
+      )
+      for resultFile in resultFiles {
+        guard resultFile.lastPathComponent.range(
+          of: "^[a-f0-9]{64}-[1-9][0-9]*\\.json$",
+          options: .regularExpression
+        ) != nil, try regularFile(resultFile),
+          let recorded: ResultRecord = try readExact(resultFile, keys: resultKeys),
+          validResultRecord(recorded)
+        else { return false }
+        let sameTuple = recorded.modelId == Self.engineID
+          && recorded.modelVersion == modelVersion && recorded.runtimeVersion == runtimeVersion
+        if sameTuple && (recorded.manifestSha256 != pointer.manifestSha256
+          || recorded.activationGeneration != pointer.activationGeneration) { return false }
+        if recorded.referencedResultIds.contains(resultId)
+          && (recorded.manifestSha256 != pointer.manifestSha256
+            || recorded.activationGeneration != pointer.activationGeneration) { return false }
+      }
       let url = resultURL(pointer)
       let existing: ResultRecord? = try readExact(url, keys: resultKeys)
       if let existing {
@@ -527,11 +574,12 @@ final class MainaModelPackLifecycle {
       }
       let firstId = existing?.firstExactResultId ?? resultId
       let firstSha = existing?.firstExactResultSha256 ?? resultPayloadSha256
+      if firstId == resultId && firstSha != resultPayloadSha256 { return false }
       var references = existing?.referencedResultIds ?? []
       if !references.contains(resultId) { references.append(resultId) }
       try writeAtomic(ResultRecord(
         manifestSha256: pointer.manifestSha256, platform: Self.platformName,
-        activationGeneration: pointer.activationGeneration, modelId: Self.packID,
+        activationGeneration: pointer.activationGeneration, modelId: Self.engineID,
         modelVersion: modelVersion, runtimeVersion: runtimeVersion,
         lifecycleRecordSha256: lifecycleSha, packRetained: true,
         firstExactResultId: firstId, firstExactResultSha256: firstSha,
@@ -547,7 +595,7 @@ final class MainaModelPackLifecycle {
     else { throw failure("MANIFEST_INVALID") }
     try exactKeys(object, expected: manifestKeys, code: "MANIFEST_INVALID")
     guard object["schemaVersion"] as? String == "maina.model-pack-manifest.v1",
-      object["packId"] as? String == Self.packID, object["engineId"] as? String == Self.packID,
+      object["packId"] as? String == Self.packID, object["engineId"] as? String == Self.engineID,
       object["formatVersion"] as? String == "1", let packVersion = object["packVersion"] as? String,
       validID(packVersion), let smokeInput = object["smokeInputSha256"] as? String, validSHA(smokeInput),
       let manifestSHA = object["manifestSha256"] as? String, validSHA(manifestSHA),
@@ -615,6 +663,49 @@ final class MainaModelPackLifecycle {
     return (verifiedBytes(progress, manifest: manifest), progress)
   }
 
+  private func prepareStageForResume(_ stage: URL, manifest: Manifest, previous: Record?) throws {
+    guard fileManager.fileExists(atPath: stage.path) else { return }
+    let priorState = previous?.state ?? "unavailable"
+    if ["unavailable", "failed_verification"].contains(priorState) {
+      try fileManager.removeItem(at: stage)
+      try fsyncDirectory(stagingRoot)
+      return
+    }
+    guard ["downloading", "failed_download"].contains(priorState), let previous else { return }
+    let observed = try enumerateFiles(stage).filter { $0 != "manifest.json" }
+    guard observed.allSatisfy({ path in manifest.files.contains { $0.path == path } }) else {
+      throw failure("RESUME_PREFIX_INVALID")
+    }
+    for spec in manifest.files {
+      let verified = previous.verifiedChunks[spec.path] ?? []
+      guard verified.count <= spec.chunkSha256.count,
+        Array(spec.chunkSha256.prefix(verified.count)) == verified
+      else { throw failure("RESUME_PREFIX_INVALID") }
+      let expectedBytes = verified.indices.reduce(UInt64(0)) { total, index in
+        total + min(spec.chunkSizeBytes, spec.byteCount - spec.chunkSizeBytes * UInt64(index))
+      }
+      let file = try safeChild(stage, spec.path)
+      guard fileManager.fileExists(atPath: file.path) else {
+        if expectedBytes != 0 { throw failure("RESUME_PREFIX_INVALID") }
+        continue
+      }
+      let size = try fileSize(file)
+      guard try regularFile(file), size >= expectedBytes, size <= spec.byteCount else {
+        throw failure("RESUME_PREFIX_INVALID")
+      }
+      if size > expectedBytes {
+        let output = try FileHandle(forWritingTo: file)
+        defer { try? output.close() }
+        try output.truncate(atOffset: expectedBytes)
+        try output.synchronize()
+      }
+      guard try chunkHashes(file, chunkSize: spec.chunkSizeBytes) == verified else {
+        throw failure("RESUME_PREFIX_INVALID")
+      }
+    }
+    try fsyncDirectory(stage)
+  }
+
   private func verifiedBytes(_ progress: [String: [String]], manifest: Manifest) -> UInt64 {
     manifest.files.reduce(0) { total, spec in
       total + (progress[spec.path] ?? []).indices.reduce(0) { subtotal, index in
@@ -645,6 +736,7 @@ final class MainaModelPackLifecycle {
   }
 
   private func fail(_ manifest: Manifest, state: String, reason: String, progress: [String: [String]]) throws {
+    try writeAtomic(Writer(manifestSha256: manifest.manifestSha256, platform: Self.platformName), to: currentAcquisitionURL)
     try writeRecord(manifest, state: state, bytesComplete: verifiedBytes(progress, manifest: manifest), reasonCode: reason, progress: progress)
     try? fileManager.removeItem(at: writerURL)
     try fsyncDirectory(root)
@@ -670,7 +762,7 @@ final class MainaModelPackLifecycle {
     guard record.schemaVersion == "maina.model-pack-lifecycle-record.v1", record.packId == Self.packID,
       record.platform == Self.platformName, validID(record.packVersion), validSHA(record.manifestSha256),
       lifecycleStates.contains(record.state), record.bytesTotal > 0, record.bytesComplete <= record.bytesTotal,
-      validID(record.reasonCode), record.verifiedChunks.keys.allSatisfy(safeRelativePath),
+      validID(record.reasonCode), record.verifiedChunks.keys.allSatisfy({ safeRelativePath($0) && requiredFiles[$0] != nil }),
       record.verifiedChunks.values.flatMap({ $0 }).allSatisfy(validSHA)
     else { throw failure("MODEL_PACK_RECORD_INVALID") }
     return record
@@ -690,7 +782,7 @@ final class MainaModelPackLifecycle {
 
   private func validResultRecord(_ record: ResultRecord) -> Bool {
     record.platform == Self.platformName && validSHA(record.manifestSha256)
-      && record.activationGeneration > 0 && record.modelId == Self.packID
+      && record.activationGeneration > 0 && record.modelId == Self.engineID
       && validID(record.modelVersion) && record.runtimeVersion == Self.runtimeVersion
       && validSHA(record.lifecycleRecordSha256) && record.packRetained
       && validID(record.firstExactResultId) && validSHA(record.firstExactResultSha256)
@@ -833,12 +925,13 @@ final class MainaModelPackLifecycle {
       previousPointerValid: previousValid
     )
     if action == "complete_success_cleanup" {
+      try writeAtomic(writer, to: currentAcquisitionURL)
       try fileManager.removeItem(at: writerURL)
       try fsyncDirectory(root)
       return
     }
     guard action != "none",
-      let manifest = try readManifest(packDirectory(writer.manifestSha256))
+      let manifest = try readLifecycleManifest(writer.manifestSha256)
     else { return }
     if action == "rollback_to_previous", let previous {
       try writeAtomic(previous, to: readyPointer)
@@ -851,8 +944,34 @@ final class MainaModelPackLifecycle {
       reasonCode: "PROMOTION_INTERRUPTED_ROLLED_BACK", progress: completeProgress(manifest),
       activationGeneration: record.activationGeneration
     )
+    try writeAtomic(writer, to: currentAcquisitionURL)
     try fileManager.removeItem(at: writerURL)
     try fsyncDirectory(root)
+  }
+
+  private func readLifecycleManifest(_ manifestSHA: String) throws -> Manifest? {
+    let packed = try readManifest(packDirectory(manifestSHA))
+    let staged = try readManifest(stagingDirectory(manifestSHA))
+    if let packed, let staged {
+      let encoder = JSONEncoder()
+      encoder.outputFormatting = [.sortedKeys]
+      let packedData = try encoder.encode(packed)
+      let stagedData = try encoder.encode(staged)
+      guard packedData == stagedData else { throw failure("MODEL_PACK_CURRENT_IDENTITY_INVALID") }
+    }
+    return packed ?? staged
+  }
+
+  private func validWriter(_ writer: Writer) -> Bool {
+    validSHA(writer.manifestSha256) && writer.platform == Self.platformName
+  }
+
+  private func sameWriter(_ left: Writer, _ right: Writer) -> Bool {
+    left.manifestSha256 == right.manifestSha256 && left.platform == right.platform
+  }
+
+  private func invalidLifecycleStatus(_ reason: String) -> PublicStatus {
+    .init(packVersion: nil, state: "rollback_pending", bytesComplete: 0, bytesTotal: 0, reasonCode: reason, platformCompatible: platformCompatible())
   }
 
   private func availableBytes() throws -> UInt64 {
@@ -908,6 +1027,7 @@ final class MainaModelPackLifecycle {
   private var readyPointer: URL { root.appendingPathComponent("ready.json") }
   private var previousPointer: URL { root.appendingPathComponent("previous-ready.json") }
   private var writerURL: URL { root.appendingPathComponent("writer.json") }
+  private var currentAcquisitionURL: URL { root.appendingPathComponent("current.json") }
   private var lockURL: URL { root.appendingPathComponent("writer.lock") }
   private func stagingDirectory(_ sha: String) -> URL { stagingRoot.appendingPathComponent(sha, isDirectory: true) }
   private func packDirectory(_ sha: String) -> URL { packsRoot.appendingPathComponent(sha, isDirectory: true) }
@@ -917,6 +1037,7 @@ final class MainaModelPackLifecycle {
   }
 
   private static let packID = "qwen3-asr-0.6b-int8"
+  private static let engineID = "qwen3-0.6b-int8"
   private static let platformName = "ios"
   private static let runtimeVersion = "sherpa-onnx-1.13.4-ios-no-tts"
   private static let runtimeSHA256 = "d8baaa925248e8e8ad23870208cdaf3d093623e6733aede2c23862f30c5aac62"
