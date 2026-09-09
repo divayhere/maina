@@ -1,9 +1,11 @@
 import {
   getMeeting,
+  getMeetingPipelineStages,
   getTranscriptSummary,
   importIOSNativePostProcessingResult,
   importNativePostProcessingResult,
   listMeetings,
+  markIOSNativePostProcessingRunningIfUnimported,
   updateMeeting,
   updateMeetingPipelineStage,
   updateNativePostProcessingProgress,
@@ -129,6 +131,55 @@ function activeIOSPostProcessingHandle(meetingId: string): IOSPostProcessingHand
   const requestId = iosPostProcessingHandleByMeeting.get(meetingId);
   if (!requestId) return null;
   return iosPostProcessingHandles.get(requestId) ?? null;
+}
+
+async function repairIOSImportedPostProcessingStages(
+  meeting: Meeting,
+  identity: IOSNativePostProcessingExecutionIdentity,
+): Promise<boolean> {
+  if (meeting.nativePostprocessRunId !== identity.runId
+    || !Number.isSafeInteger(meeting.nativePostprocessImportedAt)
+    || (meeting.nativePostprocessImportedAt ?? 0) <= 0) return false;
+  const [stages, transcriptSummary] = await Promise.all([
+    getMeetingPipelineStages(meeting.id),
+    getTranscriptSummary(meeting.id),
+  ]);
+  const hasText = transcriptSummary?.hasText ?? false;
+  const completedUnits = Math.max(
+    0,
+    meeting.transcriptionCompletedWindows + meeting.transcriptionFailedWindows,
+  );
+  const totalUnits = Math.max(completedUnits, meeting.transcriptionWindowCount);
+  const asr = stages.find((stage) => stage.stage === 'asr');
+  let repaired = false;
+  if (asr?.state !== 'ready') {
+    await updateMeetingPipelineStage({
+      meetingId: meeting.id,
+      stage: 'asr',
+      state: 'ready',
+      completedUnits,
+      totalUnits,
+      error: meeting.transcriptionFailedWindows > 0
+        ? 'Some audio could not be transcribed. The audio was kept for recovery.'
+        : null,
+    });
+    repaired = true;
+  }
+  const transcript = stages.find((stage) => stage.stage === 'transcript_durable');
+  const transcriptState = hasText ? 'ready' : 'failed';
+  if (transcript?.state !== transcriptState) {
+    await updateMeetingPipelineStage({
+      meetingId: meeting.id,
+      stage: 'transcript_durable',
+      state: transcriptState,
+      completedUnits: meeting.transcriptionCompletedWindows,
+      totalUnits,
+      error: hasText ? null : 'Local transcription produced no text. The audio was kept for recovery.',
+    });
+    repaired = true;
+  }
+  if (repaired) notifyMeetingPipelineChanged(meeting.id);
+  return true;
 }
 
 async function finishIOSNativePostProcessingResult(
@@ -286,13 +337,11 @@ async function launchIOSPostProcessing(meeting: Meeting): Promise<boolean> {
         }
       }
       const outcome = await startIOSNativePostProcessing(request, audioDirectory);
-      await updateMeetingPipelineStage({
+      const runningDisposition = await markIOSNativePostProcessingRunningIfUnimported({
         meetingId: meeting.id,
-        stage: 'asr',
-        state: 'running',
         completedUnits: 0,
         totalUnits,
-        error: null,
+        runId: request.runId,
         metadata: {
           runId: request.runId,
           generation: request.generation,
@@ -300,6 +349,14 @@ async function launchIOSPostProcessing(meeting: Meeting): Promise<boolean> {
           resumed: outcome.resumed,
         },
       });
+      if (runningDisposition === 'already_imported') {
+        const importedMeeting = await getMeeting(meeting.id);
+        if (!importedMeeting || !await repairIOSImportedPostProcessingStages(importedMeeting, request)) {
+          throw new Error('native_post_processing_import_reconciliation_failed');
+        }
+        if (continuedHandle) removeIOSPostProcessingHandle(continuedHandle, true);
+        return true;
+      }
       if (continuedHandle) updateIOSContinuedProcessing(continuedHandle.requestId, 0, totalUnits);
       await finishIOSNativePostProcessingResult(meeting, request);
       notifyMeetingPipelineChanged(meeting.id);
@@ -484,7 +541,10 @@ async function reconcilePendingNativeMeetingWorkInternal(): Promise<number> {
       // a second ASR generation just because the native result was deleted.
       if (meeting.nativePostprocessRunId === identity.runId
         && Number.isSafeInteger(meeting.nativePostprocessImportedAt)
-        && (meeting.nativePostprocessImportedAt ?? 0) > 0) continue;
+        && (meeting.nativePostprocessImportedAt ?? 0) > 0) {
+        await repairIOSImportedPostProcessingStages(meeting, identity);
+        continue;
+      }
 
       const isLiveNativeMeeting = nativeStatus?.meetingId === meeting.id
         && nativeStatus.state !== 'idle'

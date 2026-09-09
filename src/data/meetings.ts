@@ -1216,6 +1216,92 @@ export async function updateMeetingPipelineStage(input: {
   };
 }
 
+export type IOSNativePostProcessingRunningDisposition = 'running' | 'already_imported';
+
+/**
+ * Publishes the iOS native ASR running state under the same SQLite write lock
+ * that checks the durable import fence. Native completion can race the promise
+ * returned by `startIOSNativePostProcessing`; this compare-and-write prevents a
+ * late start continuation from overwriting a terminal import with `running`.
+ */
+export async function markIOSNativePostProcessingRunningIfUnimported(input: {
+  meetingId: string;
+  runId: string;
+  completedUnits: number;
+  totalUnits: number;
+  metadata: Record<string, unknown>;
+  now?: number;
+}): Promise<IOSNativePostProcessingRunningDisposition> {
+  const db = await getDb();
+  const now = input.now ?? Date.now();
+  let disposition: IOSNativePostProcessingRunningDisposition = 'running';
+  await db.withExclusiveTransactionAsync(async (transaction) => {
+    const meeting = await transaction.getFirstAsync<{
+      native_postprocess_run_id: string | null;
+      native_postprocess_imported_at: number | null;
+    }>(
+      `SELECT native_postprocess_run_id, native_postprocess_imported_at
+       FROM meetings WHERE id = ?`,
+      [input.meetingId],
+    );
+    if (!meeting) throw new Error('Native post-processing meeting is unavailable.');
+    if (meeting.native_postprocess_run_id === input.runId
+      && Number.isSafeInteger(meeting.native_postprocess_imported_at)
+      && (meeting.native_postprocess_imported_at ?? 0) > 0) {
+      disposition = 'already_imported';
+      return;
+    }
+    if (meeting.native_postprocess_run_id !== null
+      || meeting.native_postprocess_imported_at !== null) {
+      throw new Error('Native post-processing import identity conflicts with the active run.');
+    }
+
+    const existing = await transaction.getFirstAsync<MeetingPipelineStageRow>(
+      `SELECT * FROM meeting_pipeline_stages WHERE meeting_id = ? AND stage = 'asr'`,
+      [input.meetingId],
+    );
+    const transition = deriveStageTransition(existing && {
+      state: existing.state,
+      attemptCount: existing.attempt_count,
+      startedAt: existing.started_at,
+      completedUnits: existing.completed_units,
+      totalUnits: existing.total_units,
+    }, {
+      state: 'running',
+      completedUnits: input.completedUnits,
+      totalUnits: input.totalUnits,
+      now,
+    });
+    await transaction.runAsync(
+      `INSERT INTO meeting_pipeline_stages (
+         meeting_id, stage, state, attempt_count, started_at, finished_at,
+         updated_at, last_error, completed_units, total_units, metadata_json
+       ) VALUES (?, 'asr', 'running', ?, ?, ?, ?, NULL, ?, ?, ?)
+       ON CONFLICT(meeting_id, stage) DO UPDATE SET
+         state = excluded.state,
+         attempt_count = excluded.attempt_count,
+         started_at = excluded.started_at,
+         finished_at = excluded.finished_at,
+         updated_at = excluded.updated_at,
+         last_error = NULL,
+         completed_units = excluded.completed_units,
+         total_units = excluded.total_units,
+         metadata_json = excluded.metadata_json`,
+      [
+        input.meetingId,
+        transition.attemptCount,
+        transition.startedAt,
+        transition.finishedAt,
+        now,
+        transition.completedUnits,
+        transition.totalUnits,
+        JSON.stringify(input.metadata),
+      ],
+    );
+  });
+  return disposition;
+}
+
 export async function getMeetingPipelineStages(meetingId: string): Promise<MeetingPipelineStageStatus[]> {
   const db = await getDb();
   const rows = await db.getAllAsync<MeetingPipelineStageRow>(

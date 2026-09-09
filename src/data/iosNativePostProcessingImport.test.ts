@@ -5,6 +5,7 @@ const sqlite = vi.hoisted(() => {
   const startedAt = 1_788_000_000_000;
   let meeting: Record<string, unknown>;
   let blocks: Record<string, unknown>[];
+  let pipelineStage: Record<string, unknown> | null;
   const reset = () => {
     meeting = {
       id: 'meeting-a',
@@ -25,18 +26,28 @@ const sqlite = vi.hoisted(() => {
       summary_status: 'idle',
     };
     blocks = [];
+    pipelineStage = null;
   };
   reset();
 
   const transaction = {
-    getFirstAsync: vi.fn(async () => ({
-      native_postprocess_run_id: meeting.native_postprocess_run_id,
-      transcription_window_count: meeting.transcription_window_count,
-      transcription_completed_windows: meeting.transcription_completed_windows,
-      transcription_failed_windows: meeting.transcription_failed_windows,
-      transcription_recovery_rounds: meeting.transcription_recovery_rounds,
-      summary_status: meeting.summary_status,
-    })),
+    getFirstAsync: vi.fn(async (sql: string) => {
+      if (sql.includes('native_postprocess_imported_at')) {
+        return {
+          native_postprocess_run_id: meeting.native_postprocess_run_id,
+          native_postprocess_imported_at: meeting.native_postprocess_imported_at,
+        };
+      }
+      if (sql.includes('meeting_pipeline_stages')) return pipelineStage && { ...pipelineStage };
+      return {
+        native_postprocess_run_id: meeting.native_postprocess_run_id,
+        transcription_window_count: meeting.transcription_window_count,
+        transcription_completed_windows: meeting.transcription_completed_windows,
+        transcription_failed_windows: meeting.transcription_failed_windows,
+        transcription_recovery_rounds: meeting.transcription_recovery_rounds,
+        summary_status: meeting.summary_status,
+      };
+    }),
     runAsync: vi.fn(async (sql: string, values: unknown[] = []) => {
       if (sql.startsWith('DELETE FROM transcript_blocks')) {
         blocks = [];
@@ -66,6 +77,14 @@ const sqlite = vi.hoisted(() => {
           native_postprocess_run_id: values[29],
           native_postprocess_imported_at: values[30],
         });
+        return { changes: 1 };
+      }
+      if (sql.includes('INSERT INTO meeting_pipeline_stages')) {
+        pipelineStage = {
+          meeting_id: values[0], stage: 'asr', state: 'running', attempt_count: values[1],
+          started_at: values[2], finished_at: values[3], updated_at: values[4], last_error: null,
+          completed_units: values[5], total_units: values[6], metadata_json: values[7],
+        };
         return { changes: 1 };
       }
       throw new Error(`Unexpected transaction SQL: ${sql}`);
@@ -99,6 +118,11 @@ const sqlite = vi.hoisted(() => {
     transaction,
     reset,
     tamperFirstBlock: () => { if (blocks[0]) blocks[0].text = 'tampered'; },
+    setImported: (runId: string, importedAt: number) => {
+      meeting.native_postprocess_run_id = runId;
+      meeting.native_postprocess_imported_at = importedAt;
+    },
+    pipelineStage: () => pipelineStage && { ...pipelineStage },
   };
 });
 
@@ -109,7 +133,10 @@ vi.mock('./db', () => ({
 vi.mock('react-native', () => ({ Platform: { OS: 'ios' } }));
 vi.mock('expo-file-system/legacy', () => ({ documentDirectory: 'file:///documents/' }));
 
-import { importIOSNativePostProcessingResult } from './meetings';
+import {
+  importIOSNativePostProcessingResult,
+  markIOSNativePostProcessingRunningIfUnimported,
+} from './meetings';
 import { decodeIOSNativePostProcessingResult } from '@/services/nativePostProcessingCore';
 
 const expectedIdentity = {
@@ -180,5 +207,39 @@ describe('iOS native post-processing import acknowledgement fence', () => {
     await expect(importIOSNativePostProcessingResult(result())).resolves.not.toBeNull();
     sqlite.tamperFirstBlock();
     await expect(importIOSNativePostProcessingResult(result())).resolves.toBeNull();
+  });
+});
+
+describe('iOS native post-processing running publication fence', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    sqlite.reset();
+  });
+
+  it('writes running only while no terminal import owns the meeting', async () => {
+    await expect(markIOSNativePostProcessingRunningIfUnimported({
+      meetingId: 'meeting-a', runId: 'run-a', completedUnits: 0, totalUnits: 2,
+      metadata: { executionOwner: 'ios-native-durable' }, now: 100,
+    })).resolves.toBe('running');
+    expect(sqlite.pipelineStage()).toMatchObject({
+      state: 'running', attempt_count: 1, completed_units: 0, total_units: 2,
+    });
+
+    const writesBeforeImport = sqlite.transaction.runAsync.mock.calls.length;
+    sqlite.setImported('run-a', 200);
+    await expect(markIOSNativePostProcessingRunningIfUnimported({
+      meetingId: 'meeting-a', runId: 'run-a', completedUnits: 0, totalUnits: 2,
+      metadata: { executionOwner: 'ios-native-durable' }, now: 300,
+    })).resolves.toBe('already_imported');
+    expect(sqlite.transaction.runAsync).toHaveBeenCalledTimes(writesBeforeImport);
+  });
+
+  it('rejects a different imported run instead of overwriting terminal truth', async () => {
+    sqlite.setImported('run-other', 200);
+    await expect(markIOSNativePostProcessingRunningIfUnimported({
+      meetingId: 'meeting-a', runId: 'run-a', completedUnits: 0, totalUnits: 2,
+      metadata: { executionOwner: 'ios-native-durable' }, now: 300,
+    })).rejects.toThrow('identity conflicts');
+    expect(sqlite.pipelineStage()).toBeNull();
   });
 });

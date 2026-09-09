@@ -46,17 +46,22 @@ const mocks = vi.hoisted(() => ({
   },
   readResult: vi.fn(async (_request?: Record<string, unknown>) => null as unknown),
   start: vi.fn(async () => ({ state: 'running', resumed: false })),
+  markRunning: vi.fn(async (): Promise<'running' | 'already_imported'> => 'running'),
+  getStages: vi.fn(async () => [] as { stage: string; state: string }[]),
+  notify: vi.fn(),
   updateMeeting: vi.fn(async () => {}),
   updateStage: vi.fn(async () => {}),
 }));
 
 vi.mock('react-native', () => ({ Platform: { OS: 'ios' } }));
 vi.mock('@/data/meetings', () => ({
-  getMeeting: vi.fn(async () => null),
+  getMeeting: vi.fn(async () => ({ ...mocks.meeting })),
+  getMeetingPipelineStages: mocks.getStages,
   getTranscriptSummary: vi.fn(async () => null),
   importIOSNativePostProcessingResult: mocks.importResult,
   importNativePostProcessingResult: vi.fn(async () => 'imported'),
   listMeetings: vi.fn(async () => [{ ...mocks.meeting }]),
+  markIOSNativePostProcessingRunningIfUnimported: mocks.markRunning,
   updateMeeting: mocks.updateMeeting,
   updateMeetingPipelineStage: mocks.updateStage,
   updateNativePostProcessingProgress: vi.fn(async () => {}),
@@ -95,7 +100,7 @@ vi.mock('@/services/logger', () => ({
   log: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
 }));
 vi.mock('@/services/audioRetention', () => ({ cleanupTerminalMeetingAudio: mocks.cleanup }));
-vi.mock('@/services/meetingPipelineSignals', () => ({ notifyMeetingPipelineChanged: vi.fn() }));
+vi.mock('@/services/meetingPipelineSignals', () => ({ notifyMeetingPipelineChanged: mocks.notify }));
 vi.mock('@/services/nativeCaptureMetrics', () => ({
   getNativeCaptureMetrics: vi.fn(async () => ({ ...mocks.captureMetrics })),
 }));
@@ -188,6 +193,8 @@ describe('iOS durable native post-processing lifecycle', () => {
     mocks.readResult.mockImplementation(async () => mocks.nativeResult);
     mocks.importResult.mockImplementation(async () => mocks.durableImport);
     mocks.acknowledge.mockResolvedValue(true);
+    mocks.markRunning.mockResolvedValue('running');
+    mocks.getStages.mockResolvedValue([]);
   });
 
   it('acknowledges and cleans complete audio only after exact durable import evidence', async () => {
@@ -292,6 +299,30 @@ describe('iOS durable native post-processing lifecycle', () => {
     );
   });
 
+  it('never republishes running after a concurrent terminal import wins the start race', async () => {
+    const identity = deriveIOSNativePostProcessingExecutionIdentity('owner-a', 'meeting-a');
+    mocks.markRunning.mockImplementationOnce(async () => {
+      mocks.meeting.nativePostprocessRunId = identity.runId;
+      mocks.meeting.nativePostprocessImportedAt = 1_788_000_030_000;
+      return 'already_imported';
+    });
+
+    await expect(reconcilePendingNativeMeetingWork()).resolves.toBe(1);
+
+    expect(mocks.start).toHaveBeenCalledOnce();
+    expect(mocks.markRunning).toHaveBeenCalledWith(expect.objectContaining({
+      meetingId: 'meeting-a',
+      runId: identity.runId,
+    }));
+    expect(mocks.updateStage).not.toHaveBeenCalledWith(expect.objectContaining({ state: 'running' }));
+    expect(mocks.updateStage).toHaveBeenCalledWith(expect.objectContaining({
+      meetingId: 'meeting-a', stage: 'asr', state: 'ready',
+    }));
+    expect(mocks.updateStage).toHaveBeenCalledWith(expect.objectContaining({
+      meetingId: 'meeting-a', stage: 'transcript_durable', state: 'failed',
+    }));
+  });
+
   it('does not reopen a run when terminal import fails before a durable import fence exists', async () => {
     mocks.nativeResult = completeResult();
     mocks.importResult.mockRejectedValueOnce(new Error('durable import unavailable'));
@@ -312,5 +343,21 @@ describe('iOS durable native post-processing lifecycle', () => {
 
     expect(mocks.start).not.toHaveBeenCalled();
     expect(mocks.prepareAudio).not.toHaveBeenCalled();
+  });
+
+  it('does not open another pipeline signal when imported terminal stages are already truthful', async () => {
+    const identity = deriveIOSNativePostProcessingExecutionIdentity('owner-a', 'meeting-a');
+    mocks.meeting.nativePostprocessRunId = identity.runId;
+    mocks.meeting.nativePostprocessImportedAt = 1_788_000_030_000;
+    mocks.getStages.mockResolvedValue([
+      { stage: 'asr', state: 'ready' },
+      { stage: 'transcript_durable', state: 'failed' },
+    ]);
+
+    await expect(reconcilePendingNativeMeetingWork()).resolves.toBe(0);
+
+    expect(mocks.updateStage).not.toHaveBeenCalled();
+    expect(mocks.notify).not.toHaveBeenCalled();
+    expect(mocks.start).not.toHaveBeenCalled();
   });
 });
