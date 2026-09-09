@@ -23,4 +23,7 @@ dependencies {
   // installed APK, which turns the first real Qwen decode into a runtime crash.
   implementation files('libs/sherpa-onnx-1.13.6.aar')
   testImplementation 'junit:junit:4.13.2'
+  // Local JVM lifecycle tests exercise the real closed JSON persistence path.
+  // Android's mockable android.jar throws for JSONObject methods at runtime.
+  testImplementation 'org.json:json:20180813'
 }

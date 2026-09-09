@@ -128,6 +128,15 @@ export interface NativePostProcessingResult {
   recoveryRounds: number;
   routeRestartCount: number;
   captureGapMs: number;
+  /** Null only while a non-terminal native run is waiting to bind its recognizer. */
+  modelId?: string | null;
+  modelVersion?: string | null;
+  runtimeVersion?: string | null;
+  modelManifestSha256?: string | null;
+  modelActivationGeneration?: number | null;
+  /** Present only for a terminal result after native lifecycle binding. */
+  resultId?: string;
+  resultPayloadSha256?: string;
   lastError?: string | null;
   updatedAt: number;
   blocks: Array<{ sequence: number; segmentIndex: number; startedAt: number; endedAt: number; language: string; text: string }>;

@@ -30,6 +30,14 @@ internal class MainaQwenAsr(private val context: Context) {
         fun asMap() = mapOf("ready" to ready, "root" to root, "reason" to reason)
     }
 
+    data class ModelIdentity(
+        val modelId: String,
+        val modelVersion: String,
+        val runtimeVersion: String,
+        val manifestSha256: String?,
+        val activationGeneration: Long?,
+    )
+
     data class Result(
         val text: String,
         val language: String,
@@ -81,6 +89,19 @@ internal class MainaQwenAsr(private val context: Context) {
         val root = modelRoot()
         val invalid = invalidModelFile(root)
         return if (invalid == null) ModelStatus(true, root.absolutePath) else ModelStatus(false, root.absolutePath, invalid)
+    }
+
+    @Synchronized
+    fun modelIdentity(): ModelIdentity {
+        resolveModelForRecognizer()
+        val handle = activePack
+        return ModelIdentity(
+            modelId = ENGINE_ID,
+            modelVersion = handle?.packVersion ?: LEGACY_MODEL_VERSION,
+            runtimeVersion = handle?.runtimeVersion ?: ENGINE_VERSION,
+            manifestSha256 = handle?.manifestSha256,
+            activationGeneration = handle?.activationGeneration,
+        )
     }
 
     /** Select a quiet boundary near the middle of a failed ASR window.
@@ -266,9 +287,12 @@ internal class MainaQwenAsr(private val context: Context) {
     }
 
     private fun resolveModelForRecognizer(): ModelStatus {
+        val existing = activePack
+        if (existing != null) {
+            return ModelStatus(true, existing.root.absolutePath)
+        }
         if (recognizer != null) {
-            val existing = activePack
-            return if (existing != null) ModelStatus(true, existing.root.absolutePath) else status()
+            return status()
         }
         val lifecycleStatus = modelPacks.status()
         if (lifecycleStatus.state == "ready") {
@@ -386,13 +410,14 @@ internal class MainaQwenAsr(private val context: Context) {
         val windowEndMs: Long,
     )
 
-    private companion object {
-        const val ENGINE_ID = "qwen3-0.6b-int8"
-        const val ENGINE_VERSION = "sherpa-onnx-1.13.6"
+    companion object {
+        internal const val ENGINE_ID = "qwen3-0.6b-int8"
+        internal const val ENGINE_VERSION = "sherpa-onnx-1.13.6"
+        internal const val LEGACY_MODEL_VERSION = "1"
         // Upstream sherpa-onnx Java/C++ defaults for Qwen3-ASR. The previous
         // 1536/512 configuration allowed short pathological windows to build
         // a very large KV cache and decode for tens of seconds.
-        val REQUIRED_FILES = linkedMapOf(
+        private val REQUIRED_FILES = linkedMapOf(
             "conv_frontend.onnx" to 44_148_281L,
             "encoder.int8.onnx" to 182_491_662L,
             "decoder.int8.onnx" to 755_914_231L,

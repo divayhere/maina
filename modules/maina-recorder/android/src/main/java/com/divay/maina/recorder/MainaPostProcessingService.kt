@@ -184,6 +184,13 @@ internal class MainaPostProcessingService : Service() {
         if (chunkUris.isEmpty()) {
             MainaPostProcessingOutbox.shared(applicationContext).begin(
                 meetingId, directory, meetingStartedAt, captureEndedAt, 0L, 0L, 0, 0, routeRestartCount, captureGapMs,
+                MainaQwenAsr.ModelIdentity(
+                    MainaQwenAsr.ENGINE_ID,
+                    MainaQwenAsr.LEGACY_MODEL_VERSION,
+                    MainaQwenAsr.ENGINE_VERSION,
+                    null,
+                    null,
+                ),
             )
             MainaPostProcessingOutbox.shared(applicationContext).defer(
                 meetingId,
@@ -212,20 +219,28 @@ internal class MainaPostProcessingService : Service() {
             captureEndedAt != null && effectiveWallDurationMs > 0L -> captureEndedAt - effectiveWallDurationMs
             else -> System.currentTimeMillis() - effectiveWallDurationMs
         }.coerceAtLeast(1L)
-        val start = outbox.begin(
-            meetingId = meetingId,
-            captureDirectory = directory,
-            meetingStartedAt = effectiveMeetingStartedAt,
-            captureEndedAt = captureEndedAt,
-            durationMs = effectiveWallDurationMs,
-            audioDurationMs = effectiveAudioDurationMs,
-            segmentCount = chunkUris.size,
-            windowCount = totalWindows,
-            routeRestartCount = routeRestartCount,
-            captureGapMs = captureGapMs,
-            forceRetry = forceRetry,
-        )
+        val asr = MainaQwenAsr(applicationContext)
+        val start = try {
+            outbox.begin(
+                meetingId = meetingId,
+                captureDirectory = directory,
+                meetingStartedAt = effectiveMeetingStartedAt,
+                captureEndedAt = captureEndedAt,
+                durationMs = effectiveWallDurationMs,
+                audioDurationMs = effectiveAudioDurationMs,
+                segmentCount = chunkUris.size,
+                windowCount = totalWindows,
+                routeRestartCount = routeRestartCount,
+                captureGapMs = captureGapMs,
+                modelIdentity = asr.modelIdentity(),
+                forceRetry = forceRetry,
+            )
+        } catch (cause: Throwable) {
+            asr.release()
+            throw cause
+        }
         if (start.alreadyTerminal) {
+            asr.release()
             Log.i("MainaPostProcessing", "Terminal outbox run already exists for meetingId=$meetingId state=${start.terminalState}")
             notifyResultChanged(meetingId, "terminal")
             return start.terminalState == MainaPostProcessingOutbox.STATE_COMPLETE
@@ -234,7 +249,6 @@ internal class MainaPostProcessingService : Service() {
             "MainaPostProcessing",
             "Starting local transcription meetingId=$meetingId chunks=${chunkUris.size} totalWindows=$totalWindows wallDurationMs=$effectiveWallDurationMs audioDurationMs=$effectiveAudioDurationMs routeRestarts=$routeRestartCount captureGapMs=$captureGapMs",
         )
-        val asr = MainaQwenAsr(applicationContext)
         val voiceActivity = MainaVoiceActivity(applicationContext)
         var previousText = ""
         var completedWindows = start.completedWindowKeys.size

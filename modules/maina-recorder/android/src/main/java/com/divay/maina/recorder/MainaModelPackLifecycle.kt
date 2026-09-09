@@ -9,9 +9,11 @@ import org.json.JSONObject
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
+import java.io.RandomAccessFile
 import java.nio.file.Files
 import java.nio.file.StandardCopyOption
 import java.security.MessageDigest
+import java.util.Comparator
 import java.util.UUID
 
 internal object MainaModelPackLifecyclePolicy {
@@ -108,8 +110,9 @@ internal object MainaModelPackLifecyclePolicy {
  * one activation generation until the recognizer is released.
  */
 internal class MainaModelPackLifecycle(
-    context: Context,
-    private val root: File = File(context.filesDir, "maina-model-packs-v1"),
+    context: Context? = null,
+    private val root: File = File(requireNotNull(context).filesDir, "maina-model-packs-v1"),
+    private val directorySync: (File) -> Unit = { fsyncDirectory(it) },
 ) {
     data class PublicStatus(
         val packVersion: String?,
@@ -184,6 +187,32 @@ internal class MainaModelPackLifecycle(
 
     fun status(): PublicStatus = withWriterLock {
         reconcileInterruptedPromotion()
+        val writer = readExactJson(File(root, WRITER), WRITER_KEYS)
+        val current = readExactJson(File(root, CURRENT_ACQUISITION), WRITER_KEYS)
+        if (writer != null && (!validWriter(writer) || (current != null && !sameWriter(writer, current)))) {
+            return@withWriterLock invalidLifecycleStatus("MODEL_PACK_WRITER_IDENTITY_MISMATCH")
+        }
+        val acquisition = current ?: writer
+        if (acquisition != null) {
+            if (!validWriter(acquisition)) return@withWriterLock invalidLifecycleStatus("MODEL_PACK_CURRENT_IDENTITY_INVALID")
+            val manifestSha = acquisition.getString("manifestSha256")
+            val record = readRecord(manifestSha)
+                ?: return@withWriterLock invalidLifecycleStatus("MODEL_PACK_CURRENT_RECORD_MISSING")
+            val manifest = readLifecycleManifest(manifestSha)
+                ?: return@withWriterLock invalidLifecycleStatus("MODEL_PACK_CURRENT_MANIFEST_MISSING")
+            if (record.optString("manifestSha256") != manifestSha ||
+                record.optString("packVersion") != manifest.packVersion ||
+                record.optLong("bytesTotal") != manifest.bytesTotal
+            ) return@withWriterLock invalidLifecycleStatus("MODEL_PACK_CURRENT_IDENTITY_INVALID")
+            if (record.optString("state") != "ready") {
+                return@withWriterLock public(
+                    manifest,
+                    record.getString("state"),
+                    record.getLong("bytesComplete"),
+                    record.getString("reasonCode"),
+                )
+            }
+        }
         val pointer = readExactJson(File(root, READY_POINTER), POINTER_KEYS) ?: return@withWriterLock PublicStatus(
             packVersion = null,
             state = "unavailable",
@@ -233,13 +262,12 @@ internal class MainaModelPackLifecycle(
         ) ?: throw IllegalArgumentException("STORAGE_PREFLIGHT_FAILED")
         if (root.usableSpace < required) throw IllegalStateException("STORAGE_PREFLIGHT_FAILED")
 
-        writeJsonAtomic(File(root, WRITER), JSONObject().put("manifestSha256", manifest.manifestSha256).put("platform", PLATFORM))
+        val acquisition = writerIdentity(manifest.manifestSha256)
+        writeJsonAtomic(File(root, WRITER), acquisition)
+        writeJsonAtomic(File(root, CURRENT_ACQUISITION), acquisition)
         val stage = stagingDirectory(manifest.manifestSha256)
         val previous = readRecord(manifest.manifestSha256)
-        if (previous?.optString("state") == "failed_verification" && stage.exists()) {
-            if (!stage.deleteRecursively()) throw IllegalStateException("MODEL_PACK_STORAGE_INVALID")
-            fsyncDirectory(File(root, "staging"))
-        }
+        prepareStageForResume(stage, manifest, previous)
         ensureDirectory(stage)
         writeJsonAtomic(File(stage, "manifest.json"), manifest.raw)
         val priorState = previous?.optString("state") ?: "unavailable"
@@ -281,9 +309,14 @@ internal class MainaModelPackLifecycle(
             fail(manifest, "failed_download", "RESUME_PREFIX_INVALID", progress)
             throw IllegalStateException("RESUME_PREFIX_INVALID")
         }
-        FileOutputStream(target, true).use { output ->
-            FileInputStream(source).use { input -> input.copyTo(output) }
-            output.fd.sync()
+        try {
+            FileOutputStream(target, true).use { output ->
+                FileInputStream(source).use { input -> input.copyTo(output) }
+                output.fd.sync()
+            }
+        } catch (cause: Throwable) {
+            fail(manifest, "failed_download", "DOWNLOAD_WRITE_FAILED", progress)
+            throw IllegalStateException("DOWNLOAD_WRITE_FAILED", cause)
         }
         val next = progress.toMutableMap()
         next[relativePath] = completed + spec.chunkSha256[chunkIndex]
@@ -346,7 +379,7 @@ internal class MainaModelPackLifecycle(
             ) throw IllegalStateException("ROLLBACK_RETENTION_FAILED")
         } else if (File(root, PREVIOUS_POINTER).exists()) {
             if (!File(root, PREVIOUS_POINTER).delete()) throw IllegalStateException("MODEL_PACK_STORAGE_INVALID")
-            fsyncDirectory(root)
+            directorySync(root)
         }
         val destination = packDirectory(manifest.manifestSha256)
         val stage = stagingDirectory(manifest.manifestSha256)
@@ -354,7 +387,7 @@ internal class MainaModelPackLifecycle(
             fail(manifest, "failed_smoke", "PROMOTION_ATOMICITY_FAILED", completeProgress(manifest))
             throw IllegalStateException("PROMOTION_ATOMICITY_FAILED")
         }
-        fsyncDirectory(File(root, "packs"))
+        directorySync(File(root, "packs"))
         if (oldReady != null) writeJsonAtomic(File(root, PREVIOUS_POINTER), oldReady)
         val generation = (oldReady?.optLong("activationGeneration", 0L) ?: 0L) + 1L
         val pointer = JSONObject()
@@ -367,7 +400,7 @@ internal class MainaModelPackLifecycle(
         writeJsonAtomic(File(root, READY_POINTER), pointer)
         writeRecord(manifest, "ready", manifest.bytesTotal, "NONE", completeProgress(manifest), generation)
         File(root, WRITER).delete()
-        fsyncDirectory(root)
+        directorySync(root)
         public(manifest, "ready", manifest.bytesTotal, "NONE")
     }
 
@@ -407,6 +440,7 @@ internal class MainaModelPackLifecycle(
             current.optLong("activationGeneration") != handle.activationGeneration
         ) return@withWriterLock false
         val currentManifest = readManifest(packDirectory(handle.manifestSha256)) ?: return@withWriterLock false
+        writeJsonAtomic(File(root, CURRENT_ACQUISITION), writerIdentity(handle.manifestSha256))
         writeRecord(currentManifest, "rollback_pending", currentManifest.bytesTotal, "MODEL_OPEN_FAILED", completeProgress(currentManifest), handle.activationGeneration)
         val previous = readExactJson(File(root, PREVIOUS_POINTER), POINTER_KEYS)
         if (previous != null && validPointer(previous)) {
@@ -416,32 +450,146 @@ internal class MainaModelPackLifecycle(
         }
         writeRecord(currentManifest, "failed_smoke", currentManifest.bytesTotal, "MODEL_OPEN_FAILED_ROLLED_BACK", completeProgress(currentManifest), handle.activationGeneration)
         File(root, PREVIOUS_POINTER).delete()
-        fsyncDirectory(root)
+        directorySync(root)
         true
     }
 
-    fun noteExactResult(handle: ReadyHandle, resultId: String, resultPayloadSha256: String): Boolean = withWriterLock {
-        if (!validId(resultId) || !validSha(resultPayloadSha256)) return@withWriterLock false
-        val mapping = File(File(root, "results"), "${handle.manifestSha256}-${handle.activationGeneration}.json")
+    fun resultPayloadSha256(payload: Map<String, Any?>): String =
+        sha256(canonicalJson(JSONObject(payload)).toByteArray(Charsets.UTF_8))
+
+    fun resultIdForPayloadSha256(payloadSha256: String): String? =
+        payloadSha256.takeIf(::validSha)?.let { "npr_${it.take(32)}" }
+
+    fun noteExactResult(
+        modelId: String,
+        modelVersion: String,
+        runtimeVersion: String,
+        manifestSha256: String?,
+        activationGeneration: Long?,
+        resultId: String,
+        resultPayloadSha256: String,
+    ): Boolean = withWriterLock {
+        if (modelId != ENGINE_ID || !validId(modelVersion) || runtimeVersion != RUNTIME_VERSION ||
+            !validId(resultId) || !validSha(resultPayloadSha256)
+        ) return@withWriterLock false
+        if (manifestSha256 == null || activationGeneration == null) {
+            return@withWriterLock manifestSha256 == null && activationGeneration == null &&
+                modelVersion == LEGACY_MODEL_VERSION &&
+                readExactJson(File(root, READY_POINTER), POINTER_KEYS) == null
+        }
+        if (!validSha(manifestSha256) || activationGeneration <= 0L) return@withWriterLock false
+        val record = readRecord(manifestSha256) ?: return@withWriterLock false
+        val manifest = readManifest(packDirectory(manifestSha256)) ?: return@withWriterLock false
+        if (record.optString("state") != "ready" || record.optString("manifestSha256") != manifestSha256 ||
+            record.optString("packVersion") != modelVersion || record.optLong("activationGeneration") != activationGeneration ||
+            manifest.manifestSha256 != manifestSha256 || manifest.packVersion != modelVersion ||
+            manifest.platform.runtimeVersion != runtimeVersion
+        ) return@withWriterLock false
+        val lifecycleRecordSha256 = sha256(recordFile(manifestSha256))
+        val resultsRoot = File(root, "results")
+        val mappings = resultsRoot.listFiles()?.toList().orEmpty()
+        if (mappings.any { !regularFile(it) || !it.name.matches(Regex("^[a-f0-9]{64}-[1-9][0-9]*\\.json$")) }) {
+            return@withWriterLock false
+        }
+        for (candidate in mappings) {
+            val existing = readExactJson(candidate, RESULT_KEYS) ?: return@withWriterLock false
+            if (!validResultRecord(existing)) return@withWriterLock false
+            val sameTuple = existing.optString("modelId") == modelId &&
+                existing.optString("modelVersion") == modelVersion &&
+                existing.optString("runtimeVersion") == runtimeVersion
+            if (sameTuple && (existing.optString("manifestSha256") != manifestSha256 ||
+                    existing.optLong("activationGeneration") != activationGeneration)
+            ) return@withWriterLock false
+            val referenced = existing.getJSONArray("referencedResultIds")
+            if ((0 until referenced.length()).any { referenced.optString(it) == resultId } &&
+                (existing.optString("manifestSha256") != manifestSha256 ||
+                    existing.optLong("activationGeneration") != activationGeneration)
+            ) return@withWriterLock false
+        }
+        val mapping = File(resultsRoot, "$manifestSha256-$activationGeneration.json")
         val existing = readExactJson(mapping, RESULT_KEYS)
+        if (existing != null && (!validResultRecord(existing) ||
+                existing.optString("manifestSha256") != manifestSha256 ||
+                existing.optLong("activationGeneration") != activationGeneration ||
+                existing.optString("modelId") != modelId ||
+                existing.optString("modelVersion") != modelVersion ||
+                existing.optString("runtimeVersion") != runtimeVersion ||
+                existing.optString("lifecycleRecordSha256") != lifecycleRecordSha256)
+        ) return@withWriterLock false
         val ids = existing?.getJSONArray("referencedResultIds") ?: JSONArray()
         if ((0 until ids.length()).none { ids.optString(it) == resultId }) ids.put(resultId)
         val first = existing?.optString("firstExactResultId")?.takeIf { it.isNotEmpty() } ?: resultId
         val firstSha = existing?.optString("firstExactResultSha256")?.takeIf { it.isNotEmpty() } ?: resultPayloadSha256
+        if (first == resultId && firstSha != resultPayloadSha256) return@withWriterLock false
         writeJsonAtomic(mapping, JSONObject()
-            .put("manifestSha256", handle.manifestSha256)
+            .put("manifestSha256", manifestSha256)
             .put("platform", PLATFORM)
-            .put("activationGeneration", handle.activationGeneration)
-            .put("modelId", PACK_ID)
-            .put("modelVersion", handle.packVersion)
-            .put("runtimeVersion", handle.runtimeVersion)
+            .put("activationGeneration", activationGeneration)
+            .put("modelId", modelId)
+            .put("modelVersion", modelVersion)
+            .put("runtimeVersion", runtimeVersion)
+            .put("lifecycleRecordSha256", lifecycleRecordSha256)
+            .put("packRetained", true)
             .put("firstExactResultId", first)
             .put("firstExactResultSha256", firstSha)
             .put("referencedResultIds", ids))
         true
     }
 
+    private fun validResultRecord(record: JSONObject): Boolean {
+        val ids = record.optJSONArray("referencedResultIds") ?: return false
+        val values = (0 until ids.length()).map { ids.optString(it) }
+        return validSha(record.optString("manifestSha256")) && record.optString("platform") == PLATFORM &&
+            record.optLong("activationGeneration") > 0L && record.optString("modelId") == ENGINE_ID &&
+            validId(record.optString("modelVersion")) && record.optString("runtimeVersion") == RUNTIME_VERSION &&
+            validSha(record.optString("lifecycleRecordSha256")) && record.optBoolean("packRetained", false) &&
+            validId(record.optString("firstExactResultId")) && validSha(record.optString("firstExactResultSha256")) &&
+            values.isNotEmpty() && values.all(::validId) && values.toSet().size == values.size &&
+            record.optString("firstExactResultId") in values
+    }
+
     private data class Progress(val bytes: Long, val chunks: Map<String, List<String>>)
+
+    private fun prepareStageForResume(stage: File, manifest: Manifest, previous: JSONObject?) {
+        if (!stage.exists()) return
+        val priorState = previous?.optString("state") ?: "unavailable"
+        if (priorState in setOf("unavailable", "failed_verification")) {
+            deleteTreeNoFollow(stage)
+            directorySync(File(root, "staging"))
+            return
+        }
+        if (priorState !in setOf("downloading", "failed_download")) return
+        val progress = decodeProgress(previous!!, manifest)
+        val observed = enumerateFiles(stage).filter { it != "manifest.json" }
+        if (observed.any { path -> manifest.files.none { it.path == path } }) {
+            throw IllegalStateException("RESUME_PREFIX_INVALID")
+        }
+        for (spec in manifest.files) {
+            val verified = progress[spec.path].orEmpty()
+            if (verified.indices.any { it >= spec.chunkSha256.size || verified[it] != spec.chunkSha256[it] }) {
+                throw IllegalStateException("RESUME_PREFIX_INVALID")
+            }
+            val expectedBytes = verified.indices.sumOf { index ->
+                minOf(spec.chunkSizeBytes, spec.byteCount - spec.chunkSizeBytes * index)
+            }
+            val file = safeChild(stage, spec.path)
+            if (!file.exists()) {
+                if (expectedBytes != 0L) throw IllegalStateException("RESUME_PREFIX_INVALID")
+                continue
+            }
+            if (!regularFile(file) || file.length() < expectedBytes || file.length() > spec.byteCount) {
+                throw IllegalStateException("RESUME_PREFIX_INVALID")
+            }
+            if (file.length() > expectedBytes) {
+                RandomAccessFile(file, "rw").use { output ->
+                    output.setLength(expectedBytes)
+                    output.fd.sync()
+                }
+            }
+            if (chunkHashes(file, spec.chunkSizeBytes) != verified) throw IllegalStateException("RESUME_PREFIX_INVALID")
+        }
+        directorySync(stage)
+    }
 
     private fun scanVerifiedProgress(stage: File, manifest: Manifest): Progress {
         val progress = linkedMapOf<String, List<String>>()
@@ -477,9 +625,10 @@ internal class MainaModelPackLifecycle(
         PublicStatus(manifest.packVersion, state, bytes, manifest.bytesTotal, reason, true)
 
     private fun fail(manifest: Manifest, state: String, reason: String, progress: Map<String, List<String>>) {
+        writeJsonAtomic(File(root, CURRENT_ACQUISITION), writerIdentity(manifest.manifestSha256))
         writeRecord(manifest, state, verifiedBytes(progress, manifest), reason, progress)
         File(root, WRITER).delete()
-        fsyncDirectory(root)
+        directorySync(root)
     }
 
     private fun writeRecord(
@@ -510,7 +659,7 @@ internal class MainaModelPackLifecycle(
         val raw = runCatching { JSONObject(value) }.getOrElse { throw IllegalArgumentException("MANIFEST_INVALID") }
         requireExactKeys(raw, MANIFEST_KEYS, "MANIFEST_INVALID")
         if (raw.optString("schemaVersion") != "maina.model-pack-manifest.v1" || raw.optString("packId") != PACK_ID ||
-            raw.optString("engineId") != PACK_ID || raw.optString("formatVersion") != "1" ||
+            raw.optString("engineId") != ENGINE_ID || raw.optString("formatVersion") != "1" ||
             !validId(raw.optString("packVersion")) || !validSha(raw.optString("smokeInputSha256")) ||
             !validSha(raw.optString("manifestSha256"))
         ) throw IllegalArgumentException("MANIFEST_INVALID")
@@ -598,7 +747,7 @@ internal class MainaModelPackLifecycle(
             !validId(record.optString("packVersion")) || !validSha(record.optString("manifestSha256")) ||
             record.optString("platform") != PLATFORM || state !in LIFECYCLE_STATES || record.optLong("bytesTotal", -1L) <= 0L ||
             record.optLong("bytesComplete", -1L) !in 0L..record.optLong("bytesTotal") ||
-            !validId(record.optString("reasonCode")) || chunks.keys().asSequence().any { !safeRelativePath(it) }
+            !validId(record.optString("reasonCode")) || chunks.keys().asSequence().any { !safeRelativePath(it) || it !in REQUIRED_FILES }
         ) throw IllegalStateException("MODEL_PACK_RECORD_INVALID")
         chunks.keys().asSequence().forEach { path ->
             val values = chunks.optJSONArray(path) ?: throw IllegalStateException("MODEL_PACK_RECORD_INVALID")
@@ -619,7 +768,7 @@ internal class MainaModelPackLifecycle(
 
     private fun reconcileInterruptedPromotion() {
         val writer = readExactJson(File(root, WRITER), WRITER_KEYS) ?: return
-        if (!validSha(writer.optString("manifestSha256")) || writer.optString("platform") != PLATFORM) return
+        if (!validWriter(writer)) return
         val record = readRecord(writer.optString("manifestSha256")) ?: return
         val current = readExactJson(File(root, READY_POINTER), POINTER_KEYS)
         val currentMatches = current != null && validPointer(current) &&
@@ -630,22 +779,47 @@ internal class MainaModelPackLifecycle(
             record.optString("state"), currentMatches, previous != null && validPointer(previous),
         )
         if (action == "complete_success_cleanup") {
+            writeJsonAtomic(File(root, CURRENT_ACQUISITION), writer)
             if (!File(root, WRITER).delete()) throw IllegalStateException("MODEL_PACK_STORAGE_INVALID")
-            fsyncDirectory(root)
+            directorySync(root)
             return
         }
         if (action == "none") return
-        val manifest = readManifest(packDirectory(writer.optString("manifestSha256"))) ?: return
+        val manifest = readLifecycleManifest(writer.optString("manifestSha256")) ?: return
         if (action == "rollback_to_previous") {
             writeJsonAtomic(File(root, READY_POINTER), previous!!)
         } else if (action == "invalidate_first_activation") {
             if (File(root, READY_POINTER).exists() && !File(root, READY_POINTER).delete()) throw IllegalStateException("MODEL_PACK_STORAGE_INVALID")
-            fsyncDirectory(root)
+            directorySync(root)
         }
         writeRecord(manifest, "failed_smoke", manifest.bytesTotal, "PROMOTION_INTERRUPTED_ROLLED_BACK", completeProgress(manifest), record.optLong("activationGeneration"))
+        writeJsonAtomic(File(root, CURRENT_ACQUISITION), writer)
         if (!File(root, WRITER).delete()) throw IllegalStateException("MODEL_PACK_STORAGE_INVALID")
-        fsyncDirectory(root)
+        directorySync(root)
     }
+
+    private fun readLifecycleManifest(manifestSha: String): Manifest? {
+        val packed = readManifest(packDirectory(manifestSha))
+        val staged = readManifest(stagingDirectory(manifestSha))
+        if (packed != null && staged != null && canonicalJson(packed.raw) != canonicalJson(staged.raw)) {
+            throw IllegalStateException("MODEL_PACK_CURRENT_IDENTITY_INVALID")
+        }
+        return packed ?: staged
+    }
+
+    private fun writerIdentity(manifestSha: String) = JSONObject()
+        .put("manifestSha256", manifestSha)
+        .put("platform", PLATFORM)
+
+    private fun validWriter(writer: JSONObject): Boolean =
+        validSha(writer.optString("manifestSha256")) && writer.optString("platform") == PLATFORM
+
+    private fun sameWriter(left: JSONObject, right: JSONObject): Boolean =
+        left.optString("manifestSha256") == right.optString("manifestSha256") &&
+            left.optString("platform") == right.optString("platform")
+
+    private fun invalidLifecycleStatus(reason: String) =
+        PublicStatus(null, "rollback_pending", 0, 0, reason, platformCompatible())
 
     private fun validPointer(pointer: JSONObject): Boolean = pointer.optString("packId") == PACK_ID &&
         validId(pointer.optString("packVersion")) && validSha(pointer.optString("manifestSha256")) &&
@@ -658,6 +832,13 @@ internal class MainaModelPackLifecycle(
             if (!regularFile(file)) throw IllegalStateException("MANIFEST_PATH_INVALID")
             file.relativeTo(directory).invariantSeparatorsPath
         }.toList()
+    }
+
+    private fun deleteTreeNoFollow(directory: File) {
+        val path = directory.toPath()
+        Files.walk(path).use { stream ->
+            stream.sorted(Comparator.reverseOrder()).forEach { entry -> Files.delete(entry) }
+        }
     }
 
     private fun regularExactChild(directory: File, name: String): Boolean = regularFile(File(directory, name))
@@ -691,7 +872,7 @@ internal class MainaModelPackLifecycle(
                 StandardCopyOption.ATOMIC_MOVE,
                 StandardCopyOption.REPLACE_EXISTING,
             )
-            fsyncDirectory(target.parentFile!!)
+            directorySync(target.parentFile!!)
         } finally {
             if (temporary.exists()) temporary.delete()
         }
@@ -715,19 +896,22 @@ internal class MainaModelPackLifecycle(
 
     private companion object {
         const val PACK_ID = "qwen3-asr-0.6b-int8"
+        const val ENGINE_ID = "qwen3-0.6b-int8"
+        const val LEGACY_MODEL_VERSION = "1"
         const val PLATFORM = "android"
         const val RUNTIME_VERSION = "sherpa-onnx-1.13.6"
         const val RUNTIME_SHA256 = "0012d9a28f15bd6fb966b62b70a75da3990512fdccce28b83098248ce4be1698"
         const val READY_POINTER = "ready.json"
         const val PREVIOUS_POINTER = "previous-ready.json"
         const val WRITER = "writer.json"
+        const val CURRENT_ACQUISITION = "current.json"
         val MANIFEST_KEYS = setOf("schemaVersion", "packId", "packVersion", "engineId", "formatVersion", "files", "platforms", "smokeInputSha256", "manifestSha256")
         val FILE_KEYS = setOf("path", "byteCount", "sha256", "chunkSizeBytes", "chunkSha256")
         val PLATFORM_KEYS = setOf("osFamily", "minOsVersion", "architectures", "runtimeVersion", "runtimeSha256", "smokeExpectedTextSha256")
         val POINTER_KEYS = setOf("packId", "packVersion", "manifestSha256", "platform", "activationGeneration", "runtimeVersion")
         val WRITER_KEYS = setOf("manifestSha256", "platform")
         val RECORD_KEYS = setOf("schemaVersion", "packId", "packVersion", "manifestSha256", "platform", "activationGeneration", "state", "bytesComplete", "bytesTotal", "reasonCode", "verifiedChunks")
-        val RESULT_KEYS = setOf("manifestSha256", "platform", "activationGeneration", "modelId", "modelVersion", "runtimeVersion", "firstExactResultId", "firstExactResultSha256", "referencedResultIds")
+        val RESULT_KEYS = setOf("manifestSha256", "platform", "activationGeneration", "modelId", "modelVersion", "runtimeVersion", "lifecycleRecordSha256", "packRetained", "firstExactResultId", "firstExactResultSha256", "referencedResultIds")
         val LIFECYCLE_STATES = setOf("unavailable", "downloading", "verifying", "staged", "smoke_testing", "ready", "failed_download", "failed_verification", "failed_smoke", "rollback_pending")
         val REQUIRED_FILES = linkedMapOf(
             "conv_frontend.onnx" to 44_148_281L,
