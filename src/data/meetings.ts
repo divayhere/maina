@@ -2124,11 +2124,17 @@ export async function importIOSNativePostProcessingResult(
     started_at: number;
     capture_ended_at: number | null;
     restart_count: number;
+    audio_duration_ms: number;
   }>(
-    'SELECT id, started_at, capture_ended_at, restart_count FROM meetings WHERE id = ?',
+    'SELECT id, started_at, capture_ended_at, restart_count, audio_duration_ms FROM meetings WHERE id = ?',
     [result.identity.meetingId],
   );
   if (!meeting) return null;
+  const expectedPersistedAudioDurationMs = Math.max(
+    0,
+    meeting.audio_duration_ms,
+    result.audio.durationMs,
+  );
 
   const blocks = result.windows.flatMap((window) => window.blocks).map((block) => ({
     sequence: block.sequence,
@@ -2183,7 +2189,11 @@ export async function importIOSNativePostProcessingResult(
     || !Number.isSafeInteger(committed.native_postprocess_imported_at)
     || (committed.native_postprocess_imported_at ?? 0) <= 0
     || committed.duration_ms !== result.audio.durationMs
-    || committed.audio_duration_ms !== result.audio.durationMs
+    // Capture finalization may already have measured a slightly longer audio
+    // duration than the native ASR window plan. The import intentionally
+    // preserves that monotonic capture truth, so the readback fence proves the
+    // exact MAX(existing, analyzed) value instead of demanding a shrink.
+    || committed.audio_duration_ms !== expectedPersistedAudioDurationMs
     || committed.segment_count !== result.audio.segmentCount
     || committed.transcribed_segments !== processedSegments
     || committed.transcription_window_count !== result.coverage.windowCount
@@ -2244,6 +2254,7 @@ export async function importIOSNativePostProcessingResult(
       resultPayloadSha256: result.resultPayloadSha256,
       importedAtMs,
       durationMs: committed.duration_ms,
+      audioDurationMs: committed.audio_duration_ms,
       segmentCount: committed.segment_count,
       windowCount: committed.transcription_window_count,
       completedWindows: committed.transcription_completed_windows,

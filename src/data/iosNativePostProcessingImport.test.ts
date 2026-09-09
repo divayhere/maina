@@ -65,7 +65,7 @@ const sqlite = vi.hoisted(() => {
       if (sql.includes('UPDATE meetings') && sql.includes('native_postprocess_run_id')) {
         Object.assign(meeting, {
           duration_ms: values[1],
-          audio_duration_ms: values[3],
+          audio_duration_ms: Math.max(Number(meeting.audio_duration_ms), Number(values[3])),
           segment_count: values[8],
           transcribed_segments: values[9],
           transcription_window_count: values[10],
@@ -99,6 +99,7 @@ const sqlite = vi.hoisted(() => {
           started_at: meeting.started_at,
           capture_ended_at: meeting.capture_ended_at,
           restart_count: meeting.restart_count,
+          audio_duration_ms: meeting.audio_duration_ms,
         };
       }
       if (sql.includes('SELECT native_postprocess_run_id, status, started_at')) {
@@ -121,6 +122,9 @@ const sqlite = vi.hoisted(() => {
     setImported: (runId: string, importedAt: number) => {
       meeting.native_postprocess_run_id = runId;
       meeting.native_postprocess_imported_at = importedAt;
+    },
+    setAudioDurationMs: (audioDurationMs: number) => {
+      meeting.audio_duration_ms = audioDurationMs;
     },
     pipelineStage: () => pipelineStage && { ...pipelineStage },
   };
@@ -207,6 +211,18 @@ describe('iOS native post-processing import acknowledgement fence', () => {
     await expect(importIOSNativePostProcessingResult(result())).resolves.not.toBeNull();
     sqlite.tamperFirstBlock();
     await expect(importIOSNativePostProcessingResult(result())).resolves.toBeNull();
+  });
+
+  it('binds monotonic capture duration when it exceeds the analyzed window duration', async () => {
+    sqlite.setAudioDurationMs(20_250);
+
+    const evidence = await importIOSNativePostProcessingResult(result());
+
+    expect(evidence).toEqual({
+      importedAt: '2026-08-29T10:40:30.000Z',
+      transactionCommitSha256: expect.stringMatching(/^[a-f0-9]{64}$/),
+    });
+    expect(sqlite.db.withExclusiveTransactionAsync).toHaveBeenCalledTimes(1);
   });
 });
 

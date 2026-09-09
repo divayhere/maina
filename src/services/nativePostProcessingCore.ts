@@ -236,6 +236,7 @@ export function deriveIOSNativeImportCommitSha256(input: {
   resultPayloadSha256: string;
   importedAtMs: number;
   durationMs: number;
+  audioDurationMs: number;
   segmentCount: number;
   windowCount: number;
   completedWindows: number;
@@ -246,7 +247,7 @@ export function deriveIOSNativeImportCommitSha256(input: {
     'maina.native-post-processing-import-commit.v1',
     input.ownerUserId, input.meetingId, input.runId, String(input.generation), input.resultId,
     input.resultPayloadSha256, String(input.importedAtMs), String(input.durationMs),
-    String(input.segmentCount), String(input.windowCount), String(input.completedWindows),
+    String(input.audioDurationMs), String(input.segmentCount), String(input.windowCount), String(input.completedWindows),
     String(input.failedWindows), String(input.blockCount),
   ];
   return sha256Utf8(values.join('\n'));

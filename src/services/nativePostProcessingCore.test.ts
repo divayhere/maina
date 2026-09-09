@@ -88,13 +88,14 @@ describe('native transcript truth model', () => {
     const evidence = {
       ownerUserId: 'owner-a', meetingId: 'meeting-a', runId: 'run-a', generation: 1,
       resultId: `npr_${'a'.repeat(32)}`, resultPayloadSha256: 'b'.repeat(64),
-      importedAtMs: 1_788_000_000_000, durationMs: 20_000, segmentCount: 1,
+      importedAtMs: 1_788_000_000_000, durationMs: 20_000, audioDurationMs: 20_100, segmentCount: 1,
       windowCount: 2, completedWindows: 2, failedWindows: 0, blockCount: 2,
     };
     const digest = deriveIOSNativeImportCommitSha256(evidence);
     expect(digest).toMatch(/^[a-f0-9]{64}$/);
     expect(deriveIOSNativeImportCommitSha256(evidence)).toBe(digest);
     expect(deriveIOSNativeImportCommitSha256({ ...evidence, blockCount: 1 })).not.toBe(digest);
+    expect(deriveIOSNativeImportCommitSha256({ ...evidence, audioDurationMs: 20_101 })).not.toBe(digest);
   });
 
   it('builds one exact native start and a closed post-commit acknowledgement fence', () => {
