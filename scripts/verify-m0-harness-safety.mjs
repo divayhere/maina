@@ -79,6 +79,26 @@ if (stop && ui) {
   if (permissionHelper.indexOf('“Maina” would like to access the Microphone.') > permissionHelper.indexOf('alert.buttons["Allow"]')) {
     throw new Error('iOS UI test can accept an Allow action before proving the exact microphone alert.');
   }
+  const permissionGuardStart = permissionHelper.indexOf(
+    'guard alert.staticTexts["“Maina” would like to access the Microphone."].exists else',
+  );
+  const allowLookupStart = permissionHelper.indexOf('let allow = alert.buttons["Allow"]');
+  if (permissionGuardStart < 0 || allowLookupStart <= permissionGuardStart) {
+    throw new Error('iOS UI test does not guard the exact microphone prompt before resolving Allow.');
+  }
+  const exactPermissionGuard = permissionHelper.slice(permissionGuardStart, allowLookupStart);
+  if (!exactPermissionGuard.includes('XCTFail(') || !exactPermissionGuard.includes('return')) {
+    throw new Error('iOS UI test does not fail closed before resolving the microphone Allow action.');
+  }
+  const allowGuardStart = permissionHelper.indexOf('guard allow.exists else');
+  const allowTapStart = permissionHelper.indexOf('allow.tap()');
+  if (allowGuardStart <= allowLookupStart || allowTapStart <= allowGuardStart) {
+    throw new Error('iOS UI test does not guard the microphone Allow action before tapping it.');
+  }
+  const allowGuard = permissionHelper.slice(allowGuardStart, allowTapStart);
+  if (!allowGuard.includes('XCTFail(') || !allowGuard.includes('return')) {
+    throw new Error('iOS UI test can tap a missing or unproven microphone Allow action.');
+  }
 }
 
 if (iosUiConfigurator) {

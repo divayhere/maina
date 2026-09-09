@@ -258,12 +258,15 @@ final class MainaUITests: XCTestCase {
     let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
     let alert = springboard.alerts.firstMatch
     guard alert.waitForExistence(timeout: 2) else { return }
-    XCTAssertTrue(
-      alert.staticTexts["“Maina” would like to access the Microphone."].exists,
-      "Unexpected system permission alert while starting a recording."
-    )
+    guard alert.staticTexts["“Maina” would like to access the Microphone."].exists else {
+      XCTFail("Unexpected system permission alert while starting a recording.")
+      return
+    }
     let allow = alert.buttons["Allow"]
-    XCTAssertTrue(allow.exists, "Expected microphone permission action is unavailable.")
+    guard allow.exists else {
+      XCTFail("Expected microphone permission action is unavailable.")
+      return
+    }
     allow.tap()
     XCTAssertFalse(alert.waitForExistence(timeout: 5), "Microphone permission alert did not close.")
   }
