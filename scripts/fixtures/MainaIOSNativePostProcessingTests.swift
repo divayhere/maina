@@ -112,6 +112,28 @@ private func executeSQLite(_ databaseURL: URL, _ sql: String) throws {
   }
 }
 
+private func querySQLiteRow(_ databaseURL: URL, _ sql: String) throws -> [String?] {
+  var database: OpaquePointer?
+  guard sqlite3_open_v2(databaseURL.path, &database, SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX, nil) == SQLITE_OK,
+    let database
+  else { throw MainaNativePostProcessingStoreError.storageFailure("test_database_open_failed") }
+  defer { sqlite3_close(database) }
+  var statement: OpaquePointer?
+  guard sqlite3_prepare_v2(database, sql, -1, &statement, nil) == SQLITE_OK, let statement else {
+    throw MainaNativePostProcessingStoreError.storageFailure("test_query_prepare_failed")
+  }
+  defer { sqlite3_finalize(statement) }
+  guard sqlite3_step(statement) == SQLITE_ROW else {
+    throw MainaNativePostProcessingStoreError.storageFailure("test_query_row_missing")
+  }
+  return (0..<sqlite3_column_count(statement)).map { index in
+    guard sqlite3_column_type(statement, index) != SQLITE_NULL,
+      let value = sqlite3_column_text(statement, index)
+    else { return nil }
+    return String(cString: value)
+  }
+}
+
 private func makeStart(
   owner: String = "owner-a",
   meeting: String = "meeting-a",
@@ -424,7 +446,33 @@ private func run() throws {
     importedAt: fence.importedAt,
     transactionCommitSha256: fence.transactionCommitSha256
   )) == false, "stale generation cannot acknowledge")
-  expect(try store.acknowledge(fence), "exact durable import fence acknowledges")
+  let bridgedPartialFence = try MainaNativePostProcessingBridgeCodec.acknowledge([
+    "schemaVersion": fence.schemaVersion,
+    "state": fence.state,
+    "ownerUserId": fence.ownerUserId,
+    "meetingId": fence.meetingId,
+    "runId": fence.runId,
+    "generation": fence.generation,
+    "resultId": fence.resultId,
+    "resultPayloadSha256": fence.resultPayloadSha256,
+    "importedAt": fence.importedAt,
+    "transactionCommitSha256": fence.transactionCommitSha256,
+  ])
+  expect(try store.acknowledge(bridgedPartialFence),
+    "exact Expo-decoded partial import fence acknowledges through the real store")
+  let acknowledgedRow = try querySQLiteRow(
+    databaseURL,
+    "SELECT state, result_json, result_id, result_payload_sha256 FROM runs "
+      + "WHERE owner_user_id = 'owner-a' AND meeting_id = 'meeting-a'"
+  )
+  expect(acknowledgedRow == ["acknowledged", nil, nil, nil],
+    "partial acknowledgement clears terminal payload identity without deleting the run")
+  let retainedWindowRow = try querySQLiteRow(
+    databaseURL,
+    "SELECT CAST(COUNT(*) AS TEXT) FROM windows "
+      + "WHERE owner_user_id = 'owner-a' AND meeting_id = 'meeting-a' AND run_id = 'run-a'"
+  )
+  expect(retainedWindowRow == ["2"], "partial acknowledgement retains every per-window evidence row")
   expect(try store.readResult(ownerUserId: "owner-a", meetingId: "meeting-a", runId: "run-a", generation: 1) == nil, "acknowledgement removes only terminal payload")
   expect(try store.acknowledge(fence) == false, "acknowledgement replay is idempotent")
 

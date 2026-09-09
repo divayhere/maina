@@ -221,6 +221,15 @@ async function finishIOSNativePostProcessingResult(
     });
     return false;
   });
+  if (!acknowledged) {
+    // `false` is a truthful native CAS rejection, not a thrown bridge error.
+    // Publish one bounded reason so later reconciliation can be distinguished
+    // from a successfully cleared native payload without exposing result data.
+    log.warn('recovery', 'iOS native acknowledgement is pending exact reconciliation', {
+      reasonCode: 'native_acknowledgement_not_applied',
+      disposition: result.disposition,
+    });
+  }
   const progress = nativeProgress(result.coverage);
   const hasText = result.windows.some((window) => window.blocks.length > 0);
   await updateMeetingPipelineStage({

@@ -52,6 +52,7 @@ const mocks = vi.hoisted(() => ({
   getStages: vi.fn(async () => [] as { stage: string; state: string }[]),
   getTranscriptSummary: vi.fn(async () => null as { hasText: boolean } | null),
   notify: vi.fn(),
+  logWarn: vi.fn(),
   updateMeeting: vi.fn(async () => {}),
   updateStage: vi.fn(async (_stage: Record<string, unknown>) => {}),
 }));
@@ -100,7 +101,7 @@ vi.mock('@/hardware/recording/foreground', () => ({
   updateIOSContinuedProcessing: vi.fn(),
 }));
 vi.mock('@/services/logger', () => ({
-  log: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+  log: { info: vi.fn(), warn: mocks.logWarn, error: vi.fn() },
 }));
 vi.mock('@/services/audioRetention', () => ({ cleanupTerminalMeetingAudio: mocks.cleanup }));
 vi.mock('@/services/meetingPipelineSignals', () => ({ notifyMeetingPipelineChanged: mocks.notify }));
@@ -301,6 +302,14 @@ describe('iOS durable native post-processing lifecycle', () => {
 
     await expect(reconcilePendingNativeMeetingWork()).resolves.toBe(0);
     expect(mocks.cleanup).not.toHaveBeenCalled();
+    expect(mocks.logWarn).toHaveBeenCalledWith(
+      'recovery',
+      'iOS native acknowledgement is pending exact reconciliation',
+      {
+        reasonCode: 'native_acknowledgement_not_applied',
+        disposition: 'complete',
+      },
+    );
     await expect(reconcilePendingNativeMeetingWork()).resolves.toBe(0);
 
     expect(mocks.importResult).toHaveBeenCalledTimes(2);
