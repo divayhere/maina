@@ -1,6 +1,8 @@
+import { Buffer } from 'node:buffer';
 import { createHash } from 'node:crypto';
 import { lstatSync, readFileSync, statSync } from 'node:fs';
 import path from 'node:path';
+import { parseJsonBytesRejectDuplicateKeys } from './strict-json.mjs';
 
 const GIT_SHA = /^[0-9a-f]{40}$/;
 const SHA256 = /^[0-9a-f]{64}$/;
@@ -72,6 +74,42 @@ function exactJson(actual, expected, field) {
   }
 }
 
+function snapshot(pathValue, options, field) {
+  if (options.fileSnapshots === undefined) return null;
+  if (!(options.fileSnapshots instanceof Map)) fail(field, 'fileSnapshots must be a Map');
+  const value = options.fileSnapshots.get(pathValue);
+  if (!value) fail(field, 'verified file snapshot is required');
+  return value;
+}
+
+function fileBytes(pathValue, options, field) {
+  const verified = snapshot(pathValue, options, field);
+  if (verified) {
+    if (!Buffer.isBuffer(verified.content)) fail(field, 'verified file content is required');
+    return verified.content;
+  }
+  return readFileSync(pathValue);
+}
+
+function fileSize(pathValue, options, field) {
+  const verified = snapshot(pathValue, options, field);
+  return verified ? Number(verified.size) : statSync(pathValue).size;
+}
+
+function fileMode(pathValue, options, field) {
+  const verified = snapshot(pathValue, options, field);
+  return verified ? Number(verified.mode & 0o777n) : lstatSync(pathValue).mode & 0o777;
+}
+
+function fileSha256(pathValue, options, field) {
+  const verified = snapshot(pathValue, options, field);
+  return verified ? verified.sha256 : sha256File(pathValue);
+}
+
+function fileJson(pathValue, options, field) {
+  return parseJsonBytesRejectDuplicateKeys(fileBytes(pathValue, options, field), field);
+}
+
 function sourcePin(actual, planned, field) {
   actual = exactKeys(actual, ['repository', 'branch', 'productCommit', 'finalCommit', 'upstreamCommit'], field);
   exact(actual.repository, planned.repository, `${field}.repository`);
@@ -126,11 +164,11 @@ function commonArtifact(actual, field, platform) {
   return actual;
 }
 
-function validateInspectionFile(artifact, platform) {
-  const inspection = JSON.parse(readFileSync(artifact.inspection.path, 'utf8'));
+function validateInspectionFile(artifact, platform, options = {}) {
+  const inspection = fileJson(artifact.inspection.path, options, `artifacts.${platform}.inspection.file`);
   exactKeys(inspection, ['schemaVersion', 'platform', 'artifact', 'audit', ...(platform === 'ios' ? ['debugSymbols'] : [])], `artifacts.${platform}.inspection.file`);
-  exact(artifact.inspection.bytes, statSync(artifact.inspection.path).size, `artifacts.${platform}.inspection.bytes`);
-  exact(artifact.inspection.sha256, sha256File(artifact.inspection.path), `artifacts.${platform}.inspection.sha256`);
+  exact(artifact.inspection.bytes, fileSize(artifact.inspection.path, options, `artifacts.${platform}.inspection.bytes`), `artifacts.${platform}.inspection.bytes`);
+  exact(artifact.inspection.sha256, fileSha256(artifact.inspection.path, options, `artifacts.${platform}.inspection.sha256`), `artifacts.${platform}.inspection.sha256`);
   exact(inspection.schemaVersion, 'maina.exact-artifact-inspection.v1', `artifacts.${platform}.inspection.schemaVersion`);
   exact(inspection.platform, platform, `artifacts.${platform}.inspection.platform`);
   const inspectedArtifact = exactKeys(inspection.artifact, ['path', 'sha256', 'bytes'], `artifacts.${platform}.inspection.artifact`);
@@ -142,8 +180,8 @@ function validateInspectionFile(artifact, platform) {
     exact(inspectedSymbols.path, artifact.debugSymbols.path, 'artifacts.ios.inspection.debugSymbols.path');
     exact(inspectedSymbols.sha256, artifact.debugSymbols.sha256, 'artifacts.ios.inspection.debugSymbols.sha256');
     exact(inspectedSymbols.bytes, artifact.debugSymbols.bytes, 'artifacts.ios.inspection.debugSymbols.bytes');
-    exact(artifact.debugSymbols.bytes, statSync(artifact.debugSymbols.path).size, 'artifacts.ios.debugSymbols.bytes');
-    exact(artifact.debugSymbols.sha256, sha256File(artifact.debugSymbols.path), 'artifacts.ios.debugSymbols.sha256');
+    exact(artifact.debugSymbols.bytes, fileSize(artifact.debugSymbols.path, options, 'artifacts.ios.debugSymbols.bytes'), 'artifacts.ios.debugSymbols.bytes');
+    exact(artifact.debugSymbols.sha256, fileSha256(artifact.debugSymbols.path, options, 'artifacts.ios.debugSymbols.sha256'), 'artifacts.ios.debugSymbols.sha256');
   }
   if (JSON.stringify(inspection.audit) !== JSON.stringify(artifact.audit)) {
     fail(`artifacts.${platform}.audit`, 'must equal the audit derived by scripts/inspect-exact-artifact.mjs');
@@ -225,7 +263,7 @@ function candidateSha256FromApproved(provenance) {
   return sha256Text(`${JSON.stringify(candidate, null, 2)}\n`);
 }
 
-function validateOwnerAuthorization(provenance, planSha256) {
+function validateOwnerAuthorization(provenance, planSha256, options = {}) {
   match(planSha256, SHA256, 'planSha256');
   const approval = provenance.approval;
   const reference = exactKeys(approval.authorization, [
@@ -237,13 +275,15 @@ function validateOwnerAuthorization(provenance, planSha256) {
   if (!path.isAbsolute(reference.path)) fail('approval.authorization.path', 'absolute path is required');
   match(reference.sha256, SHA256, 'approval.authorization.sha256');
   positiveInteger(reference.bytes, 'approval.authorization.bytes');
-  const authorizationStat = lstatSync(reference.path);
-  if (!authorizationStat.isFile() || authorizationStat.isSymbolicLink()) fail('approval.authorization.path', 'regular non-symlink file is required');
-  exact(authorizationStat.mode & 0o777, 0o600, 'approval.authorization.mode');
-  exact(reference.bytes, authorizationStat.size, 'approval.authorization.bytes');
-  exact(reference.sha256, sha256File(reference.path), 'approval.authorization.sha256');
+  if (options.fileSnapshots === undefined) {
+    const authorizationStat = lstatSync(reference.path);
+    if (!authorizationStat.isFile() || authorizationStat.isSymbolicLink()) fail('approval.authorization.path', 'regular non-symlink file is required');
+  }
+  exact(fileMode(reference.path, options, 'approval.authorization.mode'), 0o600, 'approval.authorization.mode');
+  exact(reference.bytes, fileSize(reference.path, options, 'approval.authorization.bytes'), 'approval.authorization.bytes');
+  exact(reference.sha256, fileSha256(reference.path, options, 'approval.authorization.sha256'), 'approval.authorization.sha256');
 
-  const envelope = exactKeys(JSON.parse(readFileSync(reference.path, 'utf8')), [
+  const envelope = exactKeys(fileJson(reference.path, options, 'ownerAuthorization'), [
     'schemaVersion', 'authorizationId', 'authorizedBy', 'sourceThreadId', 'directive',
     'directiveSha256', 'releaseId', 'planSha256', 'candidateProvenanceSha256',
     'artifactSha256', 'scope', 'issuedAt', 'nonce',
@@ -333,34 +373,41 @@ export function validateReleaseProvenance(provenance, plan, options = {}) {
     exact(approval.status, 'admin-approved', 'approval.status');
     string(approval.approvedBy, 'approval.approvedBy');
     if (Number.isNaN(Date.parse(approval.approvedAt))) fail('approval.approvedAt', 'ISO-8601 approval time is required');
-    validateOwnerAuthorization(provenance, options.planSha256);
+    validateOwnerAuthorization(provenance, options.planSha256, options);
   }
   return true;
 }
 
-export function qualifyExactArtifact({ provenance, plan, platform, artifactPath, buildLogPath, planSha256 }) {
+export function qualifyExactArtifact({ provenance, plan, platform, artifactPath, buildLogPath, planSha256, fileSnapshots }) {
   if (!['android', 'ios'].includes(platform)) fail('platform', 'android or ios is required');
-  validateReleaseProvenance(provenance, plan, { platform, planSha256 });
+  const options = { platform, planSha256, fileSnapshots };
+  validateReleaseProvenance(provenance, plan, options);
   const artifact = provenance.artifacts[platform];
   exact(artifact.path, artifactPath, `artifacts.${platform}.path`);
   exact(artifact.buildLog.path, buildLogPath, `artifacts.${platform}.buildLog.path`);
-  exact(artifact.bytes, statSync(artifactPath).size, `artifacts.${platform}.bytes`);
-  exact(artifact.sha256, sha256File(artifactPath), `artifacts.${platform}.sha256`);
-  exact(artifact.buildLog.bytes, statSync(buildLogPath).size, `artifacts.${platform}.buildLog.bytes`);
-  exact(artifact.buildLog.sha256, sha256File(buildLogPath), `artifacts.${platform}.buildLog.sha256`);
-  validateInspectionFile(artifact, platform);
+  exact(artifact.bytes, fileSize(artifactPath, options, `artifacts.${platform}.bytes`), `artifacts.${platform}.bytes`);
+  exact(artifact.sha256, fileSha256(artifactPath, options, `artifacts.${platform}.sha256`), `artifacts.${platform}.sha256`);
+  exact(artifact.buildLog.bytes, fileSize(buildLogPath, options, `artifacts.${platform}.buildLog.bytes`), `artifacts.${platform}.buildLog.bytes`);
+  exact(artifact.buildLog.sha256, fileSha256(buildLogPath, options, `artifacts.${platform}.buildLog.sha256`), `artifacts.${platform}.buildLog.sha256`);
+  validateInspectionFile(artifact, platform, options);
   return true;
 }
 
 export function validateApprovedRelease(provenance, plan, options = {}) {
-  validateReleaseProvenance(provenance, plan, { requireBoth: true, requireApproval: true, planSha256: options.planSha256 });
+  const validationOptions = {
+    requireBoth: true,
+    requireApproval: true,
+    planSha256: options.planSha256,
+    fileSnapshots: options.fileSnapshots,
+  };
+  validateReleaseProvenance(provenance, plan, validationOptions);
   for (const platform of ['android', 'ios']) {
     const artifact = provenance.artifacts[platform];
-    exact(artifact.bytes, statSync(artifact.path).size, `artifacts.${platform}.bytes`);
-    exact(artifact.sha256, sha256File(artifact.path), `artifacts.${platform}.sha256`);
-    exact(artifact.buildLog.bytes, statSync(artifact.buildLog.path).size, `artifacts.${platform}.buildLog.bytes`);
-    exact(artifact.buildLog.sha256, sha256File(artifact.buildLog.path), `artifacts.${platform}.buildLog.sha256`);
-    validateInspectionFile(artifact, platform);
+    exact(artifact.bytes, fileSize(artifact.path, validationOptions, `artifacts.${platform}.bytes`), `artifacts.${platform}.bytes`);
+    exact(artifact.sha256, fileSha256(artifact.path, validationOptions, `artifacts.${platform}.sha256`), `artifacts.${platform}.sha256`);
+    exact(artifact.buildLog.bytes, fileSize(artifact.buildLog.path, validationOptions, `artifacts.${platform}.buildLog.bytes`), `artifacts.${platform}.buildLog.bytes`);
+    exact(artifact.buildLog.sha256, fileSha256(artifact.buildLog.path, validationOptions, `artifacts.${platform}.buildLog.sha256`), `artifacts.${platform}.buildLog.sha256`);
+    validateInspectionFile(artifact, platform, validationOptions);
   }
   return true;
 }
