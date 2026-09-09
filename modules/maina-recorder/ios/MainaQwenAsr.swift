@@ -1,4 +1,5 @@
 import AVFAudio
+import CryptoKit
 import Foundation
 import SherpaOnnxC
 import UIKit
@@ -12,7 +13,10 @@ final class MainaQwenAsr {
   static let shared = MainaQwenAsr()
 
   private let inferenceQueue = DispatchQueue(label: "com.divay.maina.ios.qwen", qos: .utility)
+  private let modelPacks = MainaModelPackLifecycle.shared
   private var recognizer: OpaquePointer?
+  private var activePack: MainaModelPackLifecycle.ReadyHandle?
+  private var activeRoot: URL?
   private var memoryWarningObserver: NSObjectProtocol?
   private var thermalObserver: NSObjectProtocol?
 
@@ -44,23 +48,40 @@ final class MainaQwenAsr {
   }
 
   func status() -> [String: Any] {
-    let root = modelRoot()
+    if let lifecycleStatus = try? modelPacks.status(), lifecycleStatus.state != "unavailable" {
+      guard lifecycleStatus.state == "ready", let handle = try? modelPacks.acquireReady() else {
+        return ["ready": false, "root": NSNull(), "reason": lifecycleStatus.reasonCode]
+      }
+      defer { try? handle.release() }
+      if let reason = invalidModelFile(handle.root) {
+        return ["ready": false, "root": handle.root.path, "reason": reason]
+      }
+      return ["ready": true, "root": handle.root.path, "reason": NSNull()]
+    }
+    let root = legacyModelRoot()
+    if let reason = invalidModelFile(root) {
+      return ["ready": false, "root": root.path, "reason": reason]
+    }
+    return ["ready": true, "root": root.path, "reason": NSNull()]
+  }
+
+  private func invalidModelFile(_ root: URL) -> String? {
     for (relative, expectedBytes) in requiredFiles.sorted(by: { $0.key < $1.key }) {
       let file = root.appendingPathComponent(relative)
       guard FileManager.default.fileExists(atPath: file.path) else {
-        return ["ready": false, "root": root.path, "reason": "Missing model file: \(relative)"]
+        return "Missing model file: \(relative)"
       }
-      let values = try? file.resourceValues(forKeys: [.fileSizeKey])
-      let actual = UInt64(values?.fileSize ?? -1)
-      guard actual == expectedBytes else {
-        return [
-          "ready": false,
-          "root": root.path,
-          "reason": "Invalid model file size: \(relative) (\(actual) != \(expectedBytes))",
-        ]
+      guard let values = try? file.resourceValues(forKeys: [.fileSizeKey, .isRegularFileKey, .isSymbolicLinkKey]),
+        values.isRegularFile == true, values.isSymbolicLink != true,
+        file.resolvingSymlinksInPath() == file.standardizedFileURL,
+        let rawSize = values.fileSize, rawSize >= 0
+      else { return "Invalid model file: \(relative)" }
+      let actual = UInt64(rawSize)
+      if actual != expectedBytes {
+        return "Invalid model file size: \(relative) (\(actual) != \(expectedBytes))"
       }
     }
-    return ["ready": true, "root": root.path, "reason": NSNull()]
+    return nil
   }
 
   func transcribe(
@@ -88,10 +109,7 @@ final class MainaQwenAsr {
       releaseNow()
       throw failure(1109, "iPhone is too warm for reliable local transcription. Maina will continue automatically after it cools.")
     }
-    let model = status()
-    guard model["ready"] as? Bool == true else {
-      throw failure(1101, model["reason"] as? String ?? "Qwen model pack is unavailable.")
-    }
+    let modelRoot = try resolveModelRoot()
 
     let window = try readWindow(uri: uri, requestedStartMs: startMs, requestedEndMs: endMs)
     guard !window.samples.isEmpty else { throw failure(1102, "ASR window contains no PCM samples.") }
@@ -99,7 +117,14 @@ final class MainaQwenAsr {
     if let recognizer {
       activeRecognizer = recognizer
     } else {
-      activeRecognizer = try createRecognizer(root: modelRoot())
+      do {
+        activeRecognizer = try createRecognizer(root: modelRoot)
+        activeRoot = modelRoot
+      } catch {
+        if let activePack { _ = try? modelPacks.rollbackAfterOpenFailure(activePack) }
+        releaseNow()
+        throw error
+      }
       recognizer = activeRecognizer
     }
 
@@ -197,6 +222,9 @@ final class MainaQwenAsr {
   private func releaseNow() {
     if let recognizer { SherpaOnnxDestroyOfflineRecognizer(recognizer) }
     recognizer = nil
+    try? activePack?.release()
+    activePack = nil
+    activeRoot = nil
   }
 
   private static var mustDeferForThermalState: Bool {
@@ -207,12 +235,91 @@ final class MainaQwenAsr {
     }
   }
 
-  private func modelRoot() -> URL {
+  private func legacyModelRoot() -> URL {
     let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
     return support
       .appendingPathComponent("Maina", isDirectory: true)
       .appendingPathComponent("models", isDirectory: true)
       .appendingPathComponent("qwen3-asr-0.6b-int8", isDirectory: true)
+  }
+
+  private func resolveModelRoot() throws -> URL {
+    if recognizer != nil, let activeRoot { return activeRoot }
+    let lifecycleStatus = try modelPacks.status()
+    if lifecycleStatus.state == "ready", let handle = try modelPacks.acquireReady() {
+      if invalidModelFile(handle.root) == nil {
+        activePack = handle
+        return handle.root
+      }
+      _ = try? modelPacks.rollbackAfterOpenFailure(handle)
+      try? handle.release()
+      throw failure(1101, "Verified Qwen model pack could not be opened.")
+    }
+    if lifecycleStatus.state != "unavailable" {
+      throw failure(1101, lifecycleStatus.reasonCode)
+    }
+    let legacy = legacyModelRoot()
+    if let reason = invalidModelFile(legacy) { throw failure(1101, reason) }
+    return legacy
+  }
+
+  func smoke(root: URL, uri: String) throws -> MainaModelPackLifecycle.SmokeEvidence {
+    let input = Self.fileURL(uri)
+    let values = try input.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey])
+    guard values.isRegularFile == true, values.isSymbolicLink != true,
+      input.resolvingSymlinksInPath() == input.standardizedFileURL
+    else { throw failure(1110, "MODEL_PACK_SMOKE_INPUT_INVALID") }
+    let inputSha = try sha256(input)
+    let window = try readWindow(uri: uri, requestedStartMs: 0, requestedEndMs: .greatestFiniteMagnitude)
+    guard !window.samples.isEmpty else { throw failure(1110, "MODEL_PACK_SMOKE_INPUT_INVALID") }
+    let startedAt = Int64(Date().timeIntervalSince1970 * 1_000)
+    let smokeRecognizer = try createRecognizer(root: root)
+    guard let stream = SherpaOnnxCreateOfflineStream(smokeRecognizer) else {
+      SherpaOnnxDestroyOfflineRecognizer(smokeRecognizer)
+      throw failure(1103, "Sherpa could not create an offline ASR stream.")
+    }
+    defer {
+      SherpaOnnxDestroyOfflineStream(stream)
+      SherpaOnnxDestroyOfflineRecognizer(smokeRecognizer)
+    }
+    window.samples.withUnsafeBufferPointer { samples in
+      SherpaOnnxAcceptWaveformOffline(stream, 16_000, samples.baseAddress, Int32(samples.count))
+    }
+    "128".withCString { value in
+      "max_new_tokens".withCString { key in SherpaOnnxOfflineStreamSetOption(stream, key, value) }
+    }
+    SherpaOnnxDecodeOfflineStream(smokeRecognizer, stream)
+    guard let rawResult = SherpaOnnxGetOfflineStreamResult(stream) else {
+      throw failure(1104, "Sherpa returned no recognition result.")
+    }
+    defer { SherpaOnnxDestroyOfflineRecognizerResult(rawResult) }
+    let text = rawResult.pointee.text.map { String(cString: $0) } ?? ""
+    let normalized = text.precomposedStringWithCanonicalMapping
+      .trimmingCharacters(in: .whitespacesAndNewlines)
+      .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+      .lowercased(with: Locale(identifier: "en_US_POSIX"))
+    return .init(
+      inputSha256: inputSha,
+      normalizedTextSha256: sha256(Data(normalized.utf8)),
+      startedAt: startedAt,
+      completedAt: Int64(Date().timeIntervalSince1970 * 1_000)
+    )
+  }
+
+  private func sha256(_ url: URL) throws -> String {
+    let handle = try FileHandle(forReadingFrom: url)
+    defer { try? handle.close() }
+    var hasher = SHA256()
+    while true {
+      let data = try handle.read(upToCount: 1024 * 1024) ?? Data()
+      if data.isEmpty { break }
+      hasher.update(data: data)
+    }
+    return hasher.finalize().map { String(format: "%02x", $0) }.joined()
+  }
+
+  private func sha256(_ data: Data) -> String {
+    SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
   }
 
   private func readWindow(uri: String, requestedStartMs: Double, requestedEndMs: Double) throws -> AudioWindow {

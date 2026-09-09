@@ -14,6 +14,7 @@ import UIKit
 public final class MainaRecorderModule: Module {
   private let capture = MainaIOSNativeAudioCapture.shared
   private let qwen = MainaQwenAsr.shared
+  private let modelPacks = MainaModelPackLifecycle.shared
   private let continuedProcessing = MainaIOSContinuedProcessing.shared
   private let pipelineWake = MainaIOSPipelineWake.shared
   private lazy var nativePostProcessing: MainaNativePostProcessingCoordinator? = {
@@ -129,6 +130,38 @@ public final class MainaRecorderModule: Module {
     Function("repairWavFiles") { (_: [String]) in 0 }
 
     Function("getQwenAsrStatus") { self.qwen.status() }
+    AsyncFunction("getNativeModelPackLifecycleStatus") {
+      try self.modelPacks.status().dictionary
+    }
+    AsyncFunction("beginNativeModelPackAcquisition") {
+      (manifestJson: String, partialOverheadBytes: Int64, safetyMarginBytes: Int64) in
+      guard partialOverheadBytes >= 0, safetyMarginBytes >= 0 else {
+        throw Self.bridgeFailure("model_pack_storage_input_invalid")
+      }
+      return try self.modelPacks.begin(
+        manifestJSON: manifestJson,
+        partialOverheadBytes: UInt64(partialOverheadBytes),
+        safetyMarginBytes: UInt64(safetyMarginBytes)
+      ).dictionary
+    }
+    AsyncFunction("stageNativeModelPackChunk") {
+      (manifestJson: String, relativePath: String, chunkIndex: Int, sourceUri: String) in
+      try self.modelPacks.stageChunk(
+        manifestJSON: manifestJson,
+        relativePath: relativePath,
+        chunkIndex: chunkIndex,
+        sourceURI: sourceUri
+      ).dictionary
+    }
+    AsyncFunction("verifyAndPromoteNativeModelPack") {
+      (manifestJson: String, smokeInputUri: String) in
+      _ = try self.modelPacks.verifyStaged(manifestJSON: manifestJson)
+      let evidence = try self.qwen.smoke(
+        root: self.modelPacks.smokeRoot(manifestJSON: manifestJson),
+        uri: smokeInputUri
+      )
+      return try self.modelPacks.promote(manifestJSON: manifestJson, evidence: evidence).dictionary
+    }
     AsyncFunction("transcribeWithQwen") { (uri: String, startMs: Double, endMs: Double, promise: Promise) in
       self.qwen.transcribe(uri: uri, startMs: startMs, endMs: endMs) { result in
         switch result {

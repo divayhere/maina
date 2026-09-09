@@ -13,6 +13,8 @@ const capture = path.join(moduleRoot, 'ios', 'MainaIOSNativeAudioCapture.swift')
 const module = path.join(moduleRoot, 'ios', 'MainaRecorderModule.swift');
 const podspec = path.join(moduleRoot, 'ios', 'MainaRecorder.podspec');
 const qwen = path.join(moduleRoot, 'ios', 'MainaQwenAsr.swift');
+const modelPackLifecycle = path.join(moduleRoot, 'ios', 'MainaModelPackLifecycle.swift');
+const modelPackLifecycleTests = path.join(project, 'scripts', 'fixtures', 'MainaIOSModelPackLifecycleTests.swift');
 const continuedProcessing = path.join(moduleRoot, 'ios', 'MainaIOSContinuedProcessing.swift');
 const continuedProcessingPolicy = path.join(moduleRoot, 'ios', 'MainaIOSContinuedProcessingRetentionPolicy.swift');
 const continuedProcessingPolicyTests = path.join(project, 'scripts', 'fixtures', 'MainaIOSContinuedProcessingRetentionPolicyTests.swift');
@@ -33,9 +35,51 @@ const callRecoveryPolicySource = readFileSync(callRecoveryPolicy, 'utf8');
 const nativePostProcessingStoreSource = readFileSync(nativePostProcessingStore, 'utf8');
 const nativePostProcessingCoordinatorSource = readFileSync(nativePostProcessingCoordinator, 'utf8');
 
-for (const file of [capture, module, podspec, qwen, continuedProcessing, continuedProcessingPolicy, continuedProcessingPolicyTests, callRecoveryPolicy, callRecoveryPolicyTests, pipelineWake, pipelineWakePolicy, pipelineWakePolicyTests, nativePostProcessingStore, nativePostProcessingCoordinator, nativePostProcessingTests, continuedProcessingPlugin]) {
+for (const file of [capture, module, podspec, qwen, modelPackLifecycle, modelPackLifecycleTests, continuedProcessing, continuedProcessingPolicy, continuedProcessingPolicyTests, callRecoveryPolicy, callRecoveryPolicyTests, pipelineWake, pipelineWakePolicy, pipelineWakePolicyTests, nativePostProcessingStore, nativePostProcessingCoordinator, nativePostProcessingTests, continuedProcessingPlugin]) {
   if (!existsSync(file) || readFileSync(file, 'utf8').trim().length === 0) {
     throw new Error(`Required iOS recorder source is missing: ${file}`);
+  }
+}
+const modelPackLifecycleSource = readFileSync(modelPackLifecycle, 'utf8');
+for (const token of [
+  'maina.model-pack-manifest.v1',
+  'canonicalJSON(unsigned)',
+  'same_manifest_and_verified_prefix',
+  'same_manifest_invalid_bytes_removed',
+  'SMOKE_RECEIPT_MISMATCH',
+  'MODEL_PACK_WRITER_CONFLICT',
+  'MODEL_PACK_READER_PIN_FAILED',
+  'rollbackAfterOpenFailure',
+  'moveItem(at: stagingDirectory',
+  'volumeAvailableCapacityForImportantUsageKey',
+  'd8baaa925248e8e8ad23870208cdaf3d093623e6733aede2c23862f30c5aac62',
+]) {
+  if (!modelPackLifecycleSource.includes(token)) {
+    throw new Error(`iOS model-pack lifecycle invariant missing: ${token}`);
+  }
+}
+const qwenSource = readFileSync(qwen, 'utf8');
+for (const token of [
+  'MainaModelPackLifecycle.shared',
+  'modelPacks.acquireReady()',
+  'rollbackAfterOpenFailure',
+  'activePack?.release()',
+  'func smoke(root: URL, uri: String)',
+  'precomposedStringWithCanonicalMapping',
+]) {
+  if (!qwenSource.includes(token)) {
+    throw new Error(`iOS Qwen model-pack integration invariant missing: ${token}`);
+  }
+}
+const moduleSource = readFileSync(module, 'utf8');
+for (const token of [
+  'getNativeModelPackLifecycleStatus',
+  'beginNativeModelPackAcquisition',
+  'stageNativeModelPackChunk',
+  'verifyAndPromoteNativeModelPack',
+]) {
+  if (!moduleSource.includes(token)) {
+    throw new Error(`iOS model-pack bridge invariant missing: ${token}`);
   }
 }
 if (!config.apple?.modules?.includes('MainaRecorderModule')) {
@@ -518,9 +562,20 @@ if (process.platform === 'darwin') {
   if (!existsSync(sherpaHeaders)) {
     throw new Error('Verified Sherpa iOS runtime is missing; run npm run ios:runtime first.');
   }
+  const modelPackPolicyTestDirectory = mkdtempSync(path.join(tmpdir(), 'maina-ios-model-pack-policy-'));
+  const modelPackPolicyTestExecutable = path.join(modelPackPolicyTestDirectory, 'model-pack-policy-tests');
+  try {
+    execFileSync('xcrun', [
+      'swiftc', modelPackLifecycle, modelPackLifecycleTests,
+      '-o', modelPackPolicyTestExecutable,
+    ], { stdio: 'inherit' });
+    execFileSync(modelPackPolicyTestExecutable, [], { stdio: 'inherit' });
+  } finally {
+    rmSync(modelPackPolicyTestDirectory, { recursive: true, force: true });
+  }
   execFileSync('xcrun', [
     'swiftc', '-target', 'arm64-apple-ios16.4', '-sdk', sdk,
-    '-I', sherpaHeaders, '-typecheck', qwen,
+    '-I', sherpaHeaders, '-typecheck', modelPackLifecycle, qwen,
   ], { stdio: 'inherit' });
 }
 
