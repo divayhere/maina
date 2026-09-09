@@ -17,6 +17,7 @@ import java.io.RandomAccessFile
 class MainaRecorderModule : Module() {
     private var triggerReceiverRegistered = false
     private var qwenAsr: MainaQwenAsr? = null
+    private var modelPackLifecycle: MainaModelPackLifecycle? = null
 
     // Expo bridge values inside a Map arrive as Number (normally Double), not
     // necessarily a decimal String. Parsing through toString() made epoch
@@ -275,6 +276,25 @@ class MainaRecorderModule : Module() {
             qwen().status().asMap()
         }
 
+        AsyncFunction("getNativeModelPackLifecycleStatus") {
+            modelPacks().status().asMap()
+        }
+
+        AsyncFunction("beginNativeModelPackAcquisition") { manifestJson: String, partialOverheadBytes: Long, safetyMarginBytes: Long ->
+            modelPacks().begin(manifestJson, partialOverheadBytes, safetyMarginBytes).asMap()
+        }
+
+        AsyncFunction("stageNativeModelPackChunk") { manifestJson: String, relativePath: String, chunkIndex: Int, sourceUri: String ->
+            modelPacks().stageChunk(manifestJson, relativePath, chunkIndex, sourceUri).asMap()
+        }
+
+        AsyncFunction("verifyAndPromoteNativeModelPack") { manifestJson: String, smokeInputUri: String ->
+            val lifecycle = modelPacks()
+            lifecycle.verifyStaged(manifestJson)
+            val evidence = qwen().smoke(lifecycle.smokeRoot(manifestJson), smokeInputUri)
+            lifecycle.promote(manifestJson, evidence).asMap()
+        }
+
         AsyncFunction("transcribeWithQwen") { uri: String, startMs: Long, endMs: Long ->
             qwen().transcribe(uri, startMs, endMs).asMap()
         }
@@ -401,6 +421,8 @@ class MainaRecorderModule : Module() {
         appContext.reactContext ?: throw IllegalStateException("React context is unavailable")
 
     private fun qwen(): MainaQwenAsr = qwenAsr ?: MainaQwenAsr(requireContext()).also { qwenAsr = it }
+    private fun modelPacks(): MainaModelPackLifecycle =
+        modelPackLifecycle ?: MainaModelPackLifecycle(requireContext()).also { modelPackLifecycle = it }
 
     private fun startControlService(context: Context, action: String, extras: Map<String, String> = emptyMap()) {
         val intent = Intent(context, MainaRecordingService::class.java).setAction(action)

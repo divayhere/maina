@@ -23,6 +23,7 @@ import {
   type NativeCaptureStatus,
   type QwenAsrResult,
   type QwenAsrStatus,
+  type NativeModelPackLifecycleStatus,
   type RemoteControlStatus,
 } from '../../../modules/maina-recorder/src';
 
@@ -201,6 +202,44 @@ export async function deleteNativeCaptureDirectory(directory: string): Promise<b
 export async function getQwenAsrStatus(): Promise<QwenAsrStatus | null> {
   if (!MainaRecorder) return null;
   return MainaRecorder.getQwenAsrStatus();
+}
+
+export async function getNativeModelPackLifecycleStatus(): Promise<NativeModelPackLifecycleStatus | null> {
+  if (!MainaRecorder) return null;
+  return MainaRecorder.getNativeModelPackLifecycleStatus();
+}
+
+export async function beginNativeModelPackAcquisition(
+  manifestJson: string,
+  partialOverheadBytes: number,
+  safetyMarginBytes: number,
+): Promise<NativeModelPackLifecycleStatus> {
+  return requireRecorderModule().beginNativeModelPackAcquisition(
+    manifestJson,
+    partialOverheadBytes,
+    safetyMarginBytes,
+  );
+}
+
+export async function stageNativeModelPackChunk(
+  manifestJson: string,
+  relativePath: string,
+  chunkIndex: number,
+  sourceUri: string,
+): Promise<NativeModelPackLifecycleStatus> {
+  return requireRecorderModule().stageNativeModelPackChunk(
+    manifestJson,
+    relativePath,
+    chunkIndex,
+    sourceUri,
+  );
+}
+
+export async function verifyAndPromoteNativeModelPack(
+  manifestJson: string,
+  smokeInputUri: string,
+): Promise<NativeModelPackLifecycleStatus> {
+  return requireRecorderModule().verifyAndPromoteNativeModelPack(manifestJson, smokeInputUri);
 }
 
 export async function transcribeWithQwen(uri: string, startMs: number, endMs: number): Promise<QwenAsrResult> {

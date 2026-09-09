@@ -8,6 +8,9 @@ import com.k2fsa.sherpa.onnx.OfflineRecognizerConfig
 import java.io.File
 import java.io.RandomAccessFile
 import java.net.URI
+import java.security.MessageDigest
+import java.text.Normalizer
+import java.util.Locale
 import kotlin.math.abs
 import kotlin.math.log10
 import kotlin.math.max
@@ -20,6 +23,8 @@ import kotlin.math.min
  */
 internal class MainaQwenAsr(private val context: Context) {
     private var recognizer: OfflineRecognizer? = null
+    private val modelPacks = MainaModelPackLifecycle(context)
+    private var activePack: MainaModelPackLifecycle.ReadyHandle? = null
 
     data class ModelStatus(val ready: Boolean, val root: String, val reason: String? = null) {
         fun asMap() = mapOf("ready" to ready, "root" to root, "reason" to reason)
@@ -59,18 +64,18 @@ internal class MainaQwenAsr(private val context: Context) {
     }
 
     fun status(): ModelStatus {
+        modelPacks.acquireReady()?.let { handle ->
+            return try {
+                val invalid = invalidModelFile(handle.root)
+                if (invalid == null) ModelStatus(true, handle.root.absolutePath)
+                else ModelStatus(false, handle.root.absolutePath, invalid)
+            } finally {
+                handle.release()
+            }
+        }
         val root = modelRoot()
-        val invalid = REQUIRED_FILES.entries.firstOrNull { (relative, expectedBytes) ->
-            val file = File(root, relative)
-            !file.isFile || file.length() != expectedBytes
-        }
-        return if (invalid == null) ModelStatus(true, root.absolutePath)
-        else {
-            val file = File(root, invalid.key)
-            val reason = if (!file.isFile) "Missing model file: ${invalid.key}"
-            else "Invalid model file size: ${invalid.key} (${file.length()} != ${invalid.value})"
-            ModelStatus(false, root.absolutePath, reason)
-        }
+        val invalid = invalidModelFile(root)
+        return if (invalid == null) ModelStatus(true, root.absolutePath) else ModelStatus(false, root.absolutePath, invalid)
     }
 
     /** Select a quiet boundary near the middle of a failed ASR window.
@@ -129,15 +134,20 @@ internal class MainaQwenAsr(private val context: Context) {
         require(maxNewTokens in setOf(MainaQwenAsrPolicy.maxNewTokens, MainaQwenAsrPolicy.recoveryMaxNewTokens)) {
             "Unsupported Qwen output budget: $maxNewTokens"
         }
-        val model = status()
-        check(model.ready) { model.reason ?: "Qwen model pack is unavailable" }
+        val model = resolveModelForRecognizer()
         val wav = readWavWindow(fileFor(uriOrPath), startMs, endMs)
         require(wav.sampleRate == 16_000 && wav.channels == 1 && wav.bitsPerSample == 16) {
             "Qwen accepts Maina 16 kHz mono PCM WAV chunks only"
         }
         val samples = wav.samples
         require(samples.isNotEmpty()) { "ASR window contains no PCM samples" }
-        val activeRecognizer = recognizer ?: createRecognizer(model.root).also { recognizer = it }
+        val activeRecognizer = recognizer ?: runCatching { createRecognizer(model.root) }
+            .onFailure {
+                activePack?.let { handle -> modelPacks.rollbackAfterOpenFailure(handle) }
+                release()
+            }
+            .getOrThrow()
+            .also { recognizer = it }
         val stream = activeRecognizer.createStream()
         try {
             stream.acceptWaveform(samples, wav.sampleRate)
@@ -173,6 +183,41 @@ internal class MainaQwenAsr(private val context: Context) {
     fun release() {
         runCatching { recognizer?.release() }
         recognizer = null
+        activePack?.let { runCatching { it.release() } }
+        activePack = null
+    }
+
+    @Synchronized
+    fun smoke(root: File, uriOrPath: String): MainaModelPackLifecycle.SmokeEvidence {
+        val input = fileFor(uriOrPath)
+        require(input.isFile) { "MODEL_PACK_SMOKE_INPUT_INVALID" }
+        val inputSha = sha256(input)
+        val window = readWavWindow(input, 0L, Long.MAX_VALUE)
+        require(window.sampleRate == 16_000 && window.channels == 1 && window.bitsPerSample == 16 && window.samples.isNotEmpty()) {
+            "MODEL_PACK_SMOKE_INPUT_INVALID"
+        }
+        val startedAt = System.currentTimeMillis()
+        val smokeRecognizer = createRecognizer(root.absolutePath)
+        val stream = smokeRecognizer.createStream()
+        val text = try {
+            stream.acceptWaveform(window.samples, window.sampleRate)
+            stream.setOption("max_new_tokens", MainaQwenAsrPolicy.maxNewTokens.toString())
+            smokeRecognizer.decode(stream)
+            smokeRecognizer.getResult(stream).text.orEmpty()
+        } finally {
+            stream.release()
+            smokeRecognizer.release()
+        }
+        val normalized = Normalizer.normalize(text, Normalizer.Form.NFC)
+            .trim()
+            .replace(Regex("\\s+"), " ")
+            .lowercase(Locale.ROOT)
+        return MainaModelPackLifecycle.SmokeEvidence(
+            inputSha256 = inputSha,
+            normalizedTextSha256 = sha256(normalized.toByteArray(Charsets.UTF_8)),
+            startedAt = startedAt,
+            completedAt = System.currentTimeMillis(),
+        )
     }
 
     private fun createRecognizer(modelRoot: String): OfflineRecognizer {
@@ -214,6 +259,50 @@ internal class MainaQwenAsr(private val context: Context) {
         return candidates.firstOrNull { root -> REQUIRED_FILES.keys.all { relative -> File(root, relative).isFile } }
             ?: candidates.first()
     }
+
+    private fun resolveModelForRecognizer(): ModelStatus {
+        if (recognizer != null) {
+            val existing = activePack
+            return if (existing != null) ModelStatus(true, existing.root.absolutePath) else status()
+        }
+        modelPacks.acquireReady()?.let { handle ->
+            val invalid = invalidModelFile(handle.root)
+            if (invalid == null) {
+                activePack = handle
+                return ModelStatus(true, handle.root.absolutePath)
+            }
+            runCatching { modelPacks.rollbackAfterOpenFailure(handle) }
+            runCatching { handle.release() }
+        }
+        val legacy = modelRoot()
+        val invalid = invalidModelFile(legacy)
+        check(invalid == null) { invalid ?: "Qwen model pack is unavailable" }
+        return ModelStatus(true, legacy.absolutePath)
+    }
+
+    private fun invalidModelFile(root: File): String? {
+        val invalid = REQUIRED_FILES.entries.firstOrNull { (relative, expectedBytes) ->
+            val file = File(root, relative)
+            !file.isFile || file.canonicalFile != file.absoluteFile || file.length() != expectedBytes
+        } ?: return null
+        val file = File(root, invalid.key)
+        return if (!file.isFile) "Missing model file: ${invalid.key}"
+        else "Invalid model file size: ${invalid.key} (${file.length()} != ${invalid.value})"
+    }
+
+    private fun sha256(file: File): String = file.inputStream().use { input ->
+        val digest = MessageDigest.getInstance("SHA-256")
+        val buffer = ByteArray(1024 * 1024)
+        while (true) {
+            val count = input.read(buffer)
+            if (count < 0) break
+            if (count > 0) digest.update(buffer, 0, count)
+        }
+        digest.digest().joinToString("") { "%02x".format(it) }
+    }
+
+    private fun sha256(value: ByteArray): String =
+        MessageDigest.getInstance("SHA-256").digest(value).joinToString("") { "%02x".format(it) }
 
     private fun fileFor(uriOrPath: String): File = if (uriOrPath.startsWith("file:")) File(URI(uriOrPath)) else File(uriOrPath)
 
