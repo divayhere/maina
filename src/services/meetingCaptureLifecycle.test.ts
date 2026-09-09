@@ -30,7 +30,21 @@ const mocks = vi.hoisted(() => ({
     audioDurationMs: 20_000,
     segmentCount: 1,
   })),
-  readResult: vi.fn(async () => null as unknown),
+  captureMetrics: {
+    finalizedUris: ['file:///documents/recordings/meeting-a/capture-00000.wav'],
+    partialUris: [],
+    recoveredCount: 0,
+    invalidPartialCount: 0,
+    journalUri: 'file:///documents/recordings/meeting-a/capture-journal.jsonl',
+    audioDurationMs: 20_000,
+    wallDurationMs: 20_000,
+    startedAt: 1_788_000_000_000,
+    stoppedAt: 1_788_000_020_000,
+    routeRestartCount: 0,
+    captureGapMs: 0,
+    hasStopEvent: true,
+  },
+  readResult: vi.fn(async (_request?: Record<string, unknown>) => null as unknown),
   start: vi.fn(async () => ({ state: 'running', resumed: false })),
   updateMeeting: vi.fn(async () => {}),
   updateStage: vi.fn(async () => {}),
@@ -82,7 +96,9 @@ vi.mock('@/services/logger', () => ({
 }));
 vi.mock('@/services/audioRetention', () => ({ cleanupTerminalMeetingAudio: mocks.cleanup }));
 vi.mock('@/services/meetingPipelineSignals', () => ({ notifyMeetingPipelineChanged: vi.fn() }));
-vi.mock('@/services/nativeCaptureMetrics', () => ({ getNativeCaptureMetrics: vi.fn() }));
+vi.mock('@/services/nativeCaptureMetrics', () => ({
+  getNativeCaptureMetrics: vi.fn(async () => ({ ...mocks.captureMetrics })),
+}));
 vi.mock('@/services/meetingPacket', () => ({
   drainMeetingPacketUntilSettled: vi.fn(async () => {}),
   maybeQueueMeetingPacket: vi.fn(async () => {}),
@@ -223,7 +239,17 @@ describe('iOS durable native post-processing lifecycle', () => {
 
     await expect(reconcilePendingNativeMeetingWork()).resolves.toBe(0);
 
-    expect(mocks.readResult).toHaveBeenCalledWith(identity);
+    expect(mocks.readResult).toHaveBeenCalledWith({
+      ownerUserId: identity.ownerUserId,
+      meetingId: identity.meetingId,
+      runId: identity.runId,
+      generation: identity.generation,
+    });
+    const readRequest = mocks.readResult.mock.calls[0][0];
+    expect(readRequest).toBeDefined();
+    expect(Object.keys(readRequest!).sort()).toEqual([
+      'generation', 'meetingId', 'ownerUserId', 'runId',
+    ]);
     expect(mocks.start).not.toHaveBeenCalled();
     expect(mocks.prepareAudio).not.toHaveBeenCalled();
   });
@@ -234,6 +260,57 @@ describe('iOS durable native post-processing lifecycle', () => {
     const identity = deriveIOSNativePostProcessingExecutionIdentity('owner-a', 'meeting-a');
     expect(mocks.start).toHaveBeenCalledOnce();
     expect(mocks.start).toHaveBeenCalledWith(expect.objectContaining(identity), mocks.meeting.audioUri);
+    expect(mocks.updateMeeting).toHaveBeenCalledWith('meeting-a', expect.objectContaining({
+      status: 'transcribing',
+      audioDurationMs: 20_000,
+      segmentCount: 1,
+    }));
+    expect(mocks.updateMeeting.mock.invocationCallOrder[0]).toBeLessThan(
+      mocks.start.mock.invocationCallOrder[0],
+    );
     expect(mocks.acknowledge).not.toHaveBeenCalled();
+  });
+
+  it('reopens the exact idempotent run after a native-result read failure instead of stranding recording', async () => {
+    mocks.meeting.status = 'recording';
+    mocks.readResult.mockRejectedValueOnce(new Error('bounded native read failure'));
+
+    await expect(reconcilePendingNativeMeetingWork()).resolves.toBe(1);
+
+    // The first read fails; the exact owner/run start is then accepted and its
+    // immediate post-start terminal read observes no completed result yet.
+    expect(mocks.readResult).toHaveBeenCalledTimes(2);
+    expect(mocks.start).toHaveBeenCalledOnce();
+    expect(mocks.updateMeeting).toHaveBeenCalledWith('meeting-a', expect.objectContaining({
+      status: 'transcribing',
+      captureDisposition: 'partial_capture_failure',
+      audioDurationMs: 20_000,
+      segmentCount: 1,
+    }));
+    expect(mocks.updateMeeting.mock.invocationCallOrder[0]).toBeLessThan(
+      mocks.start.mock.invocationCallOrder[0],
+    );
+  });
+
+  it('does not reopen a run when terminal import fails before a durable import fence exists', async () => {
+    mocks.nativeResult = completeResult();
+    mocks.importResult.mockRejectedValueOnce(new Error('durable import unavailable'));
+
+    await expect(reconcilePendingNativeMeetingWork()).resolves.toBe(0);
+
+    expect(mocks.start).not.toHaveBeenCalled();
+    expect(mocks.updateMeeting).not.toHaveBeenCalled();
+  });
+
+  it('keeps an imported exact run fenced when a later native read is unavailable', async () => {
+    const identity = deriveIOSNativePostProcessingExecutionIdentity('owner-a', 'meeting-a');
+    mocks.meeting.nativePostprocessRunId = identity.runId;
+    mocks.meeting.nativePostprocessImportedAt = 1_788_000_030_000;
+    mocks.readResult.mockRejectedValueOnce(new Error('bounded native read failure'));
+
+    await expect(reconcilePendingNativeMeetingWork()).resolves.toBe(0);
+
+    expect(mocks.start).not.toHaveBeenCalled();
+    expect(mocks.prepareAudio).not.toHaveBeenCalled();
   });
 });

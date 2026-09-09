@@ -134,8 +134,30 @@ function activeIOSPostProcessingHandle(meetingId: string): IOSPostProcessingHand
 async function finishIOSNativePostProcessingResult(
   meeting: Meeting,
   identity: IOSNativePostProcessingExecutionIdentity,
-): Promise<'absent' | 'retained' | 'acknowledged'> {
-  const result = await readIOSNativePostProcessingResult(identity);
+): Promise<'absent' | 'read_unavailable' | 'retained' | 'acknowledged'> {
+  let result;
+  try {
+    // The native decoder is deliberately closed. Do not pass the wider
+    // execution identity here: runtimeOwnerToken is start/release authority
+    // and an extra key makes the exact Swift read decoder reject the request.
+    result = await readIOSNativePostProcessingResult({
+      ownerUserId: identity.ownerUserId,
+      meetingId: identity.meetingId,
+      runId: identity.runId,
+      generation: identity.generation,
+    });
+  } catch (cause) {
+    // A read failure is not evidence that terminal native work exists. The
+    // subsequent start boundary is owner/run/fingerprint idempotent, so it can
+    // safely reopen or resume the exact durable run without creating another
+    // generation. Keeping this distinct from import/acknowledgement failure
+    // prevents a transient bridge/store read from stranding a recording row.
+    log.warn('recovery', 'iOS native result read unavailable; exact run will reconcile idempotently', {
+      meetingId: meeting.id,
+      causeName: cause instanceof Error ? cause.name : typeof cause,
+    });
+    return 'read_unavailable';
+  }
   if (!result) return 'absent';
 
   const durableImport = await importIOSNativePostProcessingResult(result);
@@ -456,7 +478,7 @@ async function reconcilePendingNativeMeetingWorkInternal(): Promise<number> {
         });
         return 'retained' as const;
       });
-      if (terminal !== 'absent') continue;
+      if (terminal === 'retained' || terminal === 'acknowledged') continue;
       // A crash after acknowledgement but before UI notification is safe: the
       // Expo row proves this exact owner/run already imported, so never reopen
       // a second ASR generation just because the native result was deleted.
@@ -471,7 +493,11 @@ async function reconcilePendingNativeMeetingWorkInternal(): Promise<number> {
       if (meeting.status === 'recording'
         || meeting.status === 'transcribing'
         || meeting.status === 'transcript_partial') {
-        if (await launchIOSPostProcessing(meeting)) resumed += 1;
+        // Recovered iOS recordings must pass through the same durable capture
+        // metrics/status transition as every other finalized native capture.
+        // Calling launchIOSPostProcessing directly can leave the public row in
+        // `recording` even after an exact native run has been accepted.
+        if (await launchNativePostProcessing(meeting)) resumed += 1;
       }
       continue;
     }
