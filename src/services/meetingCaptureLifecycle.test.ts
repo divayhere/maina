@@ -47,6 +47,8 @@ const mocks = vi.hoisted(() => ({
   readResult: vi.fn(async (_request?: Record<string, unknown>) => null as unknown),
   start: vi.fn(async () => ({ state: 'running', resumed: false })),
   markRunning: vi.fn(async (): Promise<'running' | 'already_imported'> => 'running'),
+  getMeeting: vi.fn(async (_meetingId: string) => null as Record<string, unknown> | null),
+  listMeetings: vi.fn(async () => [] as Record<string, unknown>[]),
   getStages: vi.fn(async () => [] as { stage: string; state: string }[]),
   getTranscriptSummary: vi.fn(async () => null as { hasText: boolean } | null),
   notify: vi.fn(),
@@ -56,12 +58,12 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock('react-native', () => ({ Platform: { OS: 'ios' } }));
 vi.mock('@/data/meetings', () => ({
-  getMeeting: vi.fn(async () => ({ ...mocks.meeting })),
+  getMeeting: mocks.getMeeting,
   getMeetingPipelineStages: mocks.getStages,
   getTranscriptSummary: mocks.getTranscriptSummary,
   importIOSNativePostProcessingResult: mocks.importResult,
   importNativePostProcessingResult: vi.fn(async () => 'imported'),
-  listMeetings: vi.fn(async () => [{ ...mocks.meeting }]),
+  listMeetings: mocks.listMeetings,
   markIOSNativePostProcessingRunningIfUnimported: mocks.markRunning,
   updateMeeting: mocks.updateMeeting,
   updateMeetingPipelineStage: mocks.updateStage,
@@ -195,6 +197,8 @@ describe('iOS durable native post-processing lifecycle', () => {
     mocks.importResult.mockImplementation(async () => mocks.durableImport);
     mocks.acknowledge.mockResolvedValue(true);
     mocks.markRunning.mockResolvedValue('running');
+    mocks.getMeeting.mockImplementation(async () => ({ ...mocks.meeting }));
+    mocks.listMeetings.mockImplementation(async () => [{ ...mocks.meeting }]);
     mocks.getStages.mockResolvedValue([]);
     mocks.getTranscriptSummary.mockResolvedValue(null);
     mocks.updateStage.mockImplementation(async () => {});
@@ -252,6 +256,43 @@ describe('iOS durable native post-processing lifecycle', () => {
     }));
     expect(mocks.start).not.toHaveBeenCalled();
     expect(mocks.cleanup).not.toHaveBeenCalled();
+  });
+
+  it('retains a fenced repair failure while advancing a later eligible meeting', async () => {
+    const identityA = deriveIOSNativePostProcessingExecutionIdentity('owner-a', 'meeting-a');
+    const meetingA = {
+      ...mocks.meeting,
+      nativePostprocessRunId: identityA.runId,
+      nativePostprocessImportedAt: 1_788_000_030_000,
+    };
+    const meetingB = {
+      ...mocks.meeting,
+      id: 'meeting-b',
+      audioUri: 'file:///documents/recordings/meeting-b',
+      nativePostprocessRunId: null,
+      nativePostprocessImportedAt: null,
+    };
+    mocks.listMeetings.mockResolvedValueOnce([meetingA, meetingB]);
+    mocks.getMeeting.mockImplementation(async (meetingId) => ({
+      ...(meetingId === 'meeting-a' ? meetingA : meetingB),
+    }));
+    mocks.getStages.mockRejectedValueOnce(new Error('bounded stage read failure'));
+
+    await expect(reconcilePendingNativeMeetingWork()).resolves.toBe(1);
+
+    const identityB = deriveIOSNativePostProcessingExecutionIdentity('owner-a', 'meeting-b');
+    expect(mocks.start).toHaveBeenCalledOnce();
+    expect(mocks.start).toHaveBeenCalledWith(
+      expect.objectContaining(identityB),
+      meetingB.audioUri,
+    );
+    expect(mocks.updateStage).not.toHaveBeenCalledWith(expect.objectContaining({
+      meetingId: 'meeting-a', state: 'deferred',
+    }));
+    expect(mocks.updateMeeting).not.toHaveBeenCalledWith(
+      'meeting-a',
+      expect.anything(),
+    );
   });
 
   it('replays the same committed result after acknowledgement failure without starting a duplicate run', async () => {

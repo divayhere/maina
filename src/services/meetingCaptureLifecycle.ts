@@ -562,7 +562,17 @@ async function reconcilePendingNativeMeetingWorkInternal(): Promise<number> {
       if (reconciledMeeting?.nativePostprocessRunId === identity.runId
         && Number.isSafeInteger(reconciledMeeting.nativePostprocessImportedAt)
         && (reconciledMeeting.nativePostprocessImportedAt ?? 0) > 0) {
-        await repairIOSImportedPostProcessingStages(reconciledMeeting, identity);
+        try {
+          await repairIOSImportedPostProcessingStages(reconciledMeeting, identity);
+        } catch (cause) {
+          // The durable import fence still owns the run. Retain stage repair
+          // for a later wake without reopening native work or preventing
+          // independent meetings in this reconciliation pass from advancing.
+          log.warn('recovery', 'iOS imported post-processing stage repair retained for retry', {
+            meetingId: meeting.id,
+            causeName: cause instanceof Error ? cause.name : typeof cause,
+          });
+        }
         continue;
       }
       if (terminal === 'retained' || terminal === 'acknowledged') continue;
