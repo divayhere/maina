@@ -101,8 +101,12 @@ final class MainaUITests: XCTestCase {
 
     XCTAssertTrue(app.buttons["Stop and save"].waitForExistence(timeout: 5))
     app.buttons["Stop and save"].tap()
-    XCTAssertTrue(waitForDurablePostRecordingState(timeout: 20))
+    XCTAssertTrue(
+      waitForSettledPostRecordingState(timeout: 20),
+      "Maina did not finish the recording-to-destination transition."
+    )
     attach("recording-saved")
+    assertSingleBackReturnsHomeIfNeeded()
   }
 
   func testRapidPauseResumeFirstTap() throws {
@@ -251,7 +255,10 @@ final class MainaUITests: XCTestCase {
     let stop = app.buttons["Stop and save"]
     XCTAssertTrue(stop.waitForExistence(timeout: 8))
     stop.tap()
-    XCTAssertTrue(waitForDurablePostRecordingState(timeout: 30), "Maina did not publish a durable post-recording state.")
+    XCTAssertTrue(
+      waitForSettledPostRecordingState(timeout: 30),
+      "Maina did not finish the recording-to-destination transition."
+    )
   }
 
   private func authorizeMicrophoneIfPresented() {
@@ -271,19 +278,47 @@ final class MainaUITests: XCTestCase {
     XCTAssertFalse(alert.waitForExistence(timeout: 5), "Microphone permission alert did not close.")
   }
 
-  private func waitForDurablePostRecordingState(timeout: TimeInterval) -> Bool {
+  private func waitForSettledPostRecordingState(timeout: TimeInterval) -> Bool {
     let home = app.staticTexts["RECENT"]
+    let record = app.buttons["Record a meeting"]
+    let detailBack = app.buttons["Back"].firstMatch
     let detailNotes = app.staticTexts["Notes"]
     let detailTranscript = app.descendants(matching: .any).matching(NSPredicate(format: "label == %@", "Transcript")).firstMatch
     let detailTodos = app.descendants(matching: .any).matching(NSPredicate(format: "label == %@", "To-dos")).firstMatch
+    let stop = app.buttons["Stop and save"]
+    let pause = app.buttons["Pause"]
+    let resume = app.buttons["Resume"]
+    let recording = app.staticTexts["Recording"]
+    let paused = app.staticTexts["Paused"]
     let deadline = Date().addingTimeInterval(timeout)
+    var consecutiveSettledSamples = 0
     repeat {
-      if home.exists || (detailNotes.exists && detailTranscript.exists && detailTodos.exists) {
-        return true
+      let recordingSurfaceIsGone = !stop.exists && !pause.exists && !resume.exists && !recording.exists && !paused.exists
+      let homeIsSettled = home.exists && record.exists && record.isHittable
+      let detailIsSettled = detailBack.exists && detailBack.isHittable
+        && detailNotes.exists && detailTranscript.exists && detailTranscript.isHittable && detailTodos.exists
+      if recordingSurfaceIsGone && (homeIsSettled || detailIsSettled) {
+        consecutiveSettledSamples += 1
+        if consecutiveSettledSamples == 2 { return true }
+      } else {
+        consecutiveSettledSamples = 0
       }
-      RunLoop.current.run(until: Date().addingTimeInterval(0.2))
+      RunLoop.current.run(until: Date().addingTimeInterval(0.25))
     } while Date() < deadline
     return false
+  }
+
+  private func assertSingleBackReturnsHomeIfNeeded() {
+    if app.staticTexts["RECENT"].exists {
+      XCTAssertTrue(app.buttons["Record a meeting"].isHittable)
+      return
+    }
+    let back = app.buttons["Back"].firstMatch
+    XCTAssertTrue(back.exists && back.isHittable, "Settled post-recording detail did not expose one usable Back action.")
+    back.tap()
+    XCTAssertTrue(app.staticTexts["RECENT"].waitForExistence(timeout: 10), "One Back did not return to Home.")
+    XCTAssertTrue(app.buttons["Record a meeting"].waitForExistence(timeout: 5), "Home recording entry point is unavailable after Back.")
+    attach("recording-saved-back-home")
   }
 
   private func tapTab(named name: String, fallbackX: CGFloat) {
