@@ -121,7 +121,7 @@ set -e
 if [[ "$build_status" != "0" ]]; then
   fail_terminal "ANDROID_BUILD_TERMINAL_FAILURE" "$build_status"
 fi
-if rg -i -q 'ENOSPC|No space left|I/O error|input/output error' "$BUILD_LOG"; then
+if /usr/bin/grep -E -i -q 'ENOSPC|No space left|I/O error|input/output error' "$BUILD_LOG"; then
   fail_terminal "ANDROID_BUILD_STORAGE_FAILURE" 1
 fi
 
