@@ -80,7 +80,7 @@ export function collectIosPreflight({
     'scripts/install-ios-preserving-data.sh',
     'scripts/release-provenance-cli.mjs',
     'scripts/lib/renewal-core.mjs',
-    'release/m3-m4-0.10.64-candidate-plan.json',
+    'release/m3-m4-0.10.65-candidate-plan.json',
   ];
   record('helper_runtime', helpers.every((path) => isReadable(join(projectDir, path))), 'HELPER_RUNTIME_UNAVAILABLE');
 
@@ -149,7 +149,7 @@ function loadContract() {
 }
 
 function loadReleasePlan() {
-  return JSON.parse(readFileSync(join(projectDir, 'release', 'm3-m4-0.10.64-candidate-plan.json'), 'utf8'));
+  return JSON.parse(readFileSync(join(projectDir, 'release', 'm3-m4-0.10.65-candidate-plan.json'), 'utf8'));
 }
 
 function runCommand(command, args, { input } = {}) {
