@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 
 import {
@@ -230,6 +231,14 @@ assert.match(iosRenewalScript, /Refusing build-and-install renewal for the activ
 assert.match(iosInstaller, /release-provenance-cli\.mjs authorize ios/);
 assert.match(iosInstaller, /release-provenance-cli\.mjs replay-config/);
 assert.match(iosInstaller, /BUNDLE_ID" == "\$EXPECTED_BUNDLE_ID/);
+assert.match(iosInstaller, /IOS_INSTALL_SOURCE_REVISION_REJECTED/);
+assert.match(iosInstaller, /IOS_INSTALL_PREFLIGHT_REJECTED/);
+assert.doesNotMatch(iosInstaller, /ios-lane\.mjs" preflight >\/dev\/null/);
+assert.ok(
+  iosInstaller.indexOf('git rev-parse --verify --quiet --end-of-options "$EXPECTED_TOOLING^{commit}"')
+    < iosInstaller.indexOf('release-provenance-cli.mjs authorize ios'),
+  'Exact iOS tooling identity must reject before provenance and device access.',
+);
 assert.ok(
   iosInstaller.indexOf('release-provenance-cli.mjs authorize ios') < iosInstaller.indexOf('xcrun devicectl'),
   'Dual-platform provenance authorization must run before any iOS device access.',
@@ -245,5 +254,32 @@ assert.ok(identityReconcileIndex < unlockIndex, 'Installed identity must reconci
 for (const forbidden of ['uninstall', 'erase', 'simctl', 'rm -rf']) {
   assert.doesNotMatch(iosInstaller, new RegExp(forbidden), `iOS installer contains forbidden ${forbidden}.`);
 }
+
+const installerPath = new URL('./install-ios-preserving-data.sh', import.meta.url);
+const installerEnv = {
+  ...process.env,
+  MAINA_EXPECTED_FINAL_COMMIT: 'f'.repeat(40),
+  MAINA_RELEASE_PROVENANCE: '/invalid/provenance-must-not-be-read.json',
+};
+const nonexistentTooling = spawnSync('/bin/bash', [installerPath.pathname, new URL('../package.json', import.meta.url).pathname], {
+  encoding: 'utf8',
+  env: installerEnv,
+});
+assert.equal(nonexistentTooling.status, 2);
+assert.equal(nonexistentTooling.stdout, '');
+assert.equal(nonexistentTooling.stderr, 'IOS_INSTALL_SOURCE_REVISION_REJECTED\n');
+
+const parentTooling = spawnSync('/usr/bin/git', ['rev-parse', 'HEAD^'], {
+  cwd: new URL('..', import.meta.url).pathname,
+  encoding: 'utf8',
+});
+assert.equal(parentTooling.status, 0);
+const staleTooling = spawnSync('/bin/bash', [installerPath.pathname, new URL('../package.json', import.meta.url).pathname], {
+  encoding: 'utf8',
+  env: { ...installerEnv, MAINA_EXPECTED_FINAL_COMMIT: parentTooling.stdout.trim() },
+});
+assert.equal(staleTooling.status, 2);
+assert.equal(staleTooling.stdout, '');
+assert.equal(staleTooling.stderr, 'IOS_INSTALL_SOURCE_REVISION_REJECTED\n');
 
 console.log('Renewal safety policy verified.');

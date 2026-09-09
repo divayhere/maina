@@ -15,6 +15,23 @@ export PATH="$NODE_BIN:$PATH"
 umask 077
 
 cd "$PROJECT_DIR"
+reject_source_revision() {
+  echo "IOS_INSTALL_SOURCE_REVISION_REJECTED" >&2
+  exit 2
+}
+
+[[ "$EXPECTED_TOOLING" =~ ^[a-f0-9]{40}$ ]] || reject_source_revision
+if ! VERIFIED_TOOLING="$(/usr/bin/git rev-parse --verify --quiet --end-of-options "$EXPECTED_TOOLING^{commit}" 2>/dev/null)" \
+  || ! TOOLING_HEAD="$(/usr/bin/git rev-parse HEAD 2>/dev/null)" \
+  || ! TOOLING_UPSTREAM="$(/usr/bin/git rev-parse '@{upstream}' 2>/dev/null)" \
+  || ! TOOLING_STATUS="$(/usr/bin/git status --porcelain 2>/dev/null)"; then
+  reject_source_revision
+fi
+[[ "$VERIFIED_TOOLING" == "$EXPECTED_TOOLING" \
+  && "$TOOLING_HEAD" == "$EXPECTED_TOOLING" \
+  && "$TOOLING_UPSTREAM" == "$EXPECTED_TOOLING" \
+  && -z "$TOOLING_STATUS" ]] || reject_source_revision
+
 if ! node scripts/release-provenance-cli.mjs authorize ios \
   release/m3-m4-0.10.66-candidate-plan.json "$PROVENANCE" "$APP_ZIP" >/dev/null 2>&1; then
   echo "IOS_RELEASE_PROVENANCE_REJECTED" >&2
@@ -27,8 +44,54 @@ IFS=$'\t' read -r _ _ _ EXPECTED_BUNDLE_ID EXPECTED_VERSION EXPECTED_BUILD \
   exit 2
 }
 
-MAINA_EXPECTED_FINAL_COMMIT="$EXPECTED_TOOLING" node \
-  "$PROJECT_DIR/scripts/qualification/ios-lane.mjs" preflight >/dev/null
+set +e
+QUALIFICATION_OUTPUT="$(MAINA_EXPECTED_FINAL_COMMIT="$EXPECTED_TOOLING" node \
+  "$PROJECT_DIR/scripts/qualification/ios-lane.mjs" preflight 2>/dev/null)"
+QUALIFICATION_STATUS=$?
+set -e
+if [[ "$QUALIFICATION_STATUS" != "0" || -z "$QUALIFICATION_OUTPUT" || "${#QUALIFICATION_OUTPUT}" -gt 8192 ]]; then
+  echo "IOS_INSTALL_PREFLIGHT_REJECTED" >&2
+  exit 2
+fi
+if ! node --input-type=module - "$QUALIFICATION_OUTPUT" >/dev/null 2>&1 <<'NODE'
+const expectedCapabilities = [
+  'node',
+  'storage_guard',
+  'source_revision',
+  'clean_worktree',
+  'helper_runtime',
+  'xcode',
+  'ios_sdk',
+  'xcodebuild',
+  'ios_device_endpoint',
+  'ios_signing_and_provisioning_readiness',
+  'pymobiledevice3',
+];
+const exactKeys = (value, keys) => value && !Array.isArray(value) && typeof value === 'object'
+  && JSON.stringify(Object.keys(value).sort()) === JSON.stringify([...keys].sort());
+let envelope;
+try {
+  envelope = JSON.parse(process.argv[2]);
+} catch {
+  process.exit(1);
+}
+if (!exactKeys(envelope, ['schemaVersion', 'lane', 'status', 'results'])
+  || envelope.schemaVersion !== 'maina.ios-qualification-preflight.v1'
+  || envelope.lane !== 'ios'
+  || envelope.status !== 'PASS'
+  || !Array.isArray(envelope.results)
+  || envelope.results.length !== expectedCapabilities.length) process.exit(1);
+for (let index = 0; index < expectedCapabilities.length; index += 1) {
+  const result = envelope.results[index];
+  if (!exactKeys(result, ['capability', 'status'])
+    || result.capability !== expectedCapabilities[index]
+    || result.status !== 'PASS') process.exit(1);
+}
+NODE
+then
+  echo "IOS_INSTALL_PREFLIGHT_REJECTED" >&2
+  exit 2
+fi
 
 candidate_sha256="$(shasum -a 256 "$APP_ZIP" | awk '{print $1}')"
 lock_identity="$(printf '%s\n%s\n' "$DEVICE_UDID" "$BUNDLE_ID" | shasum -a 256 | awk '{print $1}')"

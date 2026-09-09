@@ -541,8 +541,14 @@ export async function selfTest() {
   ], 'IOS_BUILD_MUTATION_BOUNDARY_INVALID');
   const installer = source('scripts/install-ios-preserving-data.sh');
   assertOrder(installer, [
+    'git rev-parse --verify --quiet --end-of-options "$EXPECTED_TOOLING^{commit}"',
+    'git rev-parse HEAD',
+    "git rev-parse '@{upstream}'",
+    'git status --porcelain',
     'release-provenance-cli.mjs authorize ios',
     'ios-lane.mjs" preflight',
+    'QUALIFICATION_STATUS=$?',
+    "envelope = JSON.parse(process.argv[2])",
     'preflight-container',
     'Approved app bundle identifier mismatch',
     'mkdir "$LOCK_DIR"',
@@ -552,7 +558,10 @@ export async function selfTest() {
   assert.match(installer, /mutation_started=0/);
   assert.match(installer, /mutation_started" == "1"/);
   assert.match(installer, /MAINA_EXPECTED_FINAL_COMMIT:\?Set the exact independently accepted P0H-04 tooling commit/);
-  assert.doesNotMatch(installer, /TOOLING_HEAD=.*git rev-parse HEAD/);
+  assert.doesNotMatch(installer, /EXPECTED_TOOLING=.*git rev-parse HEAD/);
+  assert.match(installer, /IOS_INSTALL_SOURCE_REVISION_REJECTED/);
+  assert.match(installer, /IOS_INSTALL_PREFLIGHT_REJECTED/);
+  assert.doesNotMatch(installer, /ios-lane\.mjs" preflight >\/dev\/null/);
   assert.equal((installer.match(/device install app/g) ?? []).length, 1);
   assert.doesNotMatch(installer, /device=%s|bundle=%s|retained lock:|raw_exception/);
 
