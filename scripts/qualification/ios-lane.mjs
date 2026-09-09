@@ -541,6 +541,9 @@ export async function selfTest() {
   ], 'IOS_BUILD_MUTATION_BOUNDARY_INVALID');
   const installer = source('scripts/install-ios-preserving-data.sh');
   assertOrder(installer, [
+    'PINNED_PMD="/Users/divay/Developer/.tools/maina-pymobiledevice3/bin/pymobiledevice3"',
+    'IOS_INSTALL_PMD_RUNTIME_REJECTED',
+    '"$PINNED_PMD" version',
     'git rev-parse --verify --quiet --end-of-options "$EXPECTED_TOOLING^{commit}"',
     'git rev-parse HEAD',
     "git rev-parse '@{upstream}'",
@@ -561,6 +564,11 @@ export async function selfTest() {
   assert.doesNotMatch(installer, /EXPECTED_TOOLING=.*git rev-parse HEAD/);
   assert.match(installer, /IOS_INSTALL_SOURCE_REVISION_REJECTED/);
   assert.match(installer, /IOS_INSTALL_PREFLIGHT_REJECTED/);
+  assert.match(installer, /PINNED_PMD_MODE="755"/);
+  assert.match(installer, /PINNED_PMD_BYTES="221"/);
+  assert.match(installer, /PINNED_PMD_SHA256="f89d86b9431c6e697b9a7dc11cca0a1117ad728242833d3e83fba006d9a08719"/);
+  assert.match(installer, /PINNED_PMD_VERSION="11\.1\.2"/);
+  assert.match(installer, /MAINA_PMD="\$PINNED_PMD" MAINA_EXPECTED_FINAL_COMMIT=/);
   assert.doesNotMatch(installer, /ios-lane\.mjs" preflight >\/dev\/null/);
   assert.equal((installer.match(/device install app/g) ?? []).length, 1);
   assert.doesNotMatch(installer, /device=%s|bundle=%s|retained lock:|raw_exception/);

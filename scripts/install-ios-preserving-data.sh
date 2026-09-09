@@ -9,12 +9,40 @@ BUNDLE_ID="${MAINA_IOS_BUNDLE_ID:-com.divay.maina.staging}"
 APP_ZIP="${1:-}"
 EXPECTED_TOOLING="${MAINA_EXPECTED_FINAL_COMMIT:?Set the exact independently accepted P0H-04 tooling commit}"
 PROVENANCE="${MAINA_RELEASE_PROVENANCE:?Set MAINA_RELEASE_PROVENANCE to the Admin-approved dual-platform provenance}"
+PINNED_PMD="/Users/divay/Developer/.tools/maina-pymobiledevice3/bin/pymobiledevice3"
+PINNED_PMD_MODE="755"
+PINNED_PMD_BYTES="221"
+PINNED_PMD_SHA256="f89d86b9431c6e697b9a7dc11cca0a1117ad728242833d3e83fba006d9a08719"
+PINNED_PMD_VERSION="11.1.2"
 [[ -f "$APP_ZIP" ]] || { echo "Usage: npm run ios:install-preserving -- /absolute/Maina.app.zip" >&2; exit 2; }
 [[ "$APP_ZIP" == /* ]] || { echo "iOS candidate path must be absolute." >&2; exit 2; }
 export PATH="$NODE_BIN:$PATH"
 umask 077
 
 cd "$PROJECT_DIR"
+reject_pmd_runtime() {
+  echo "IOS_INSTALL_PMD_RUNTIME_REJECTED" >&2
+  exit 2
+}
+
+if [[ "${MAINA_PMD+x}" == "x" && "$MAINA_PMD" != "$PINNED_PMD" ]]; then
+  reject_pmd_runtime
+fi
+[[ -f "$PINNED_PMD" && ! -L "$PINNED_PMD" && -x "$PINNED_PMD" ]] || reject_pmd_runtime
+if ! IFS=$'\t' read -r PMD_MODE PMD_BYTES \
+  <<< "$(/usr/bin/stat -f $'%Lp\t%z' "$PINNED_PMD" 2>/dev/null)"; then
+  reject_pmd_runtime
+fi
+[[ "$PMD_MODE" == "$PINNED_PMD_MODE" && "$PMD_BYTES" == "$PINNED_PMD_BYTES" ]] || reject_pmd_runtime
+if ! PMD_SHA256="$(/usr/bin/shasum -a 256 "$PINNED_PMD" 2>/dev/null | /usr/bin/awk '{print $1}')" \
+  || [[ "$PMD_SHA256" != "$PINNED_PMD_SHA256" ]]; then
+  reject_pmd_runtime
+fi
+if ! PMD_VERSION="$("$PINNED_PMD" version 2>/dev/null)" \
+  || [[ "$PMD_VERSION" != "$PINNED_PMD_VERSION" ]]; then
+  reject_pmd_runtime
+fi
+
 reject_source_revision() {
   echo "IOS_INSTALL_SOURCE_REVISION_REJECTED" >&2
   exit 2
@@ -45,7 +73,7 @@ IFS=$'\t' read -r _ _ _ EXPECTED_BUNDLE_ID EXPECTED_VERSION EXPECTED_BUILD \
 }
 
 set +e
-QUALIFICATION_OUTPUT="$(MAINA_EXPECTED_FINAL_COMMIT="$EXPECTED_TOOLING" node \
+QUALIFICATION_OUTPUT="$(MAINA_PMD="$PINNED_PMD" MAINA_EXPECTED_FINAL_COMMIT="$EXPECTED_TOOLING" node \
   "$PROJECT_DIR/scripts/qualification/ios-lane.mjs" preflight 2>/dev/null)"
 QUALIFICATION_STATUS=$?
 set -e

@@ -233,6 +233,12 @@ assert.match(iosInstaller, /release-provenance-cli\.mjs replay-config/);
 assert.match(iosInstaller, /BUNDLE_ID" == "\$EXPECTED_BUNDLE_ID/);
 assert.match(iosInstaller, /IOS_INSTALL_SOURCE_REVISION_REJECTED/);
 assert.match(iosInstaller, /IOS_INSTALL_PREFLIGHT_REJECTED/);
+assert.match(iosInstaller, /IOS_INSTALL_PMD_RUNTIME_REJECTED/);
+assert.match(iosInstaller, /PINNED_PMD_MODE="755"/);
+assert.match(iosInstaller, /PINNED_PMD_BYTES="221"/);
+assert.match(iosInstaller, /PINNED_PMD_SHA256="f89d86b9431c6e697b9a7dc11cca0a1117ad728242833d3e83fba006d9a08719"/);
+assert.match(iosInstaller, /PINNED_PMD_VERSION="11\.1\.2"/);
+assert.match(iosInstaller, /MAINA_PMD="\$PINNED_PMD" MAINA_EXPECTED_FINAL_COMMIT=/);
 assert.doesNotMatch(iosInstaller, /ios-lane\.mjs" preflight >\/dev\/null/);
 assert.ok(
   iosInstaller.indexOf('git rev-parse --verify --quiet --end-of-options "$EXPECTED_TOOLING^{commit}"')
@@ -261,6 +267,14 @@ const installerEnv = {
   MAINA_EXPECTED_FINAL_COMMIT: 'f'.repeat(40),
   MAINA_RELEASE_PROVENANCE: '/invalid/provenance-must-not-be-read.json',
 };
+const conflictingPmd = spawnSync('/bin/bash', [installerPath.pathname, new URL('../package.json', import.meta.url).pathname], {
+  encoding: 'utf8',
+  env: { ...installerEnv, MAINA_PMD: '/invalid/caller-supplied-pmd' },
+});
+assert.equal(conflictingPmd.status, 2);
+assert.equal(conflictingPmd.stdout, '');
+assert.equal(conflictingPmd.stderr, 'IOS_INSTALL_PMD_RUNTIME_REJECTED\n');
+
 const nonexistentTooling = spawnSync('/bin/bash', [installerPath.pathname, new URL('../package.json', import.meta.url).pathname], {
   encoding: 'utf8',
   env: installerEnv,
