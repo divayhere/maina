@@ -21,7 +21,8 @@ const androidHome = join(root, 'android-sdk');
 const tools = join(androidHome, 'build-tools', '99.0.0');
 const state = join(root, 'state');
 const locks = join(root, 'locks');
-const fakeJdk = join(root, 'jdk');
+const fakeJdk = join(root, 'jdk 17');
+const fakeNon17Jdk = join(root, 'jdk-non17');
 const fakeNodeBin = join(root, 'node-bin');
 const candidate = join(root, 'candidate.apk');
 const endpoint = 'adb-47011FDAP000VE-test._adb-tls-connect._tcp';
@@ -33,9 +34,21 @@ mkdirSync(join(androidHome, 'platform-tools'), { recursive: true });
 mkdirSync(tools, { recursive: true });
 mkdirSync(state, { recursive: true });
 mkdirSync(join(fakeJdk, 'bin'), { recursive: true });
+mkdirSync(join(fakeNon17Jdk, 'bin'), { recursive: true });
 mkdirSync(fakeNodeBin, { recursive: true });
-writeFileSync(join(fakeJdk, 'bin', 'java'), '#!/usr/bin/env bash\nexit 0\n');
+writeFileSync(join(fakeJdk, 'bin', 'java'), `#!/usr/bin/env bash
+set -euo pipefail
+printf 'java\\n' >> "\${FAKE_INSTALL_STATE:?}/java-invocations"
+case "\${1:-}" in
+  -version) printf 'openjdk version "17.0.20.1" 2026-08-18 LTS\\n' >&2 ;;
+  version) printf '0.9\\n' ;;
+  verify) printf 'Signer #1 certificate SHA-256 digest: signer-sha\\n' ;;
+  *) exit 95 ;;
+esac
+`);
 chmodSync(join(fakeJdk, 'bin', 'java'), 0o755);
+writeFileSync(join(fakeNon17Jdk, 'bin', 'java'), '#!/usr/bin/env bash\nprintf \'openjdk version "21.0.1" 2023-10-17\\n\' >&2\n');
+chmodSync(join(fakeNon17Jdk, 'bin', 'java'), 0o755);
 writeFileSync(join(fakeNodeBin, 'node'), `#!/usr/bin/env bash
 if [[ "\${1:-}" == *"/scripts/release-provenance-cli.mjs" && "\${2:-}" == "authorize" ]]; then
   exit 0
@@ -49,6 +62,7 @@ const adb = join(androidHome, 'platform-tools', 'adb');
 writeFileSync(adb, `#!/usr/bin/env bash
 set -euo pipefail
 state="\${FAKE_INSTALL_STATE:?}"
+printf 'adb\\n' >> "$state/adb-invocations"
 endpoint="\${MAINA_ADB_SERIAL:?}"
 if [[ "\${1:-}" == "devices" ]]; then
   printf 'List of devices attached\\n%s device product:komodo model:Pixel_9_Pro transport_id:1\\n' "$endpoint"
@@ -87,7 +101,10 @@ chmodSync(adb, 0o755);
 
 const apksigner = join(tools, 'apksigner');
 writeFileSync(apksigner, `#!/usr/bin/env bash
-printf 'Signer #1 certificate SHA-256 digest: signer-sha\\n'
+set -euo pipefail
+[[ "\${JAVA_HOME:-}" == "\${MAINA_JAVA_HOME:?}" ]] || exit 93
+[[ "\${PATH:-}" == "\${JAVA_HOME}/bin:"* ]] || exit 94
+exec java "$@"
 `);
 chmodSync(apksigner, 0o755);
 
@@ -109,11 +126,13 @@ const env = {
   MAINA_INSTALL_LOCK_ROOT: locks,
   MAINA_RELEASE_PROVENANCE: join(root, 'approved-provenance.json'),
   FAKE_INSTALL_STATE: state,
+  PATH: '/usr/bin:/bin',
 };
+delete env.JAVA_HOME;
 
 function resetInstalled({ identical = false } = {}) {
   rmSync(locks, { recursive: true, force: true });
-  for (const name of ['install-count', 'install-started', 'release-install']) {
+  for (const name of ['adb-invocations', 'install-count', 'install-started', 'java-invocations', 'release-install']) {
     rmSync(join(state, name), { force: true });
   }
   if (identical) {
@@ -155,6 +174,28 @@ function waitForExit(child) {
 }
 
 try {
+  const missingJavaEnv = { ...env, MAINA_JAVA_HOME: join(root, 'missing-jdk') };
+  const missingJava = spawnSync('bash', [installer, candidate, '--dry-run'], {
+    cwd: repoRoot,
+    env: missingJavaEnv,
+    encoding: 'utf8',
+  });
+  assert.equal(missingJava.status, 2);
+  assert.match(missingJava.stderr, /ANDROID_INSTALL_JAVA_RUNTIME_UNAVAILABLE/);
+  assert.equal(existsSync(join(state, 'adb-invocations')), false);
+  assert.equal(existsSync(lockDirectory), false);
+
+  const non17JavaEnv = { ...env, MAINA_JAVA_HOME: fakeNon17Jdk };
+  const non17Java = spawnSync('bash', [installer, candidate, '--dry-run'], {
+    cwd: repoRoot,
+    env: non17JavaEnv,
+    encoding: 'utf8',
+  });
+  assert.equal(non17Java.status, 2);
+  assert.match(non17Java.stderr, /ANDROID_INSTALL_JAVA_RUNTIME_UNAVAILABLE/);
+  assert.equal(existsSync(join(state, 'adb-invocations')), false);
+  assert.equal(existsSync(lockDirectory), false);
+
   resetInstalled();
   const first = spawnInstaller();
   const firstExit = waitForExit(first);
@@ -165,6 +206,7 @@ try {
   const activeState = readFileSync(join(lockDirectory, 'state'), 'utf8');
   assert.match(activeState, /candidate_sha256=[a-f0-9]{64}/);
   assert.match(activeState, /outcome=running/);
+  assert.equal(existsSync(join(state, 'java-invocations')), true);
   const second = spawnSync('bash', [installer, candidate], { cwd: repoRoot, env, encoding: 'utf8' });
   assert.equal(second.status, 75);
   assert.match(second.stderr, /running or has an unknown outcome/);

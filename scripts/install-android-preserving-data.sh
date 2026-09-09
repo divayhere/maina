@@ -3,11 +3,27 @@ set -euo pipefail
 
 PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 MAINA_NODE_BIN="${MAINA_NODE_BIN:-/Users/divay/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin}"
+MAINA_JAVA_HOME="${MAINA_JAVA_HOME:-${JAVA_HOME:-}}"
 MAINA_ANDROID_HOME="${MAINA_ANDROID_HOME:-${ANDROID_HOME:-/Users/divay/Library/Android/sdk}}"
 MAINA_ADB_SERIAL="${MAINA_ADB_SERIAL:-adb-47011FDAP000VE-9s0wNO._adb-tls-connect._tcp}"
 MAINA_DEVICE_SERIAL="${MAINA_DEVICE_SERIAL:-47011FDAP000VE}"
 ANDROID_HOME="$MAINA_ANDROID_HOME"
-export ANDROID_HOME MAINA_ADB_SERIAL MAINA_DEVICE_SERIAL MAINA_NODE_BIN
+[[ -n "$MAINA_JAVA_HOME" && "$MAINA_JAVA_HOME" == /* && -x "$MAINA_JAVA_HOME/bin/java" ]] || {
+  echo "ANDROID_INSTALL_JAVA_RUNTIME_UNAVAILABLE" >&2
+  exit 2
+}
+java_version="$("$MAINA_JAVA_HOME/bin/java" -version 2>&1)" || {
+  echo "ANDROID_INSTALL_JAVA_RUNTIME_UNAVAILABLE" >&2
+  exit 2
+}
+[[ "$java_version" =~ ^(openjdk|java)[[:space:]]version[[:space:]]\"17([.\"]){1} ]] || {
+  echo "ANDROID_INSTALL_JAVA_RUNTIME_UNAVAILABLE" >&2
+  exit 2
+}
+unset java_version
+JAVA_HOME="$MAINA_JAVA_HOME"
+PATH="$JAVA_HOME/bin:$PATH"
+export ANDROID_HOME JAVA_HOME PATH MAINA_ADB_SERIAL MAINA_DEVICE_SERIAL MAINA_NODE_BIN MAINA_JAVA_HOME
 ADB="$ANDROID_HOME/platform-tools/adb"
 [[ -x "$MAINA_NODE_BIN/node" && -x "$ADB" && -d "$ANDROID_HOME/build-tools" ]] || {
   echo "ANDROID_INSTALL_TOOLCHAIN_UNAVAILABLE" >&2
@@ -19,6 +35,10 @@ BUILD_TOOLS="$ANDROID_HOME/build-tools/$BUILD_TOOLS_VERSION"
 APKSIGNER="$BUILD_TOOLS/apksigner"
 AAPT="$BUILD_TOOLS/aapt"
 [[ -x "$APKSIGNER" && -x "$AAPT" ]] || { echo "ANDROID_INSTALL_TOOLCHAIN_UNAVAILABLE" >&2; exit 2; }
+"$APKSIGNER" version >/dev/null 2>&1 || {
+  echo "ANDROID_INSTALL_JAVA_RUNTIME_UNAVAILABLE" >&2
+  exit 2
+}
 PACKAGE_NAME="${MAINA_ANDROID_PACKAGE:-com.divay.maina}"
 APK="${1:-}"
 MODE="${2:-}"
