@@ -64,7 +64,12 @@ internal class MainaQwenAsr(private val context: Context) {
     }
 
     fun status(): ModelStatus {
-        modelPacks.acquireReady()?.let { handle ->
+        val lifecycleStatus = runCatching { modelPacks.status() }.getOrElse {
+            return ModelStatus(false, "", "MODEL_PACK_STATE_INVALID")
+        }
+        if (lifecycleStatus.state != "unavailable") {
+            val handle = modelPacks.acquireReady()
+                ?: return ModelStatus(false, "", lifecycleStatus.reasonCode)
             return try {
                 val invalid = invalidModelFile(handle.root)
                 if (invalid == null) ModelStatus(true, handle.root.absolutePath)
@@ -265,7 +270,9 @@ internal class MainaQwenAsr(private val context: Context) {
             val existing = activePack
             return if (existing != null) ModelStatus(true, existing.root.absolutePath) else status()
         }
-        modelPacks.acquireReady()?.let { handle ->
+        val lifecycleStatus = modelPacks.status()
+        if (lifecycleStatus.state == "ready") {
+            val handle = modelPacks.acquireReady() ?: error("MODEL_PACK_STATE_INVALID")
             val invalid = invalidModelFile(handle.root)
             if (invalid == null) {
                 activePack = handle
@@ -273,7 +280,9 @@ internal class MainaQwenAsr(private val context: Context) {
             }
             runCatching { modelPacks.rollbackAfterOpenFailure(handle) }
             runCatching { handle.release() }
+            error("Verified Qwen model pack could not be opened")
         }
+        check(lifecycleStatus.state == "unavailable") { lifecycleStatus.reasonCode }
         val legacy = modelRoot()
         val invalid = invalidModelFile(legacy)
         check(invalid == null) { invalid ?: "Qwen model pack is unavailable" }

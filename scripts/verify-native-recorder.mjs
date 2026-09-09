@@ -21,6 +21,8 @@ const requiredFiles = [
   'android/src/main/java/com/divay/maina/recorder/MainaPostProcessingRecoveryWorker.kt',
   'android/src/main/java/com/divay/maina/recorder/MainaPostProcessingOutbox.kt',
   'android/src/main/java/com/divay/maina/recorder/MainaQwenAsr.kt',
+  'android/src/main/java/com/divay/maina/recorder/MainaModelPackLifecycle.kt',
+  'android/src/test/java/com/divay/maina/recorder/MainaModelPackLifecycleTest.kt',
   'android/src/main/java/com/divay/maina/recorder/MainaVoiceActivity.kt',
   'android/src/main/java/com/divay/maina/recorder/MainaHardwareTrigger.kt',
   'android/src/main/assets/silero_vad.int8.onnx',
@@ -51,6 +53,39 @@ for (const invariant of [
   'const val inferenceThreads = 2',
 ]) {
   if (!qwen.includes(invariant)) throw new Error(`Qwen resource invariant missing: ${invariant}`);
+}
+const modelPackLifecycle = readFileSync(path.join(androidRoot, 'src/main/java/com/divay/maina/recorder/MainaModelPackLifecycle.kt'), 'utf8');
+for (const invariant of [
+  'maina.model-pack-manifest.v1',
+  'same_manifest_and_verified_prefix',
+  'same_manifest_invalid_bytes_removed',
+  'MODEL_PACK_WRITER_CONFLICT',
+  'MODEL_PACK_READER_PIN_FAILED',
+  'rollbackAfterOpenFailure',
+  'interruptedPromotionAction',
+  'StandardCopyOption.ATOMIC_MOVE',
+  '0012d9a28f15bd6fb966b62b70a75da3990512fdccce28b83098248ce4be1698',
+]) {
+  if (!modelPackLifecycle.includes(invariant)) throw new Error(`Android model-pack lifecycle invariant missing: ${invariant}`);
+}
+const qwenAdapter = readFileSync(path.join(androidRoot, 'src/main/java/com/divay/maina/recorder/MainaQwenAsr.kt'), 'utf8');
+for (const invariant of [
+  'MainaModelPackLifecycle(context)',
+  'modelPacks.acquireReady()',
+  'rollbackAfterOpenFailure',
+  'activePack?.let { runCatching { it.release() } }',
+  'fun smoke(root: File, uriOrPath: String)',
+]) {
+  if (!qwenAdapter.includes(invariant)) throw new Error(`Android Qwen model-pack integration invariant missing: ${invariant}`);
+}
+const recorderModule = readFileSync(path.join(androidRoot, 'src/main/java/com/divay/maina/recorder/MainaRecorderModule.kt'), 'utf8');
+for (const invariant of [
+  'getNativeModelPackLifecycleStatus',
+  'beginNativeModelPackAcquisition',
+  'stageNativeModelPackChunk',
+  'verifyAndPromoteNativeModelPack',
+]) {
+  if (!recorderModule.includes(invariant)) throw new Error(`Android model-pack bridge invariant missing: ${invariant}`);
 }
 
 const postProcessing = readFileSync(path.join(androidRoot, 'src/main/java/com/divay/maina/recorder/MainaPostProcessingService.kt'), 'utf8');
