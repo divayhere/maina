@@ -86,7 +86,7 @@ export function collectAndroidPreflight({ env = process.env, run = runCommand } 
     'scripts/build-android-release-candidate.sh',
     'scripts/install-android-preserving-data.sh',
     'scripts/release-provenance-cli.mjs',
-    'release/m3-m4-0.10.61-candidate-plan.json',
+    'release/m3-m4-0.10.62-candidate-plan.json',
   ];
   record('helper_runtime', helpers.every((path) => isReadable(join(projectDir, path))), 'HELPER_RUNTIME_UNAVAILABLE');
 
@@ -264,7 +264,7 @@ function syntheticReplayTest() {
   writeExecutable(fakeNode, `#!/usr/bin/env bash
 set -euo pipefail
 [[ "\${2:-}" == "replay-config" ]] || exit 97
-printf 'com.divay.maina\\t0.10.61\\t87\\tcom.divay.maina.staging\\t0.10.61\\t43\\n'
+printf 'com.divay.maina\\t0.10.62\\t88\\tcom.divay.maina.staging\\t0.10.62\\t44\\n'
 `);
   writeExecutable(fakeAdb, `#!/usr/bin/env bash
 set -euo pipefail
@@ -279,7 +279,7 @@ case "\${1:-}:\${2:-}:\${3:-}" in
   get-state::) printf 'device\\n' ;;
   shell:getprop:ro.serialno) printf '47011FDAP000VE\\n' ;;
   shell:getprop:ro.product.model) printf 'Pixel 9 Pro\\n' ;;
-  shell:dumpsys:package) printf 'versionName=0.10.61\\nversionCode=87 minSdk=24\\n' ;;
+  shell:dumpsys:package) printf 'versionName=0.10.62\\nversionCode=88 minSdk=24\\n' ;;
   shell:pidof:com.divay.maina) printf 'PRIVATE-SENTINEL-PID\\n' ;;
   shell:dumpsys:audio|shell:dumpsys:notification) printf 'PRIVATE-SENTINEL-CONTENT\\n' ;;
   *) exit 92 ;;
