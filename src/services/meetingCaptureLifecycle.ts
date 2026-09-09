@@ -547,16 +547,25 @@ async function reconcilePendingNativeMeetingWorkInternal(): Promise<number> {
         });
         return 'retained' as const;
       });
-      if (terminal === 'retained' || terminal === 'acknowledged') continue;
-      // A crash after acknowledgement but before UI notification is safe: the
-      // Expo row proves this exact owner/run already imported, so never reopen
-      // a second ASR generation just because the native result was deleted.
-      if (meeting.nativePostprocessRunId === identity.runId
-        && Number.isSafeInteger(meeting.nativePostprocessImportedAt)
-        && (meeting.nativePostprocessImportedAt ?? 0) > 0) {
-        await repairIOSImportedPostProcessingStages(meeting, identity);
+      // The import transaction can commit before its exact readback, native
+      // acknowledgement, or public-stage writes finish. Re-read the meeting
+      // after every terminal-result attempt so a retained result cannot hide
+      // an already-durable import fence and strand ASR as running/deferred.
+      // Repair is idempotent and never reopens native work.
+      const reconciledMeeting = await getMeeting(meeting.id).catch((cause) => {
+        log.warn('recovery', 'iOS imported meeting read remains retained for reconciliation', {
+          meetingId: meeting.id,
+          causeName: cause instanceof Error ? cause.name : typeof cause,
+        });
+        return null;
+      });
+      if (reconciledMeeting?.nativePostprocessRunId === identity.runId
+        && Number.isSafeInteger(reconciledMeeting.nativePostprocessImportedAt)
+        && (reconciledMeeting.nativePostprocessImportedAt ?? 0) > 0) {
+        await repairIOSImportedPostProcessingStages(reconciledMeeting, identity);
         continue;
       }
+      if (terminal === 'retained' || terminal === 'acknowledged') continue;
 
       const isLiveNativeMeeting = nativeStatus?.meetingId === meeting.id
         && nativeStatus.state !== 'idle'

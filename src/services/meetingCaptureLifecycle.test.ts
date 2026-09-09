@@ -48,6 +48,7 @@ const mocks = vi.hoisted(() => ({
   start: vi.fn(async () => ({ state: 'running', resumed: false })),
   markRunning: vi.fn(async (): Promise<'running' | 'already_imported'> => 'running'),
   getStages: vi.fn(async () => [] as { stage: string; state: string }[]),
+  getTranscriptSummary: vi.fn(async () => null as { hasText: boolean } | null),
   notify: vi.fn(),
   updateMeeting: vi.fn(async () => {}),
   updateStage: vi.fn(async (_stage: Record<string, unknown>) => {}),
@@ -57,7 +58,7 @@ vi.mock('react-native', () => ({ Platform: { OS: 'ios' } }));
 vi.mock('@/data/meetings', () => ({
   getMeeting: vi.fn(async () => ({ ...mocks.meeting })),
   getMeetingPipelineStages: mocks.getStages,
-  getTranscriptSummary: vi.fn(async () => null),
+  getTranscriptSummary: mocks.getTranscriptSummary,
   importIOSNativePostProcessingResult: mocks.importResult,
   importNativePostProcessingResult: vi.fn(async () => 'imported'),
   listMeetings: vi.fn(async () => [{ ...mocks.meeting }]),
@@ -195,6 +196,7 @@ describe('iOS durable native post-processing lifecycle', () => {
     mocks.acknowledge.mockResolvedValue(true);
     mocks.markRunning.mockResolvedValue('running');
     mocks.getStages.mockResolvedValue([]);
+    mocks.getTranscriptSummary.mockResolvedValue(null);
     mocks.updateStage.mockImplementation(async () => {});
   });
 
@@ -224,6 +226,32 @@ describe('iOS durable native post-processing lifecycle', () => {
     expect(mocks.acknowledge).not.toHaveBeenCalled();
     expect(mocks.cleanup).not.toHaveBeenCalled();
     expect(mocks.start).not.toHaveBeenCalled();
+  });
+
+  it('repairs public stages when retained readback follows a committed native import', async () => {
+    const result = completeResult();
+    mocks.nativeResult = result;
+    mocks.getTranscriptSummary.mockResolvedValue({ hasText: true });
+    mocks.importResult.mockImplementationOnce(async () => {
+      mocks.meeting.nativePostprocessRunId = result.identity.runId;
+      mocks.meeting.nativePostprocessImportedAt = 1_788_000_030_000;
+      mocks.meeting.transcriptionWindowCount = result.coverage.windowCount;
+      mocks.meeting.transcriptionCompletedWindows = result.coverage.completedWindows;
+      mocks.meeting.transcriptionFailedWindows = result.coverage.failedWindows;
+      return null;
+    });
+
+    await expect(reconcilePendingNativeMeetingWork()).resolves.toBe(0);
+
+    expect(mocks.acknowledge).not.toHaveBeenCalled();
+    expect(mocks.updateStage).toHaveBeenCalledWith(expect.objectContaining({
+      meetingId: 'meeting-a', stage: 'asr', state: 'ready',
+    }));
+    expect(mocks.updateStage).toHaveBeenCalledWith(expect.objectContaining({
+      meetingId: 'meeting-a', stage: 'transcript_durable', state: 'ready',
+    }));
+    expect(mocks.start).not.toHaveBeenCalled();
+    expect(mocks.cleanup).not.toHaveBeenCalled();
   });
 
   it('replays the same committed result after acknowledgement failure without starting a duplicate run', async () => {
