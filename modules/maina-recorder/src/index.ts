@@ -171,6 +171,28 @@ export interface QwenAsrStatus {
   reason?: string | null;
 }
 
+export type NativeModelPackState =
+  | 'unavailable'
+  | 'downloading'
+  | 'verifying'
+  | 'staged'
+  | 'smoke_testing'
+  | 'ready'
+  | 'failed_download'
+  | 'failed_verification'
+  | 'failed_smoke'
+  | 'rollback_pending';
+
+export interface NativeModelPackLifecycleStatus {
+  packId: 'qwen3-asr-0.6b-int8';
+  packVersion: string | null;
+  state: NativeModelPackState;
+  bytesComplete: number;
+  bytesTotal: number;
+  reasonCode: string;
+  platformCompatible: boolean;
+}
+
 export interface QwenAsrResult {
   outcome: 'success' | 'empty';
   text: string;
@@ -332,6 +354,22 @@ interface MainaRecorderNativeModule {
   inspectNativeCaptureDirectory(directory: string, recoverPartials: boolean): Promise<NativeCaptureDirectoryInspection>;
   deleteNativeCaptureDirectory(directory: string): Promise<boolean>;
   getQwenAsrStatus(): Promise<QwenAsrStatus>;
+  getNativeModelPackLifecycleStatus(): Promise<NativeModelPackLifecycleStatus>;
+  beginNativeModelPackAcquisition(
+    manifestJson: string,
+    partialOverheadBytes: number,
+    safetyMarginBytes: number,
+  ): Promise<NativeModelPackLifecycleStatus>;
+  stageNativeModelPackChunk(
+    manifestJson: string,
+    relativePath: string,
+    chunkIndex: number,
+    sourceUri: string,
+  ): Promise<NativeModelPackLifecycleStatus>;
+  verifyAndPromoteNativeModelPack(
+    manifestJson: string,
+    smokeInputUri: string,
+  ): Promise<NativeModelPackLifecycleStatus>;
   transcribeWithQwen(uri: string, startMs: number, endMs: number): Promise<QwenAsrResult>;
   releaseQwenAsr(): Promise<void>;
   beginIOSContinuedProcessing?(jobId: string, title: string, subtitle: string, totalUnits: number): {

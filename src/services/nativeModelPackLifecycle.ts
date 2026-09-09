@@ -108,6 +108,32 @@ export interface NativeModelPackResultMapping extends NativeModelPackLifecycleId
   referencedResultIds: string[];
 }
 
+export interface NativeModelPackResultEvidence {
+  resultId: string;
+  resultPayloadSha256: string;
+}
+
+export interface NativeModelPackValidatedResultBinding {
+  p2Result: {
+    identity: {
+      resultId: string;
+      modelId: typeof MAINA_MODEL_ENGINE_ID;
+      modelVersion: string;
+      runtimeVersion: string;
+    };
+    resultPayloadSha256: string;
+  };
+  lifecycleMappings: NativeModelPackResultMapping[];
+}
+
+export interface NativeModelPackScopedCounts {
+  targetManifestSha256: string;
+  targetPlatform: NativeModelPackPlatform;
+  targetActivationGeneration: number;
+  pinnedReaderCount: number;
+  resultReferenceCount: number;
+}
+
 export interface NativeModelPackResumeRecord {
   manifestSha256: string;
   platform: NativeModelPackPlatform;
@@ -283,10 +309,14 @@ export function validateNativeModelPack(
   const observed = new Map<string, NativeModelPackObservedFile>();
   for (const file of options.observedFiles) {
     if (!record(file) || !exactKeys(file, ['path', 'kind', 'byteCount', 'sha256', 'chunkSha256'])
-      || file.kind !== 'regular' || !safePath(file.path) || observed.has(file.path)) {
+      || file.kind !== 'regular' || typeof file.path !== 'string' || !safePath(file.path)
+      || !safePositive(file.byteCount) || typeof file.sha256 !== 'string' || !SHA256.test(file.sha256)
+      || !Array.isArray(file.chunkSha256)
+      || !file.chunkSha256.every((digest) => typeof digest === 'string' && SHA256.test(digest))
+      || observed.has(file.path)) {
       return { ok: false, code: 'FILE_EVIDENCE_MISMATCH' };
     }
-    observed.set(file.path, file);
+    observed.set(file.path, file as NativeModelPackObservedFile);
   }
   for (const expected of manifest.files) {
     const actual = observed.get(expected.path);
@@ -413,46 +443,94 @@ export function validateNativeModelPackResultMapping(
   incoming: NativeModelPackResultMapping,
   existing: readonly NativeModelPackResultMapping[],
 ): NativeModelPackValidation<NativeModelPackResultMapping> {
-  if (incoming.packId !== MAINA_MODEL_PACK_ID || incoming.modelId !== MAINA_MODEL_ENGINE_ID
-    || !ID.test(incoming.packVersion) || !ID.test(incoming.modelVersion) || !ID.test(incoming.runtimeVersion)
-    || !SHA256.test(incoming.manifestSha256) || !SHA256.test(incoming.lifecycleRecordSha256)
-    || !safePositive(incoming.activationGeneration) || !incoming.packRetained
-    || incoming.referencedResultIds.length === 0 || new Set(incoming.referencedResultIds).size !== incoming.referencedResultIds.length
-    || !incoming.referencedResultIds.every((id) => ID.test(id))) {
+  if (!validResultMapping(incoming)) {
     return { ok: false, code: 'RESULT_BINDING_MISMATCH' };
   }
-  const sameTuple = existing.find((entry) => entry.modelId === incoming.modelId
+  if (!existing.every(validResultMapping)) return { ok: false, code: 'RESULT_BINDING_MISMATCH' };
+  const sameTuple = existing.filter((entry) => entry.modelId === incoming.modelId
     && entry.modelVersion === incoming.modelVersion && entry.runtimeVersion === incoming.runtimeVersion);
-  if (sameTuple && (sameTuple.manifestSha256 !== incoming.manifestSha256
-    || sameTuple.platform !== incoming.platform
-    || sameTuple.activationGeneration !== incoming.activationGeneration
-    || sameTuple.lifecycleRecordSha256 !== incoming.lifecycleRecordSha256)) {
+  if (sameTuple.length > 1 || sameTuple.some((entry) => entry.manifestSha256 !== incoming.manifestSha256
+    || entry.platform !== incoming.platform
+    || entry.activationGeneration !== incoming.activationGeneration
+    || entry.lifecycleRecordSha256 !== incoming.lifecycleRecordSha256)) {
     return { ok: false, code: 'RESULT_BINDING_MISMATCH' };
   }
   return { ok: true, value: incoming };
 }
 
+function validResultMapping(value: unknown): value is NativeModelPackResultMapping {
+  if (!record(value) || !exactKeys(value, [
+    'packId', 'packVersion', 'manifestSha256', 'platform', 'activationGeneration',
+    'modelId', 'modelVersion', 'runtimeVersion', 'lifecycleRecordSha256', 'packRetained', 'referencedResultIds',
+  ])) return false;
+  return value.packId === MAINA_MODEL_PACK_ID && value.modelId === MAINA_MODEL_ENGINE_ID
+    && typeof value.packVersion === 'string' && ID.test(value.packVersion)
+    && typeof value.modelVersion === 'string' && ID.test(value.modelVersion)
+    && typeof value.runtimeVersion === 'string' && ID.test(value.runtimeVersion)
+    && typeof value.manifestSha256 === 'string' && SHA256.test(value.manifestSha256)
+    && typeof value.lifecycleRecordSha256 === 'string' && SHA256.test(value.lifecycleRecordSha256)
+    && ['android', 'ios'].includes(String(value.platform))
+    && safePositive(value.activationGeneration) && value.packRetained === true
+    && Array.isArray(value.referencedResultIds) && value.referencedResultIds.length > 0
+    && new Set(value.referencedResultIds).size === value.referencedResultIds.length
+    && value.referencedResultIds.every((id) => typeof id === 'string' && ID.test(id));
+}
+
 export function nativeModelPackCleanupEligible(input: {
   target: NativeModelPackLifecycleIdentity & { lifecycleRecordSha256: string };
   successor: NativeModelPackResultMapping;
-  firstExactSuccessorResultId: string | null;
-  firstExactSuccessorResultSha256: string | null;
-  pinnedReaderCount: number;
-  resultReferenceCount: number;
+  firstExactSuccessorResult: NativeModelPackResultEvidence | null;
+  validatedResultBinding: NativeModelPackValidatedResultBinding;
+  scopedCounts: NativeModelPackScopedCounts;
   active: boolean;
   rollbackRetained: boolean;
   inProgress: boolean;
 }): NativeModelPackValidation {
-  if (!SHA256.test(input.target.lifecycleRecordSha256)
-    || !safeNonnegative(input.pinnedReaderCount) || !safeNonnegative(input.resultReferenceCount)
+  const result = input.firstExactSuccessorResult;
+  const counts = input.scopedCounts;
+  const binding = input.validatedResultBinding;
+  const validatedResult = record(binding) && exactKeys(binding, ['p2Result', 'lifecycleMappings'])
+    && record(binding.p2Result) && exactKeys(binding.p2Result, ['identity', 'resultPayloadSha256'])
+    && record(binding.p2Result.identity) && exactKeys(binding.p2Result.identity, ['resultId', 'modelId', 'modelVersion', 'runtimeVersion'])
+    && typeof binding.p2Result.identity.resultId === 'string' && ID.test(binding.p2Result.identity.resultId)
+    && binding.p2Result.identity.modelId === MAINA_MODEL_ENGINE_ID
+    && typeof binding.p2Result.identity.modelVersion === 'string' && ID.test(binding.p2Result.identity.modelVersion)
+    && typeof binding.p2Result.identity.runtimeVersion === 'string' && ID.test(binding.p2Result.identity.runtimeVersion)
+    && typeof binding.p2Result.resultPayloadSha256 === 'string' && SHA256.test(binding.p2Result.resultPayloadSha256)
+    && Array.isArray(binding.lifecycleMappings)
+    && binding.lifecycleMappings.length > 0
+    && binding.lifecycleMappings.every(validResultMapping);
+  const exactMapping = validatedResult
+    ? binding.lifecycleMappings.filter((entry) => entry.modelId === binding.p2Result.identity.modelId
+      && entry.modelVersion === binding.p2Result.identity.modelVersion
+      && entry.runtimeVersion === binding.p2Result.identity.runtimeVersion)
+    : [];
+  if (!record(input.target) || !exactKeys(input.target, ['packId', 'packVersion', 'manifestSha256', 'platform', 'activationGeneration', 'lifecycleRecordSha256'])
+    || input.target.packId !== MAINA_MODEL_PACK_ID || !ID.test(input.target.packVersion)
+    || !SHA256.test(input.target.manifestSha256) || !SHA256.test(input.target.lifecycleRecordSha256)
+    || !safePositive(input.target.activationGeneration) || !['android', 'ios'].includes(input.target.platform)
+    || !validResultMapping(input.successor)
+    || !record(counts) || !exactKeys(counts, ['targetManifestSha256', 'targetPlatform', 'targetActivationGeneration', 'pinnedReaderCount', 'resultReferenceCount'])
+    || counts.targetManifestSha256 !== input.target.manifestSha256
+    || counts.targetPlatform !== input.target.platform
+    || counts.targetActivationGeneration !== input.target.activationGeneration
+    || !safeNonnegative(counts.pinnedReaderCount) || !safeNonnegative(counts.resultReferenceCount)
     || input.active || input.rollbackRetained || input.inProgress
-    || input.pinnedReaderCount !== 0 || input.resultReferenceCount !== 0
-    || !input.firstExactSuccessorResultId || !ID.test(input.firstExactSuccessorResultId)
-    || !input.firstExactSuccessorResultSha256 || !SHA256.test(input.firstExactSuccessorResultSha256)
-    || !input.successor.referencedResultIds.includes(input.firstExactSuccessorResultId)
-    || !input.successor.packRetained
+    || counts.pinnedReaderCount !== 0 || counts.resultReferenceCount !== 0
+    || !record(result) || !exactKeys(result, ['resultId', 'resultPayloadSha256'])
+    || typeof result.resultId !== 'string' || !ID.test(result.resultId)
+    || typeof result.resultPayloadSha256 !== 'string' || !SHA256.test(result.resultPayloadSha256)
+    || !validatedResult || exactMapping.length !== 1
+    || exactMapping[0].manifestSha256 !== input.successor.manifestSha256
+    || exactMapping[0].platform !== input.successor.platform
+    || exactMapping[0].activationGeneration !== input.successor.activationGeneration
+    || exactMapping[0].lifecycleRecordSha256 !== input.successor.lifecycleRecordSha256
+    || binding.p2Result.identity.resultId !== result.resultId
+    || binding.p2Result.resultPayloadSha256 !== result.resultPayloadSha256
+    || !input.successor.referencedResultIds.includes(result.resultId)
     || input.target.manifestSha256 === input.successor.manifestSha256
-    || input.target.platform !== input.successor.platform) {
+    || input.target.platform !== input.successor.platform
+    || input.successor.activationGeneration <= input.target.activationGeneration) {
     return { ok: false, code: 'CLEANUP_BOUNDARY_MISMATCH' };
   }
   return { ok: true, value: undefined };

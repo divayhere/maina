@@ -125,6 +125,20 @@ describe('native model-pack manifest', () => {
         .toMatchObject({ ok: false, code: 'FILE_EVIDENCE_MISMATCH' });
     }
   });
+
+  it('returns a bounded mismatch instead of throwing on malformed observed values', () => {
+    const base = fixture();
+    for (const changed of [
+      { ...base.observedFiles[0], byteCount: -1 },
+      { ...base.observedFiles[0], sha256: 'nope' },
+      { ...base.observedFiles[0], chunkSha256: null },
+      { ...base.observedFiles[0], chunkSha256: ['nope'] },
+    ]) {
+      expect(() => validate({ observedFiles: [changed as never, ...base.observedFiles.slice(1)] })).not.toThrow();
+      expect(validate({ observedFiles: [changed as never, ...base.observedFiles.slice(1)] }))
+        .toMatchObject({ ok: false, code: 'FILE_EVIDENCE_MISMATCH' });
+    }
+  });
 });
 
 describe('native model-pack lifecycle policy', () => {
@@ -179,17 +193,40 @@ describe('model identity retention and cleanup', () => {
     expect(validateNativeModelPackResultMapping(current, []).ok).toBe(true);
     expect(validateNativeModelPackResultMapping(mapping({ manifestSha256: '3'.repeat(64) }), [current]))
       .toMatchObject({ ok: false, code: 'RESULT_BINDING_MISMATCH' });
+    expect(validateNativeModelPackResultMapping(current, [current, mapping({ manifestSha256: '3'.repeat(64) })]))
+      .toMatchObject({ ok: false, code: 'RESULT_BINDING_MISMATCH' });
   });
 
   it('collects only an unreferenced non-active target after an exact successor result', () => {
     const successor = mapping();
-    const good = { target: { packId: 'qwen3-asr-0.6b-int8' as const, packVersion: 'synthetic-0', manifestSha256: '3'.repeat(64), platform: 'android' as const, activationGeneration: 1, lifecycleRecordSha256: '4'.repeat(64) }, successor, firstExactSuccessorResultId: 'result-1', firstExactSuccessorResultSha256: '5'.repeat(64), pinnedReaderCount: 0, resultReferenceCount: 0, active: false, rollbackRetained: false, inProgress: false };
+    const target = { packId: 'qwen3-asr-0.6b-int8' as const, packVersion: 'synthetic-0', manifestSha256: '3'.repeat(64), platform: 'android' as const, activationGeneration: 1, lifecycleRecordSha256: '4'.repeat(64) };
+    const good = {
+      target,
+      successor,
+      firstExactSuccessorResult: { resultId: 'result-1', resultPayloadSha256: '5'.repeat(64) },
+      validatedResultBinding: {
+        p2Result: { identity: { resultId: 'result-1', modelId: successor.modelId, modelVersion: successor.modelVersion, runtimeVersion: successor.runtimeVersion }, resultPayloadSha256: '5'.repeat(64) },
+        lifecycleMappings: [successor],
+      },
+      scopedCounts: { targetManifestSha256: target.manifestSha256, targetPlatform: target.platform, targetActivationGeneration: target.activationGeneration, pinnedReaderCount: 0, resultReferenceCount: 0 },
+      active: false,
+      rollbackRetained: false,
+      inProgress: false,
+    };
     expect(nativeModelPackCleanupEligible(good).ok).toBe(true);
-    expect(nativeModelPackCleanupEligible({ ...good, pinnedReaderCount: 1 }))
+    expect(nativeModelPackCleanupEligible({ ...good, scopedCounts: { ...good.scopedCounts, pinnedReaderCount: 1 } }))
       .toMatchObject({ ok: false, code: 'CLEANUP_BOUNDARY_MISMATCH' });
     expect(nativeModelPackCleanupEligible({ ...good, rollbackRetained: true }))
       .toMatchObject({ ok: false, code: 'CLEANUP_BOUNDARY_MISMATCH' });
-    expect(nativeModelPackCleanupEligible({ ...good, firstExactSuccessorResultId: 'other' }))
+    expect(nativeModelPackCleanupEligible({ ...good, firstExactSuccessorResult: { ...good.firstExactSuccessorResult, resultId: 'other' } }))
+      .toMatchObject({ ok: false, code: 'CLEANUP_BOUNDARY_MISMATCH' });
+    expect(nativeModelPackCleanupEligible({ ...good, successor: mapping({ activationGeneration: 1 }) }))
+      .toMatchObject({ ok: false, code: 'CLEANUP_BOUNDARY_MISMATCH' });
+    expect(nativeModelPackCleanupEligible({ ...good, scopedCounts: { ...good.scopedCounts, targetManifestSha256: '9'.repeat(64) } }))
+      .toMatchObject({ ok: false, code: 'CLEANUP_BOUNDARY_MISMATCH' });
+    expect(nativeModelPackCleanupEligible({ ...good, firstExactSuccessorResult: { ...good.firstExactSuccessorResult, resultPayloadSha256: '9'.repeat(64) } }))
+      .toMatchObject({ ok: false, code: 'CLEANUP_BOUNDARY_MISMATCH' });
+    expect(nativeModelPackCleanupEligible({ ...good, validatedResultBinding: { ...good.validatedResultBinding, lifecycleMappings: [successor, mapping({ manifestSha256: '9'.repeat(64) })] } }))
       .toMatchObject({ ok: false, code: 'CLEANUP_BOUNDARY_MISMATCH' });
   });
 });
