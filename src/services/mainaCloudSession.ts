@@ -40,6 +40,12 @@ export type MainaCloudExecutionContext = Readonly<{
   scopesVerifiedAt: number;
 }>;
 
+type MainaCloudSessionGuard = Readonly<{
+  ownerUserId: string;
+  accessToken: string;
+  scopesVerifiedAt: number | null;
+}>;
+
 export class MainaCloudScopeError extends Error {
   constructor(
     readonly code: 'cloud_scope_unverified' | 'cloud_scope_repair_required',
@@ -52,7 +58,7 @@ export class MainaCloudScopeError extends Error {
 
 export class MainaCloudSessionMismatchError extends Error {
   constructor() {
-    super('The Maina Cloud session changed before the request could be sent.');
+    super('The Maina Cloud session changed while the request was in progress.');
     this.name = 'MainaCloudSessionMismatchError';
   }
 }
@@ -183,14 +189,36 @@ export async function clearMainaCloudSession(): Promise<void> {
   await clearOwnerMemoryCache(ownerUserId);
 }
 
-function sessionMatchesExecutionContext(
+function sessionMatchesGuard(
   session: MainaCloudSession | null,
-  context: MainaCloudExecutionContext,
+  context: MainaCloudSessionGuard,
 ): session is MainaCloudSession {
   return session !== null
     && session.user.userId === context.ownerUserId
     && session.accessToken === context.accessToken
     && session.scopesVerifiedAt === context.scopesVerifiedAt;
+}
+
+function guardMainaCloudSession(session: MainaCloudSession): MainaCloudSessionGuard {
+  return Object.freeze({
+    ownerUserId: session.user.userId,
+    accessToken: session.accessToken,
+    scopesVerifiedAt: session.scopesVerifiedAt ?? null,
+  });
+}
+
+async function assertMainaCloudSessionGuard(context: MainaCloudSessionGuard): Promise<void> {
+  await withSessionMutation(async () => {
+    if (!sessionMatchesGuard(await readStoredSession(), context)) {
+      throw new MainaCloudSessionMismatchError();
+    }
+  });
+}
+
+export async function assertMainaCloudExecutionContext(
+  context: MainaCloudExecutionContext,
+): Promise<void> {
+  await assertMainaCloudSessionGuard(context);
 }
 
 export function pinMainaCloudExecutionContext(
@@ -205,15 +233,16 @@ export function pinMainaCloudExecutionContext(
 }
 
 async function clearMainaCloudSessionIfMatching(
-  context: MainaCloudExecutionContext,
-): Promise<void> {
+  context: MainaCloudSessionGuard,
+): Promise<boolean> {
   const clearedOwnerUserId = await withSessionMutation(async () => {
     const session = await readStoredSession();
-    if (!sessionMatchesExecutionContext(session, context)) return null;
+    if (!sessionMatchesGuard(session, context)) return null;
     await SecureStore.deleteItemAsync(SESSION_KEY);
     return context.ownerUserId;
   });
   await clearOwnerMemoryCache(clearedOwnerUserId);
+  return clearedOwnerUserId !== null;
 }
 
 export async function mainaCloudRequestJson(
@@ -221,7 +250,7 @@ export async function mainaCloudRequestJson(
   init: RequestInit = {},
   options?: {
     acceptHttpErrors?: boolean;
-    executionContext?: MainaCloudExecutionContext;
+    executionContext?: MainaCloudSessionGuard;
   },
 ): Promise<MainaCloudJsonResponse> {
   const session = await getMainaCloudSession();
@@ -234,27 +263,49 @@ export async function mainaCloudRequestJson(
     );
   }
   if (options?.executionContext
-    && !sessionMatchesExecutionContext(session, options.executionContext)) {
+    && !sessionMatchesGuard(session, options.executionContext)) {
     throw new MainaCloudSessionMismatchError();
   }
-  const response = await requestMainaCloudJson({
-    url: `${apiBaseUrl()}${path}`,
-    init: {
-      ...init,
-      headers: {
-        Accept: 'application/json',
-        Authorization: `Bearer ${session.accessToken}`,
-        ...init.headers,
+  let response: MainaCloudJsonResponse;
+  try {
+    response = await requestMainaCloudJson({
+      url: `${apiBaseUrl()}${path}`,
+      init: {
+        ...init,
+        headers: {
+          Accept: 'application/json',
+          Authorization: `Bearer ${session.accessToken}`,
+          ...init.headers,
+        },
       },
-    },
-  });
+    });
+  } catch (cause) {
+    if (options?.executionContext) {
+      // A transport failure can race an account replacement too. Prefer the
+      // stable session-change result so callers cannot serve the old owner's
+      // offline cache while a different owner is current.
+      await assertMainaCloudSessionGuard(options.executionContext);
+    }
+    throw cause;
+  }
+  const matchingClearOwnsRejected401 = response.status === 401
+    && !response.ok
+    && options?.acceptHttpErrors !== true
+    && options?.executionContext !== undefined;
+  if (options?.executionContext && !matchingClearOwnsRejected401) {
+    // Account replacement stays available while the request is in flight, but
+    // a response from the old owner must never reach the new owner's UI/cache.
+    await assertMainaCloudSessionGuard(options.executionContext);
+  }
   if (!response.ok && options?.acceptHttpErrors !== true) {
     const failure = rejectedMainaCloudResponse(response);
     if (response.status === 401) {
       // Preserve nothing but an opaque expired token; no local meeting state
       // is mutated here. The caller maps this to an auth-blocked cloud job.
       if (options?.executionContext) {
-        await clearMainaCloudSessionIfMatching(options.executionContext);
+        if (!await clearMainaCloudSessionIfMatching(options.executionContext)) {
+          throw new MainaCloudSessionMismatchError();
+        }
       } else {
         await clearMainaCloudSession();
       }
@@ -349,13 +400,17 @@ export async function signOutMainaCloud(): Promise<void> {
 export async function getMainaCloudConnection(): Promise<MainaCloudSession | null> {
   const session = await getMainaCloudSession();
   if (!session) return null;
+  const sessionGuard = guardMainaCloudSession(session);
   try {
-    const response = await mainaCloudRequestJson('/v1/auth/me');
+    const response = await mainaCloudRequestJson('/v1/auth/me', {}, { executionContext: sessionGuard });
     const body = response.data as {
       expires_at?: unknown;
       user?: { user_id?: unknown; email?: unknown; display_name?: unknown; role?: unknown; scopes?: unknown };
     };
     if (typeof body.user?.user_id === 'string' && typeof body.user.email === 'string') {
+      if (body.user.user_id !== session.user.userId) {
+        throw new MainaCloudSessionMismatchError();
+      }
       const scopes = Array.isArray(body.user.scopes)
         ? body.user.scopes.filter((scope): scope is string => typeof scope === 'string')
         : null;
@@ -373,13 +428,14 @@ export async function getMainaCloudConnection(): Promise<MainaCloudSession | nul
       };
       return withSessionMutation(async () => {
         const current = await readStoredSession();
-        if (!sameSessionCredential(current, session)) return current;
+        if (!sameSessionCredential(current, session)) throw new MainaCloudSessionMismatchError();
         await SecureStore.setItemAsync(SESSION_KEY, JSON.stringify(refreshed));
         return refreshed;
       });
     }
     return session;
   } catch (cause) {
+    if (cause instanceof MainaCloudSessionMismatchError) throw cause;
     if (cause instanceof MainaCloudApiError && cause.status === 401) return null;
     // A temporary offline state must not log the user out or block local work.
     return session;
@@ -399,7 +455,7 @@ export async function requireMainaCloudScope(
     throw new MainaCloudScopeError('cloud_scope_unverified', 'Connect Maina Cloud to use Memory.');
   }
   if (executionContext) {
-    if (!sessionMatchesExecutionContext(stored, executionContext)) {
+    if (!sessionMatchesGuard(stored, executionContext)) {
       throw new MainaCloudSessionMismatchError();
     }
     if (!stored.scopesVerifiedAt || !mainaCloudSessionHasScope(stored, scope)) {

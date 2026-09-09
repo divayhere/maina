@@ -172,6 +172,146 @@ describe('mainaCloudSession', () => {
     expect(await getMainaCloudSession()).toEqual(ownerB);
   });
 
+  it('rejects a pinned owner-session switch while the response is in flight', async () => {
+    const ownerA = {
+      ...validSession,
+      accessToken: 'token-a',
+      scopes: ['recall:read'],
+      user: { ...validSession.user, userId: 'owner-a' },
+    };
+    const ownerB = {
+      ...validSession,
+      accessToken: 'token-b',
+      scopes: ['recall:read'],
+      user: { ...validSession.user, userId: 'owner-b' },
+    };
+    await saveMainaCloudSession(ownerA);
+    const executionContext = pinMainaCloudExecutionContext(ownerA);
+
+    let announceRequestStarted!: () => void;
+    let finishRequest!: (response: Response) => void;
+    const requestStarted = new Promise<void>((resolve) => { announceRequestStarted = resolve; });
+    const response = new Promise<Response>((resolve) => { finishRequest = resolve; });
+    mocks.fetch.mockImplementationOnce(async () => {
+      announceRequestStarted();
+      return response;
+    });
+
+    const oldRequest = mainaCloudRequestJson(
+      '/v1/future-versioned-resource',
+      {},
+      { executionContext },
+    );
+    await requestStarted;
+    await saveMainaCloudSession(ownerB);
+    finishRequest(new Response(JSON.stringify({ owner: 'owner-a' }), { status: 200 }));
+
+    await expect(oldRequest).rejects.toMatchObject({ name: 'MainaCloudSessionMismatchError' });
+    expect(await getMainaCloudSession()).toEqual(ownerB);
+  });
+
+  it('rejects an in-flight transport failure as a session switch after owner replacement', async () => {
+    const ownerA = {
+      ...validSession,
+      accessToken: 'token-a',
+      scopes: ['recall:read'],
+      user: { ...validSession.user, userId: 'owner-a' },
+    };
+    const ownerB = {
+      ...validSession,
+      accessToken: 'token-b',
+      scopes: ['recall:read'],
+      user: { ...validSession.user, userId: 'owner-b' },
+    };
+    await saveMainaCloudSession(ownerA);
+    const executionContext = pinMainaCloudExecutionContext(ownerA);
+
+    let announceRequestStarted!: () => void;
+    let rejectRequest!: (cause: Error) => void;
+    const requestStarted = new Promise<void>((resolve) => { announceRequestStarted = resolve; });
+    const response = new Promise<Response>((_resolve, reject) => { rejectRequest = reject; });
+    mocks.fetch.mockImplementationOnce(async () => {
+      announceRequestStarted();
+      return response;
+    });
+
+    const oldRequest = mainaCloudRequestJson(
+      '/v1/future-versioned-resource',
+      {},
+      { executionContext },
+    );
+    await requestStarted;
+    await saveMainaCloudSession(ownerB);
+    rejectRequest(new TypeError('synthetic offline transition'));
+
+    await expect(oldRequest).rejects.toMatchObject({ name: 'MainaCloudSessionMismatchError' });
+    expect(await getMainaCloudSession()).toEqual(ownerB);
+  });
+
+  it('does not satisfy an owner-A scope refresh with replacement owner B', async () => {
+    const ownerA = {
+      ...validSession,
+      accessToken: 'token-a',
+      scopes: [],
+      scopesVerifiedAt: null,
+      user: { ...validSession.user, userId: 'owner-a' },
+    };
+    const ownerB = {
+      ...validSession,
+      accessToken: 'token-b',
+      scopes: ['recall:read'],
+      user: { ...validSession.user, userId: 'owner-b' },
+    };
+    await saveMainaCloudSession(ownerA);
+
+    let announceRefreshStarted!: () => void;
+    let finishRefresh!: (response: Response) => void;
+    const refreshStarted = new Promise<void>((resolve) => { announceRefreshStarted = resolve; });
+    const response = new Promise<Response>((resolve) => { finishRefresh = resolve; });
+    mocks.fetch.mockImplementationOnce(async () => {
+      announceRefreshStarted();
+      return response;
+    });
+
+    const scopeRefresh = requireMainaCloudScope('recall:read');
+    await refreshStarted;
+    await saveMainaCloudSession(ownerB);
+    finishRefresh(new Response(JSON.stringify({
+      expires_at: validSession.expiresAt,
+      user: {
+        user_id: 'owner-a',
+        email: 'owner-a@maina.local',
+        scopes: ['recall:read'],
+      },
+    }), { status: 200 }));
+
+    await expect(scopeRefresh).rejects.toMatchObject({ name: 'MainaCloudSessionMismatchError' });
+    expect(await getMainaCloudSession()).toEqual(ownerB);
+  });
+
+  it('rejects an auth/me response whose subject differs from the pinned session owner', async () => {
+    const ownerA = {
+      ...validSession,
+      accessToken: 'token-a',
+      scopes: [],
+      scopesVerifiedAt: null,
+      user: { ...validSession.user, userId: 'owner-a' },
+    };
+    await saveMainaCloudSession(ownerA);
+    mocks.fetch.mockResolvedValueOnce(new Response(JSON.stringify({
+      expires_at: validSession.expiresAt,
+      user: {
+        user_id: 'owner-b',
+        email: 'owner-b@maina.local',
+        scopes: ['recall:read'],
+      },
+    }), { status: 200 }));
+
+    await expect(requireMainaCloudScope('recall:read'))
+      .rejects.toMatchObject({ name: 'MainaCloudSessionMismatchError' });
+    expect(await getMainaCloudSession()).toEqual(ownerA);
+  });
+
   it('does not clear a replacement owner when the pinned request receives 401', async () => {
     const ownerA = {
       ...validSession,
@@ -193,7 +333,7 @@ describe('mainaCloudSession', () => {
     });
 
     await expect(mainaCloudRequestJson('/v1/meeting-tags/mutations', {}, { executionContext }))
-      .rejects.toMatchObject({ status: 401 });
+      .rejects.toMatchObject({ name: 'MainaCloudSessionMismatchError' });
     expect(await getMainaCloudSession()).toEqual(ownerB);
   });
 

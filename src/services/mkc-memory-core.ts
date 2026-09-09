@@ -63,7 +63,15 @@ export function makeMkcMemoryCacheKey(input: {
   return `${encodeURIComponent(owner)}|${input.kind}|${stableScope(input.scope)}`;
 }
 
-export type MkcMemoryFailureKind = 'auth' | 'owner' | 'expired' | 'integrity' | 'offline' | 'invalid' | 'unknown';
+export type MkcMemoryFailureKind =
+  | 'auth'
+  | 'owner'
+  | 'expired'
+  | 'integrity'
+  | 'offline'
+  | 'invalid'
+  | 'session_changed'
+  | 'unknown';
 
 export function classifyMkcMemoryFailure(input: {
   status?: number;

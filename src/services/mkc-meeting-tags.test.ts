@@ -6,6 +6,7 @@ import example from '../../contracts/mkc-meeting-tags/maina-meeting-tags.v1.json
 const mocks = vi.hoisted(() => ({
   request: vi.fn(),
   requireScope: vi.fn(),
+  pinExecutionContext: vi.fn(),
 }));
 
 vi.mock('./mainaCloudSession', () => ({
@@ -17,6 +18,7 @@ vi.mock('./mainaCloudSession', () => ({
   MainaCloudSessionMismatchError: class MainaCloudSessionMismatchError extends Error {},
   MainaCloudScopeError: class MainaCloudScopeError extends Error {},
   mainaCloudRequestJson: mocks.request,
+  pinMainaCloudExecutionContext: mocks.pinExecutionContext,
   requireMainaCloudScope: mocks.requireScope,
 }));
 
@@ -31,11 +33,23 @@ const definitions = {
   schema_version: 'mkc.meeting-tag-definitions.v1',
   definitions: example.definitions,
 };
+const session = {
+  accessToken: 'credential-1',
+  scopes: ['sources:read', 'sources:write'],
+  scopesVerifiedAt: 1,
+  user: { userId: 'owner-1', email: 'owner-1@maina.local' },
+};
+const executionContext = {
+  ownerUserId: 'owner-1',
+  accessToken: 'credential-1',
+  scopesVerifiedAt: 1,
+};
 
 describe('MKC meeting-tags client boundary', () => {
   beforeEach(() => {
     mocks.request.mockReset();
-    mocks.requireScope.mockReset().mockResolvedValue({ user: { userId: 'owner-1' } });
+    mocks.requireScope.mockReset().mockResolvedValue(session);
+    mocks.pinExecutionContext.mockReset().mockReturnValue(executionContext);
   });
 
   it('is default-off before scope or transport access', async () => {
@@ -50,7 +64,11 @@ describe('MKC meeting-tags client boundary', () => {
     mocks.request.mockResolvedValue({ status: 200, ok: true, data: definitions });
     await expect(listMkcMeetingTags({ enabled: true })).resolves.toEqual(definitions);
     expect(mocks.requireScope).toHaveBeenCalledWith('sources:read');
-    expect(mocks.request).toHaveBeenCalledWith('/v1/meeting-tags', expect.objectContaining({ method: 'GET' }));
+    expect(mocks.request).toHaveBeenCalledWith(
+      '/v1/meeting-tags',
+      expect.objectContaining({ method: 'GET' }),
+      { executionContext },
+    );
 
     mocks.request.mockResolvedValue({ status: 200, ok: true, data: { ...definitions, private_owner: 'leak' } });
     await expect(listMkcMeetingTags({ enabled: true })).rejects.toEqual(expect.objectContaining({
@@ -66,6 +84,7 @@ describe('MKC meeting-tags client boundary', () => {
     expect(mocks.request).toHaveBeenCalledWith(
       `/v1/meetings/${encodeURIComponent(example.meeting_tag_state.source_key)}/tags`,
       expect.objectContaining({ method: 'GET' }),
+      { executionContext },
     );
 
     mocks.request.mockResolvedValue({
@@ -92,7 +111,7 @@ describe('MKC meeting-tags client boundary', () => {
     expect(mocks.request).toHaveBeenCalledWith('/v1/meeting-tags/mutations', expect.objectContaining({
       method: 'POST',
       body: JSON.stringify(example.remove_request),
-    }));
+    }), { executionContext });
 
     mocks.request.mockClear();
     mocks.requireScope.mockClear();
@@ -107,9 +126,11 @@ describe('MKC meeting-tags client boundary', () => {
     mocks.request.mockResolvedValue({ status: 200, ok: true, data: definitions });
     await listMkcMeetingTags({ enabled: true, signal: controller.signal });
     expect(mocks.request).toHaveBeenCalledTimes(1);
-    expect(mocks.request).toHaveBeenCalledWith('/v1/meeting-tags', expect.objectContaining({
-      signal: controller.signal,
-    }));
+    expect(mocks.request).toHaveBeenCalledWith(
+      '/v1/meeting-tags',
+      expect.objectContaining({ signal: controller.signal }),
+      { executionContext },
+    );
   });
 
   it('fails before transport when the exact mobile scope is unavailable', async () => {
