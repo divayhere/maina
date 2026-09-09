@@ -58,6 +58,7 @@ if (stop && ui) {
   for (const token of [
     'authorizeMicrophoneIfPresented()',
     'XCUIApplication(bundleIdentifier: "com.apple.springboard")',
+    'alert.staticTexts["“Maina” would like to access the Microphone."]',
     'alert.buttons["Allow"]',
     'waitForDurablePostRecordingState(timeout:',
     'let home = app.staticTexts["RECENT"]',
@@ -70,6 +71,13 @@ if (stop && ui) {
   }
   if (ui.includes("label CONTAINS[c] 'Recent' OR label CONTAINS[c] 'recording'")) {
     throw new Error('iOS UI test still uses the stale post-recording substring oracle.');
+  }
+  const permissionHelper = ui.slice(
+    ui.indexOf('private func authorizeMicrophoneIfPresented()'),
+    ui.indexOf('private func waitForDurablePostRecordingState'),
+  );
+  if (permissionHelper.indexOf('“Maina” would like to access the Microphone.') > permissionHelper.indexOf('alert.buttons["Allow"]')) {
+    throw new Error('iOS UI test can accept an Allow action before proving the exact microphone alert.');
   }
 }
 
