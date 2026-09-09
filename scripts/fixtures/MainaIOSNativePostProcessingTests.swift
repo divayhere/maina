@@ -576,6 +576,45 @@ private func run() throws {
   expect(stitchedBlocks?.first?["text"] as? String == "continues safely",
     "coordinator removes exact overlap before the durable window commit")
 
+  let releaseCoordinatorURL = root.appendingPathComponent("coordinator-release.sqlite3")
+  let releaseCoordinatorStore = try MainaNativePostProcessingStore(
+    databaseURL: releaseCoordinatorURL,
+    processInstanceToken: "coordinator-release-process"
+  )
+  let releaseFake = FakeNativePostProcessingTranscriber()
+  var releaseRecognizerCount = 0
+  let releaseCoordinator = MainaNativePostProcessingCoordinator(
+    store: releaseCoordinatorStore,
+    transcribe: releaseFake.transcribe,
+    releaseRecognizer: { releaseRecognizerCount += 1 },
+    onChanged: { _ in }
+  )
+  let releaseCoordinatorStart = makeStart(
+    meeting: "meeting-coordinator-release",
+    run: "run-coordinator-release",
+    token: "runtime-coordinator-release"
+  )
+  let releaseStartSignal = DispatchSemaphore(value: 0)
+  releaseCoordinator.start(releaseCoordinatorStart) { _ in releaseStartSignal.signal() }
+  expect(releaseStartSignal.wait(timeout: .now() + 2) == .success,
+    "release coordinator start completes")
+  waitUntil("release coordinator owns one decoder callback") { releaseFake.pendingCount == 1 }
+  expect(try releaseCoordinator.releaseAsr(
+    runtimeOwnerToken: "runtime-coordinator-release",
+    generation: 1
+  ), "continued-processing expiration releases the exact runtime")
+  expect(releaseRecognizerCount == 1, "continued-processing expiration releases one recognizer")
+  releaseFake.completeNext(.failure(.runtimeInterrupted))
+  waitUntil("released stale callback drains") { releaseFake.pendingCount == 0 }
+  Thread.sleep(forTimeInterval: 0.05)
+  expect(releaseFake.pendingCount == 0,
+    "expiration cannot restart ASR without a later explicit wake")
+  let explicitWake = DispatchSemaphore(value: 0)
+  releaseCoordinator.start(releaseCoordinatorStart) { _ in explicitWake.signal() }
+  expect(explicitWake.wait(timeout: .now() + 2) == .success,
+    "explicit wake reopens the durable generation")
+  waitUntil("explicit wake resumes the first incomplete window") { releaseFake.pendingCount == 1 }
+
   let adapterClaim = MainaNativePostProcessingClaim(
     ownerUserId: "owner-a", meetingId: "meeting-adapter", runId: "run-adapter", generation: 1,
     windowKey: "window-adapter", windowIndex: 0,

@@ -1,9 +1,14 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  buildIOSNativePostProcessingImportFence,
+  buildIOSNativePostProcessingStartRequest,
   decodeIOSNativePostProcessingResult,
+  deriveIOSNativeImportCommitSha256,
+  deriveIOSNativePostProcessingExecutionIdentity,
   deriveNativeTranscriptOutcome,
   nativeProgress,
+  sha256Utf8,
   shouldImportNativePostProcessingResult,
   shouldRepairNativeTranscriptStatus,
 } from './nativePostProcessingCore';
@@ -67,6 +72,68 @@ function completeNativeResult(): Record<string, unknown> {
 }
 
 describe('native transcript truth model', () => {
+  it('derives standard SHA-256 vectors and stable owner-bound execution identities', () => {
+    expect(sha256Utf8('')).toBe('e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855');
+    expect(sha256Utf8('abc')).toBe('ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad');
+    const identity = deriveIOSNativePostProcessingExecutionIdentity('owner-a', 'meeting-a');
+    expect(identity).toEqual(deriveIOSNativePostProcessingExecutionIdentity('owner-a', 'meeting-a'));
+    expect(identity.runId).toMatch(/^iosnpr_[a-f0-9]{32}$/);
+    expect(identity.runtimeOwnerToken).toMatch(/^iosruntime_[a-f0-9]{32}$/);
+    expect(deriveIOSNativePostProcessingExecutionIdentity('owner-b', 'meeting-a').runId)
+      .not.toBe(identity.runId);
+    expect(() => deriveIOSNativePostProcessingExecutionIdentity('owner/a', 'meeting-a')).toThrow('identity is invalid');
+  });
+
+  it('seals exact post-commit import evidence deterministically', () => {
+    const evidence = {
+      ownerUserId: 'owner-a', meetingId: 'meeting-a', runId: 'run-a', generation: 1,
+      resultId: `npr_${'a'.repeat(32)}`, resultPayloadSha256: 'b'.repeat(64),
+      importedAtMs: 1_788_000_000_000, durationMs: 20_000, segmentCount: 1,
+      windowCount: 2, completedWindows: 2, failedWindows: 0, blockCount: 2,
+    };
+    const digest = deriveIOSNativeImportCommitSha256(evidence);
+    expect(digest).toMatch(/^[a-f0-9]{64}$/);
+    expect(deriveIOSNativeImportCommitSha256(evidence)).toBe(digest);
+    expect(deriveIOSNativeImportCommitSha256({ ...evidence, blockCount: 1 })).not.toBe(digest);
+  });
+
+  it('builds one exact native start and a closed post-commit acknowledgement fence', () => {
+    const start = buildIOSNativePostProcessingStartRequest({
+      ownerUserId: 'owner-a',
+      meetingId: 'meeting-a',
+      audioFingerprintSha256: 'b'.repeat(64),
+    });
+    expect(start).toEqual({
+      ...deriveIOSNativePostProcessingExecutionIdentity('owner-a', 'meeting-a'),
+      audioFingerprintSha256: 'b'.repeat(64),
+      windowConfig: { targetWindowMs: 15_000, analysisOverlapMs: 2_000, maxAttempts: 2 },
+    });
+    expect(() => buildIOSNativePostProcessingStartRequest({
+      ownerUserId: 'owner-a', meetingId: 'meeting-a', audioFingerprintSha256: 'not-a-digest',
+    })).toThrow('fingerprint is invalid');
+
+    const decoded = decodeIOSNativePostProcessingResult(completeNativeResult(), nativeResultIdentity);
+    const fence = buildIOSNativePostProcessingImportFence(decoded, {
+      importedAt: '2026-09-09T01:02:03.004Z',
+      transactionCommitSha256: 'f'.repeat(64),
+    });
+    expect(fence).toEqual({
+      schemaVersion: 'maina.native-post-processing-import-fence.v1',
+      state: 'DURABLE',
+      ownerUserId: 'owner-a',
+      meetingId: 'meeting-a',
+      runId: 'run-a',
+      generation: 1,
+      resultId: `npr_${'a'.repeat(32)}`,
+      resultPayloadSha256: 'e'.repeat(64),
+      importedAt: '2026-09-09T01:02:03.004Z',
+      transactionCommitSha256: 'f'.repeat(64),
+    });
+    expect(() => buildIOSNativePostProcessingImportFence(decoded, {
+      importedAt: 'not-a-time', transactionCommitSha256: 'f'.repeat(64),
+    })).toThrow('import fence is invalid');
+  });
+
   it('accepts only an exact owner-bound complete native result partition', () => {
     const decoded = decodeIOSNativePostProcessingResult(completeNativeResult(), nativeResultIdentity);
     expect(decoded.disposition).toBe('complete');
@@ -87,8 +154,8 @@ describe('native transcript truth model', () => {
 
   it('rejects coverage gaps and internally inconsistent completeness', () => {
     const gap = completeNativeResult();
-    (gap.windows as Array<Record<string, unknown>>)[1] = {
-      ...(gap.windows as Array<Record<string, unknown>>)[1], coverageStartMs: 10_001,
+    (gap.windows as Record<string, unknown>[])[1] = {
+      ...(gap.windows as Record<string, unknown>[])[1], coverageStartMs: 10_001,
     };
     expect(() => decodeIOSNativePostProcessingResult(gap, nativeResultIdentity))
       .toThrow('contract mismatch');
@@ -105,7 +172,7 @@ describe('native transcript truth model', () => {
   it('accepts a partial result only when its failed interval is exact', () => {
     const partial = completeNativeResult();
     partial.disposition = 'partial';
-    const windows = partial.windows as Array<Record<string, unknown>>;
+    const windows = partial.windows as Record<string, unknown>[];
     windows[1] = {
       ...windows[1], status: 'failed', blocks: [],
       retry: { attemptCount: 2, maxAttempts: 2, lastReasonCode: 'AUDIO_UNREADABLE' },
@@ -121,7 +188,7 @@ describe('native transcript truth model', () => {
     expect(decodeIOSNativePostProcessingResult(partial, nativeResultIdentity).disposition)
       .toBe('partial');
 
-    (partial.unresolvedIntervals as Array<Record<string, unknown>>)[0].startMs = 9_999;
+    (partial.unresolvedIntervals as Record<string, unknown>[])[0].startMs = 9_999;
     expect(() => decodeIOSNativePostProcessingResult(partial, nativeResultIdentity))
       .toThrow('contract mismatch');
   });

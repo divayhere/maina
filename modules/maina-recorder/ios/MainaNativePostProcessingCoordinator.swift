@@ -483,15 +483,24 @@ final class MainaNativePostProcessingCoordinator {
   }
 
   func releaseAsr(runtimeOwnerToken: String, generation: Int) throws -> Bool {
-    let released = try store.releaseRuntime(runtimeOwnerToken: runtimeOwnerToken, generation: generation)
-    if released {
-      releaseRecognizer()
-      queue.async {
-        self.emitAllChanged()
-        self.drainAll()
+    try queue.sync {
+      let released = try store.releaseRuntime(
+        runtimeOwnerToken: runtimeOwnerToken,
+        generation: generation
+      )
+      guard released else { return false }
+      // Continued-processing expiration is not itself a new wake. Remove the
+      // in-memory start owner before the stale decoder callback returns, so
+      // finish() cannot immediately reclaim the runtime that was just
+      // released. The next explicit foreground/background wake re-adds the
+      // same immutable start identity and resumes from the WAL.
+      knownStarts = knownStarts.filter { _, input in
+        input.runtimeOwnerToken != runtimeOwnerToken || input.generation != generation
       }
+      releaseRecognizer()
+      emitAllChanged()
+      return true
     }
-    return released
   }
 
   private func drainAll() {

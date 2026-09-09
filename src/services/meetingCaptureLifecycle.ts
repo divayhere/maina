@@ -1,7 +1,7 @@
 import {
   getMeeting,
-  deferLocalAsrRunGeneration,
   getTranscriptSummary,
+  importIOSNativePostProcessingResult,
   importNativePostProcessingResult,
   listMeetings,
   updateMeeting,
@@ -20,14 +20,18 @@ import {
 import { hasCompleteNativeTranscript, terminalNativeMeetingRepair } from '@/core/recording/nativeCaptureReconciliation';
 import {
   acknowledgeNativePostProcessingResult,
+  acknowledgeIOSNativePostProcessingResult,
   acknowledgeIOSContinuedProcessingDeferral,
   beginIOSContinuedProcessing,
   bindIOSContinuedProcessingRun,
   finishIOSContinuedProcessing,
   getNativeCaptureStatusAsync,
   isNativePostProcessingServiceRunning,
-  isIOSContinuedProcessingActive,
+  prepareIOSNativePostProcessingAudio,
+  readIOSNativePostProcessingResult,
   readNativePostProcessingResult,
+  releaseIOSNativePostProcessingAsr,
+  startIOSNativePostProcessing,
   startNativePostProcessing,
   subscribeIOSPostProcessingDeferralRequests,
   updateIOSContinuedProcessing,
@@ -36,36 +40,46 @@ import { log } from '@/services/logger';
 import { cleanupTerminalMeetingAudio } from '@/services/audioRetention';
 import { notifyMeetingPipelineChanged } from '@/services/meetingPipelineSignals';
 import { getNativeCaptureMetrics } from '@/services/nativeCaptureMetrics';
-import { runLocalAsrPipeline } from '@/services/localAsrPipeline';
 import { drainMeetingPacketUntilSettled, maybeQueueMeetingPacket } from '@/services/meetingPacket';
 import { reconcilePendingMainaKnowledgeCloudSyncs } from '@/services/mainaKnowledgeCloud';
 import {
-  IOS_ASR_MAX_RECOVERY_ROUNDS,
-  iosAsrRetryDelayMs,
-} from '@/services/iosAsrRecoveryPolicy';
-import {
-  isTerminalPartialTranscript,
-  TERMINAL_PARTIAL_RECOVERY_ROUNDS,
-} from '@/services/transcriptCoverage';
+  buildIOSNativePostProcessingImportFence,
+  buildIOSNativePostProcessingStartRequest,
+  deriveIOSNativePostProcessingExecutionIdentity,
+  nativeProgress,
+  type IOSNativePostProcessingExecutionIdentity,
+} from '@/services/nativePostProcessingCore';
+import { getMainaCloudSession } from '@/services/mainaCloudSession';
+import { TERMINAL_PARTIAL_RECOVERY_ROUNDS } from '@/services/transcriptCoverage';
 
 // Multiple foreground triggers (launch, resume, the meeting screen, and the
 // short foreground poll) can arrive together. Serialize them so only one
 // Expo-SQLite import ever observes a completed native outbox run at a time.
 let nativeReconciliationInFlight: Promise<number> | null = null;
 const iosPostProcessingOwner = createKeyedExecutionOwner<string, boolean>();
-const iosPostProcessingRetryTimers = new Map<string, ReturnType<typeof setTimeout>>();
-type IOSPostProcessingHandle = IOSContinuedProcessingHandleState;
+type IOSPostProcessingHandle = IOSContinuedProcessingHandleState & {
+  runtimeOwnerToken: string;
+};
 const iosPostProcessingHandles = new Map<string, IOSPostProcessingHandle>();
+const iosPostProcessingHandleByMeeting = new Map<string, string>();
 
 const handleIOSPostProcessingDeferral = createIOSContinuedProcessingDeferralHandler({
-  fenceGeneration: (event) => deferLocalAsrRunGeneration(event.meetingId, event.asrGeneration),
+  fenceGeneration: (event) => {
+    const handle = iosPostProcessingHandles.get(event.requestId);
+    if (!handle || handle.meetingId !== event.meetingId
+      || handle.asrGeneration !== event.asrGeneration) return Promise.resolve(false);
+    return releaseIOSNativePostProcessingAsr(
+      handle.runtimeOwnerToken,
+      event.asrGeneration,
+    );
+  },
   markStageDeferred: (event) => updateMeetingPipelineStage({
     meetingId: event.meetingId,
     stage: 'asr',
     state: 'deferred',
     error: 'Local transcription paused safely. Maina will continue automatically.',
     metadata: {
-      executionOwner: 'ios-js-resumable',
+      executionOwner: 'ios-native-durable',
       asrGeneration: event.asrGeneration,
       deferredBy: 'ios-continued-processing-expiration',
     },
@@ -85,36 +99,125 @@ const handleIOSPostProcessingDeferral = createIOSContinuedProcessingDeferralHand
   },
 });
 
-// Native expiration is a request to stop owning new work, not permission to
-// discard an in-flight decoder callback. Fence the exact SQLite generation;
-// localAsrPipeline rechecks ownership after decode and before every commit.
+function removeIOSPostProcessingHandle(handle: IOSPostProcessingHandle, success: boolean): void {
+  if (iosPostProcessingHandles.get(handle.requestId) !== handle) return;
+  iosPostProcessingHandles.delete(handle.requestId);
+  if (iosPostProcessingHandleByMeeting.get(handle.meetingId) === handle.requestId) {
+    iosPostProcessingHandleByMeeting.delete(handle.meetingId);
+  }
+  finishIOSContinuedProcessing(handle.requestId, success);
+}
+
+// Native expiration releases only the exact recognizer claim. The WAL,
+// immutable audio, checkpoints, and any terminal result remain available for
+// the next public wake; the callback cannot carry result authority.
 subscribeIOSPostProcessingDeferralRequests((event) => {
   const handle = iosPostProcessingHandles.get(event.requestId);
-  void handleIOSPostProcessingDeferral(handle, event);
+  void handleIOSPostProcessingDeferral(handle, event).then((disposition) => {
+    if (handle && disposition !== 'identity_mismatch') {
+      // acknowledgeIOSContinuedProcessingDeferral already balances the OS
+      // task. Remove only the JS registry entry without completing it twice.
+      iosPostProcessingHandles.delete(handle.requestId);
+      if (iosPostProcessingHandleByMeeting.get(handle.meetingId) === handle.requestId) {
+        iosPostProcessingHandleByMeeting.delete(handle.meetingId);
+      }
+    }
+  });
 });
 
-function scheduleIOSPostProcessingRetry(meetingId: string, recoveryRounds: number): void {
-  const existing = iosPostProcessingRetryTimers.get(meetingId);
-  if (existing) clearTimeout(existing);
-  const delayMs = iosAsrRetryDelayMs(recoveryRounds);
-  if (delayMs == null || delayMs <= 0) {
-    iosPostProcessingRetryTimers.delete(meetingId);
-    return;
+function activeIOSPostProcessingHandle(meetingId: string): IOSPostProcessingHandle | null {
+  const requestId = iosPostProcessingHandleByMeeting.get(meetingId);
+  if (!requestId) return null;
+  return iosPostProcessingHandles.get(requestId) ?? null;
+}
+
+async function finishIOSNativePostProcessingResult(
+  meeting: Meeting,
+  identity: IOSNativePostProcessingExecutionIdentity,
+): Promise<'absent' | 'retained' | 'acknowledged'> {
+  const result = await readIOSNativePostProcessingResult(identity);
+  if (!result) return 'absent';
+
+  const durableImport = await importIOSNativePostProcessingResult(result);
+  if (!durableImport) return 'retained';
+  const fence = buildIOSNativePostProcessingImportFence(result, durableImport);
+  const acknowledged = await acknowledgeIOSNativePostProcessingResult(fence).catch((cause) => {
+    log.warn('recovery', 'iOS native result acknowledgement remains durable', {
+      meetingId: meeting.id,
+      causeName: cause instanceof Error ? cause.name : typeof cause,
+    });
+    return false;
+  });
+  const progress = nativeProgress(result.coverage);
+  const hasText = result.windows.some((window) => window.blocks.length > 0);
+  await updateMeetingPipelineStage({
+    meetingId: meeting.id,
+    stage: 'asr',
+    state: 'ready',
+    completedUnits: progress.completed,
+    totalUnits: progress.total,
+    error: result.disposition === 'partial'
+      ? 'Some audio could not be transcribed. The audio was kept for recovery.'
+      : null,
+    metadata: {
+      runId: result.identity.runId,
+      executionOwner: 'ios-native-durable',
+      partialCoverage: result.disposition === 'partial',
+      failedWindows: result.coverage.failedWindows,
+    },
+  });
+  await updateMeetingPipelineStage({
+    meetingId: meeting.id,
+    stage: 'transcript_durable',
+    state: hasText ? 'ready' : 'failed',
+    completedUnits: result.coverage.completedWindows,
+    totalUnits: result.coverage.windowCount,
+    error: hasText ? null : 'Local transcription produced no text. The audio was kept for recovery.',
+    metadata: {
+      runId: result.identity.runId,
+      blocks: result.windows.reduce((sum, window) => sum + window.blocks.length, 0),
+      partialCoverage: result.disposition === 'partial',
+    },
+  });
+
+  const handle = activeIOSPostProcessingHandle(meeting.id);
+  if (handle) {
+    updateIOSContinuedProcessing(handle.requestId, progress.completed, progress.total);
+    removeIOSPostProcessingHandle(handle, true);
   }
-  const timer = setTimeout(() => {
-    iosPostProcessingRetryTimers.delete(meetingId);
-    void getMeeting(meetingId).then((current) => {
-      if (!current?.audioUri || current.status !== 'transcript_partial') return;
-      if (current.transcriptionRecoveryRounds !== recoveryRounds) return;
-      void launchIOSPostProcessing(current);
-    }).catch((cause) => {
-      log.warn('recovery', 'iOS delayed transcription retry deferred to durable OS wake', {
-        meetingId,
+  if (hasText) {
+    await maybeQueueMeetingPacket(meeting.id).catch((cause) => {
+      log.warn('summary', 'iOS packet queue remains durable', {
+        meetingId: meeting.id,
         causeName: cause instanceof Error ? cause.name : typeof cause,
       });
     });
-  }, delayMs);
-  iosPostProcessingRetryTimers.set(meetingId, timer);
+    await drainMeetingPacketUntilSettled(meeting.id).catch((cause) => {
+      log.warn('summary', 'iOS bounded packet drain deferred', {
+        meetingId: meeting.id,
+        causeName: cause instanceof Error ? cause.name : typeof cause,
+      });
+    });
+    await reconcilePendingMainaKnowledgeCloudSyncs().catch((cause) => {
+      log.warn('maina-cloud', 'iOS bounded source drain deferred', {
+        meetingId: meeting.id,
+        causeName: cause instanceof Error ? cause.name : typeof cause,
+      });
+    });
+  }
+  if (acknowledged && result.disposition === 'complete') {
+    await cleanupTerminalMeetingAudio(meeting.id);
+  }
+  notifyMeetingPipelineChanged(meeting.id);
+  log.info('recovery', 'iOS native post-processing reached durable import boundary', {
+    meetingId: meeting.id,
+    runId: result.identity.runId,
+    disposition: result.disposition,
+    acknowledged,
+    completedWindows: result.coverage.completedWindows,
+    failedWindows: result.coverage.failedWindows,
+  });
+  return acknowledged ? 'acknowledged' : 'retained';
 }
 
 /**
@@ -124,123 +227,67 @@ function scheduleIOSPostProcessingRetry(meetingId: string, recoveryRounds: numbe
  */
 async function launchIOSPostProcessing(meeting: Meeting): Promise<boolean> {
   if (!meeting.audioUri) return false;
+  const audioDirectory = meeting.audioUri;
   return iosPostProcessingOwner.run(meeting.id, async () => {
-    await updateMeetingPipelineStage({
-      meetingId: meeting.id,
-      stage: 'asr',
-      state: 'running',
-      error: null,
-    });
-    const continuedRequest = beginIOSContinuedProcessing(
-      meeting.id,
-      Math.max(1, meeting.transcriptionWindowCount),
-    );
-    const continuedHandle: IOSPostProcessingHandle | null = continuedRequest?.requestId
-      ? {
-        requestId: continuedRequest.requestId,
-        meetingId: meeting.id,
-        asrGeneration: null,
-        deferralRequested: false,
-      }
-      : null;
-    if (continuedHandle) iosPostProcessingHandles.set(continuedHandle.requestId, continuedHandle);
-    let terminal = false;
+    let continuedHandle = activeIOSPostProcessingHandle(meeting.id);
     try {
-      const runPass = () => runLocalAsrPipeline({
+      const session = await getMainaCloudSession();
+      if (!session) throw new Error('authenticated_owner_unavailable');
+      const audio = await prepareIOSNativePostProcessingAudio(meeting.id, audioDirectory);
+      const request = buildIOSNativePostProcessingStartRequest({
+        ownerUserId: session.user.userId,
         meetingId: meeting.id,
-        directory: meeting.audioUri!,
-        meetingStartedAt: meeting.startedAt,
-        recoverPartials: true,
-        resetTranscript: false,
-        onRunClaim: (claim) => {
-          if (!continuedHandle) return;
-          continuedHandle.asrGeneration = claim.generation;
+        audioFingerprintSha256: audio.audioFingerprintSha256,
+      });
+      const totalUnits = Math.max(1, Math.ceil(audio.audioDurationMs / request.windowConfig.targetWindowMs));
+      if (!continuedHandle) {
+        const continuedRequest = beginIOSContinuedProcessing(meeting.id, totalUnits);
+        if (continuedRequest?.requestId) {
+          continuedHandle = {
+            requestId: continuedRequest.requestId,
+            meetingId: meeting.id,
+            asrGeneration: request.generation,
+            deferralRequested: false,
+            runtimeOwnerToken: request.runtimeOwnerToken,
+          };
+          iosPostProcessingHandles.set(continuedHandle.requestId, continuedHandle);
+          iosPostProcessingHandleByMeeting.set(meeting.id, continuedHandle.requestId);
           if (!bindIOSContinuedProcessingRun(
             continuedHandle.requestId,
             meeting.id,
-            claim.generation,
+            request.generation,
           )) {
-            continuedHandle.deferralRequested = true;
+            removeIOSPostProcessingHandle(continuedHandle, false);
+            continuedHandle = null;
+            throw new Error('continued_processing_bind_failed');
           }
-        },
-        onProgress: (completed, total) => {
-          if (continuedHandle) {
-            updateIOSContinuedProcessing(continuedHandle.requestId, completed, total);
-          }
-        },
-        isExecutionActive: () => !continuedHandle?.deferralRequested
-          && isIOSContinuedProcessingActive(continuedHandle?.requestId ?? '', meeting.id),
-      });
-      const firstResult = await runPass();
-      const result = firstResult.coverageComplete ? firstResult : await runPass();
-      const recoveryRounds = result.coverageComplete
-        ? meeting.transcriptionRecoveryRounds
-        : Math.min(IOS_ASR_MAX_RECOVERY_ROUNDS, meeting.transcriptionRecoveryRounds + 1);
-      await updateMeeting(meeting.id, { transcriptionRecoveryRounds: recoveryRounds });
-      if (result.coverageComplete) {
-        const timer = iosPostProcessingRetryTimers.get(meeting.id);
-        if (timer) clearTimeout(timer);
-        iosPostProcessingRetryTimers.delete(meeting.id);
-      } else {
-        scheduleIOSPostProcessingRetry(meeting.id, recoveryRounds);
+        }
       }
-      const refreshedMeeting = await getMeeting(meeting.id);
-      const terminalPartial = Boolean(refreshedMeeting && isTerminalPartialTranscript(refreshedMeeting));
-      terminal = result.coverageComplete || terminalPartial;
+      const outcome = await startIOSNativePostProcessing(request, audioDirectory);
       await updateMeetingPipelineStage({
         meetingId: meeting.id,
         stage: 'asr',
-        state: terminal ? 'ready' : 'deferred',
-        completedUnits: result.completedWindows,
-        totalUnits: result.windowCount,
-        error: result.lastError,
+        state: 'running',
+        completedUnits: 0,
+        totalUnits,
+        error: null,
         metadata: {
-          completedWindows: result.completedWindows,
-          failedWindows: result.failedWindows,
-          recoveredChunks: result.recoveredChunks,
-          executionOwner: 'ios-js-resumable',
-          recoveryRounds,
+          runId: request.runId,
+          generation: request.generation,
+          executionOwner: 'ios-native-durable',
+          resumed: outcome.resumed,
         },
       });
-      await updateMeetingPipelineStage({
-        meetingId: meeting.id,
-        stage: 'transcript_durable',
-        state: terminal && result.hasText ? 'ready' : 'deferred',
-        completedUnits: result.completedWindows,
-        totalUnits: result.windowCount,
-        error: result.lastError,
-        metadata: { blocks: result.blockCount, words: result.wordCount },
-      });
-      if (terminal && result.hasText) {
-        await maybeQueueMeetingPacket(meeting.id).catch((cause) => {
-          log.warn('summary', 'iOS packet queue remains durable', {
-            meetingId: meeting.id,
-            causeName: cause instanceof Error ? cause.name : typeof cause,
-          });
-        });
-        await drainMeetingPacketUntilSettled(meeting.id).catch((cause) => {
-          log.warn('summary', 'iOS bounded packet drain deferred', {
-            meetingId: meeting.id,
-            causeName: cause instanceof Error ? cause.name : typeof cause,
-          });
-        });
-        await reconcilePendingMainaKnowledgeCloudSyncs().catch((cause) => {
-          log.warn('maina-cloud', 'iOS bounded source drain deferred', {
-            meetingId: meeting.id,
-            causeName: cause instanceof Error ? cause.name : typeof cause,
-          });
-        });
-        if (result.coverageComplete) await cleanupTerminalMeetingAudio(meeting.id);
-      }
+      if (continuedHandle) updateIOSContinuedProcessing(continuedHandle.requestId, 0, totalUnits);
+      await finishIOSNativePostProcessingResult(meeting, request);
       notifyMeetingPipelineChanged(meeting.id);
-      log.info('recovery', 'iOS local post-processing reached durable boundary', {
+      log.info('recovery', 'iOS native post-processing accepted durable audio', {
         meetingId: meeting.id,
-        terminal,
-        coverageComplete: result.coverageComplete,
-        completedWindows: result.completedWindows,
-        failedWindows: result.failedWindows,
+        runId: request.runId,
+        resumed: outcome.resumed,
+        state: outcome.state,
       });
-      return terminal;
+      return true;
     } catch (cause) {
       const safeError = 'Local transcription paused safely. Maina will continue automatically.';
       await updateMeeting(meeting.id, { status: 'transcribing', lastError: safeError });
@@ -254,12 +301,8 @@ async function launchIOSPostProcessing(meeting: Meeting): Promise<boolean> {
         meetingId: meeting.id,
         causeName: cause instanceof Error ? cause.name : typeof cause,
       });
+      if (continuedHandle) removeIOSPostProcessingHandle(continuedHandle, false);
       return false;
-    } finally {
-      if (continuedHandle) {
-        finishIOSContinuedProcessing(continuedHandle.requestId, terminal);
-        iosPostProcessingHandles.delete(continuedHandle.requestId);
-      }
     }
   });
 }
@@ -397,6 +440,42 @@ async function reconcilePendingNativeMeetingWorkInternal(): Promise<number> {
   let resumed = 0;
 
   for (const meeting of meetings) {
+    if (Platform.OS === 'ios') {
+      const session = await getMainaCloudSession().catch(() => null);
+      if (!session) continue;
+      let identity: IOSNativePostProcessingExecutionIdentity;
+      try {
+        identity = deriveIOSNativePostProcessingExecutionIdentity(session.user.userId, meeting.id);
+      } catch {
+        continue;
+      }
+      const terminal = await finishIOSNativePostProcessingResult(meeting, identity).catch((cause) => {
+        log.warn('recovery', 'iOS native result remains retained for reconciliation', {
+          meetingId: meeting.id,
+          causeName: cause instanceof Error ? cause.name : typeof cause,
+        });
+        return 'retained' as const;
+      });
+      if (terminal !== 'absent') continue;
+      // A crash after acknowledgement but before UI notification is safe: the
+      // Expo row proves this exact owner/run already imported, so never reopen
+      // a second ASR generation just because the native result was deleted.
+      if (meeting.nativePostprocessRunId === identity.runId
+        && Number.isSafeInteger(meeting.nativePostprocessImportedAt)
+        && (meeting.nativePostprocessImportedAt ?? 0) > 0) continue;
+
+      const isLiveNativeMeeting = nativeStatus?.meetingId === meeting.id
+        && nativeStatus.state !== 'idle'
+        && nativeStatus.state !== 'error';
+      if (isLiveNativeMeeting || !meeting.audioUri) continue;
+      if (meeting.status === 'recording'
+        || meeting.status === 'transcribing'
+        || meeting.status === 'transcript_partial') {
+        if (await launchIOSPostProcessing(meeting)) resumed += 1;
+      }
+      continue;
+    }
+
     const nativeResult = await readNativePostProcessingResult(meeting.id).catch((cause) => {
       log.warn('recovery', 'native post-processing outbox read failed', {
         meetingId: meeting.id,

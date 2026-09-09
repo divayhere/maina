@@ -8,9 +8,11 @@ import { log } from '../services/logger';
 import { splitTranscriptChunks, transcriptWordCount } from '../core/transcription/transcript';
 import { normalizeNativeBlockTimeline } from '../core/transcription/nativeBlockTiming';
 import {
+  deriveIOSNativeImportCommitSha256,
   deriveNativeTranscriptOutcome,
   shouldImportNativePostProcessingResult,
   shouldRepairNativeTranscriptStatus,
+  type IOSNativePostProcessingResult,
 } from '../services/nativePostProcessingCore';
 import { didTranscriptCoverageImprove } from '../services/transcriptCoverage';
 import { deriveStageTransition } from '../core/pipeline/stageState';
@@ -2014,6 +2016,155 @@ export async function importNativePostProcessingResult(input: {
     }),
   });
   return 'imported';
+}
+
+export type IOSNativePostProcessingDurableImport = {
+  importedAt: string;
+  transactionCommitSha256: string;
+};
+
+/**
+ * Imports a closed iOS native result, then rereads the committed Expo database
+ * state before returning an acknowledgement fence. The native WAL remains
+ * intact if the transaction rolls back, the process dies before readback, or
+ * any persisted run/counter/block differs from the exact sealed result.
+ */
+export async function importIOSNativePostProcessingResult(
+  result: IOSNativePostProcessingResult,
+): Promise<IOSNativePostProcessingDurableImport | null> {
+  const db = await getDb();
+  const meeting = await db.getFirstAsync<{
+    id: string;
+    started_at: number;
+    capture_ended_at: number | null;
+    restart_count: number;
+  }>(
+    'SELECT id, started_at, capture_ended_at, restart_count FROM meetings WHERE id = ?',
+    [result.identity.meetingId],
+  );
+  if (!meeting) return null;
+
+  const blocks = result.windows.flatMap((window) => window.blocks).map((block) => ({
+    sequence: block.sequence,
+    segmentIndex: null,
+    startedAt: meeting.started_at + block.startedAtMs,
+    endedAt: meeting.started_at + block.endedAtMs,
+    language: block.language,
+    text: block.text,
+  }));
+  const partialError = result.disposition === 'partial'
+    ? 'Some audio could not be transcribed. The audio was kept for recovery.'
+    : null;
+  const processedSegments = result.disposition === 'complete' ? result.audio.segmentCount : 0;
+  await importNativePostProcessingResult({
+    meetingId: result.identity.meetingId,
+    runId: result.identity.runId,
+    captureEndedAt: meeting.capture_ended_at,
+    durationMs: result.audio.durationMs,
+    audioDurationMs: result.audio.durationMs,
+    segmentCount: result.audio.segmentCount,
+    processedSegments,
+    windowCount: result.coverage.windowCount,
+    completedWindows: result.coverage.completedWindows,
+    failedWindows: result.coverage.failedWindows,
+    recoveryRounds: 0,
+    routeRestartCount: Math.max(0, meeting.restart_count),
+    lastError: partialError,
+    captureTerminal: true,
+    blocks,
+  });
+
+  const committed = await db.getFirstAsync<{
+    status: MeetingStatus;
+    duration_ms: number;
+    audio_duration_ms: number;
+    segment_count: number;
+    transcribed_segments: number;
+    transcription_window_count: number;
+    transcription_completed_windows: number;
+    transcription_failed_windows: number;
+    native_postprocess_run_id: string | null;
+    native_postprocess_imported_at: number | null;
+  }>(
+    `SELECT status, duration_ms, audio_duration_ms, segment_count, transcribed_segments,
+            transcription_window_count, transcription_completed_windows,
+            transcription_failed_windows, native_postprocess_run_id,
+            native_postprocess_imported_at
+     FROM meetings WHERE id = ?`,
+    [result.identity.meetingId],
+  );
+  if (!committed || committed.native_postprocess_run_id !== result.identity.runId
+    || !Number.isSafeInteger(committed.native_postprocess_imported_at)
+    || (committed.native_postprocess_imported_at ?? 0) <= 0
+    || committed.duration_ms !== result.audio.durationMs
+    || committed.audio_duration_ms !== result.audio.durationMs
+    || committed.segment_count !== result.audio.segmentCount
+    || committed.transcribed_segments !== processedSegments
+    || committed.transcription_window_count !== result.coverage.windowCount
+    || committed.transcription_completed_windows !== result.coverage.completedWindows
+    || committed.transcription_failed_windows !== result.coverage.failedWindows) return null;
+
+  const hasText = blocks.length > 0;
+  const outcome = deriveNativeTranscriptOutcome({
+    hasText,
+    windowCount: result.coverage.windowCount,
+    completedWindows: result.coverage.completedWindows,
+    failedWindows: result.coverage.failedWindows,
+    lastError: partialError,
+  });
+  const statusCompatible = committed.status === outcome.status
+    || (outcome.status === 'transcribed'
+      && (committed.status === 'summarizing' || committed.status === 'summarized'));
+  if (!statusCompatible) return null;
+
+  const persistedBlocks = await db.getAllAsync<{
+    block_id: string;
+    sequence: number;
+    status: string;
+    segment_index: number | null;
+    started_at: number | null;
+    ended_at: number | null;
+    language: string | null;
+    text: string;
+    word_count: number;
+    char_count: number;
+  }>(
+    `SELECT block_id, sequence, status, segment_index, started_at, ended_at,
+            language, text, word_count, char_count
+     FROM transcript_blocks WHERE meeting_id = ? ORDER BY sequence ASC`,
+    [result.identity.meetingId],
+  );
+  if (persistedBlocks.length !== blocks.length) return null;
+  for (let index = 0; index < blocks.length; index += 1) {
+    const expected = blocks[index];
+    const actual = persistedBlocks[index];
+    if (actual.block_id !== `native-${result.identity.runId}-${expected.sequence}`
+      || actual.sequence !== expected.sequence || actual.status !== 'final'
+      || actual.segment_index !== null || actual.started_at !== expected.startedAt
+      || actual.ended_at !== expected.endedAt || actual.language !== expected.language
+      || actual.text !== expected.text || actual.word_count !== transcriptWordCount(expected.text)
+      || actual.char_count !== expected.text.length) return null;
+  }
+
+  const importedAtMs = committed.native_postprocess_imported_at!;
+  return {
+    importedAt: new Date(importedAtMs).toISOString(),
+    transactionCommitSha256: deriveIOSNativeImportCommitSha256({
+      ownerUserId: result.identity.ownerUserId,
+      meetingId: result.identity.meetingId,
+      runId: result.identity.runId,
+      generation: result.identity.generation,
+      resultId: result.identity.resultId,
+      resultPayloadSha256: result.resultPayloadSha256,
+      importedAtMs,
+      durationMs: committed.duration_ms,
+      segmentCount: committed.segment_count,
+      windowCount: committed.transcription_window_count,
+      completedWindows: committed.transcription_completed_windows,
+      failedWindows: committed.transcription_failed_windows,
+      blockCount: persistedBlocks.length,
+    }),
+  };
 }
 
 export async function updateNativePostProcessingProgress(input: {
