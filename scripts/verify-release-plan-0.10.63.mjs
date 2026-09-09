@@ -64,7 +64,7 @@ assert.equal(manifest.version, plan.release.version);
 assert.equal(lock.version, plan.release.version);
 assert.equal(lock.packages[''].version, plan.release.version);
 assert.match(source('ios/Maina/Info.plist'), /<key>CFBundleShortVersionString<\/key>\s*<string>0\.10\.63<\/string>/);
-assert.match(source('ios/Maina/Info.plist'), /<key>CFBundleVersion<\/key>\s*<string>44<\/string>/);
+assert.match(source('ios/Maina/Info.plist'), /<key>CFBundleVersion<\/key>\s*<string>45<\/string>/);
 assert.match(source('ios/Maina.xcodeproj/project.pbxproj'), /PRODUCT_BUNDLE_IDENTIFIER = "?com\.divay\.maina\.staging"?;/);
 
 assert.deepEqual(plan.featureFlagDefaults, {
