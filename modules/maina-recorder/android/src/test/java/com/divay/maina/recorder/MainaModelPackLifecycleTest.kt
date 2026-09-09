@@ -81,4 +81,20 @@ class MainaModelPackLifecycleTest {
         assertFalse(MainaModelPackLifecyclePolicy.cleanupAllowed(false, false, false, 0, 1, true))
         assertFalse(MainaModelPackLifecyclePolicy.cleanupAllowed(false, false, false, 0, 0, false))
     }
+
+    @Test
+    fun `interrupted promotion reconciles without guessing success`() {
+        assertEquals("complete_success_cleanup", MainaModelPackLifecyclePolicy.interruptedPromotionAction(
+            "ready", readyPointsToWriter = true, previousPointerValid = true,
+        ))
+        assertEquals("rollback_to_previous", MainaModelPackLifecyclePolicy.interruptedPromotionAction(
+            "smoke_testing", readyPointsToWriter = true, previousPointerValid = true,
+        ))
+        assertEquals("invalidate_first_activation", MainaModelPackLifecyclePolicy.interruptedPromotionAction(
+            "smoke_testing", readyPointsToWriter = true, previousPointerValid = false,
+        ))
+        assertEquals("mark_failed_preserve_current", MainaModelPackLifecyclePolicy.interruptedPromotionAction(
+            "smoke_testing", readyPointsToWriter = false, previousPointerValid = true,
+        ))
+    }
 }
