@@ -119,8 +119,11 @@ public final class MainaIOSContinuedProcessing {
   }
 
   func begin(jobId: String, title: String, subtitle: String, totalUnits: Int) -> [String: Any] {
-    queue.sync {
-      if #available(iOS 26.0, *), UIApplication.shared.applicationState == .active {
+    // Read UIApplication before entering the private queue. Calling back to
+    // main while main is synchronously waiting on this queue would deadlock.
+    let applicationIsActive = Self.applicationIsActiveOnMainThread()
+    return queue.sync {
+      if #available(iOS 26.0, *), applicationIsActive {
         var registry = loadRegistry()
         pruneRegistry(&registry)
 
@@ -253,7 +256,9 @@ public final class MainaIOSContinuedProcessing {
   }
 
   func isActive(identifier: String, meetingId: String) -> Bool {
-    queue.sync {
+    // Keep the UIKit read outside the serialized registry critical section.
+    let applicationIsActive = Self.applicationIsActiveOnMainThread()
+    return queue.sync {
       guard !identifier.isEmpty else { return false }
       if fallbackTasks[identifier] != nil { return true }
       guard let submission = loadRegistry().last(where: {
@@ -262,7 +267,16 @@ public final class MainaIOSContinuedProcessing {
           && ($0.state == .pending || $0.state == .attached)
       }) else { return false }
       if gates[submission.identifier]?.isActive == true { return true }
+      return applicationIsActive
+    }
+  }
+
+  private static func applicationIsActiveOnMainThread() -> Bool {
+    if Thread.isMainThread {
       return UIApplication.shared.applicationState == .active
+    }
+    return DispatchQueue.main.sync {
+      UIApplication.shared.applicationState == .active
     }
   }
 

@@ -79,7 +79,7 @@ for (const token of [
   'interruptionBridgeStartCount',
   'interruptionBridgeExpirationCount',
   'capture-recovery-signal-coalesced',
-  'backgroundTimeRemaining > 4',
+  'return recoveryBackgroundTaskIsActive()',
   'expireRecoveryBackgroundTaskSynchronously',
   'route-change-observed',
   'recorder?.isRecording != true',
@@ -173,7 +173,9 @@ for (const token of [
   'makeUniqueIdentifier(meetingId:',
   'registerExactIdentifierIfNeeded',
   'request.strategy = .fail',
-  'UIApplication.shared.applicationState == .active',
+  'applicationIsActiveOnMainThread()',
+  'let applicationIsActive = Self.applicationIsActiveOnMainThread()',
+  'DispatchQueue.main.sync',
   'continued-processing-requires-foreground',
   'attach(_ task: BGTask, identifier:',
   'beginFallbackTask(identifier:',
@@ -182,6 +184,34 @@ for (const token of [
 ]) {
   if (!readFileSync(continuedProcessing, 'utf8').includes(token)) {
     throw new Error(`iOS continued-processing invariant missing: ${token}`);
+  }
+}
+const continuedApplicationStateReads = readFileSync(continuedProcessing, 'utf8')
+  .match(/UIApplication\.shared\.applicationState/g) ?? [];
+if (continuedApplicationStateReads.length !== 2) {
+  throw new Error('iOS continued processing must isolate UIApplication state reads to one main-thread helper.');
+}
+for (const methodName of ['func begin(', 'func isActive(']) {
+  const methodStart = readFileSync(continuedProcessing, 'utf8').indexOf(methodName);
+  const queueStart = readFileSync(continuedProcessing, 'utf8').indexOf('queue.sync', methodStart);
+  const stateRead = readFileSync(continuedProcessing, 'utf8').indexOf(
+    'let applicationIsActive = Self.applicationIsActiveOnMainThread()',
+    methodStart
+  );
+  if (methodStart < 0 || queueStart < 0 || stateRead < methodStart || stateRead > queueStart) {
+    throw new Error(`iOS ${methodName} must read UIKit state on main before entering the registry queue.`);
+  }
+}
+if (captureSource.includes('UIApplication.shared.applicationState') ||
+    captureSource.includes('UIApplication.shared.backgroundTimeRemaining')) {
+  throw new Error('iOS capture recovery must not read UIApplication lifecycle state from its worker queue.');
+}
+const recoveryWatcherStart = captureSource.indexOf('private func canContinueRecoveryWatcher');
+const recoveryWatcherEnd = captureSource.indexOf('private func beginRecoveryBackgroundTaskIfNeeded', recoveryWatcherStart);
+const recoveryWatcherSource = captureSource.slice(recoveryWatcherStart, recoveryWatcherEnd);
+for (const token of ['refreshCommunicationActiveFromObserver()', 'return recoveryBackgroundTaskIsActive()']) {
+  if (!recoveryWatcherSource.includes(token)) {
+    throw new Error(`iOS recovery watcher finite-lease invariant missing: ${token}`);
   }
 }
 for (const token of [

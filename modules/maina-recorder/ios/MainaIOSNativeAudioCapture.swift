@@ -834,9 +834,12 @@ final class MainaIOSNativeAudioCapture: NSObject, AVAudioRecorderDelegate, CXCal
 
   private func canContinueRecoveryWatcher() -> Bool {
     if refreshCommunicationActiveFromObserver() { return false }
-    if UIApplication.shared.applicationState == .active { return true }
-    guard recoveryBackgroundTaskIsActive() else { return false }
-    return UIApplication.shared.backgroundTimeRemaining > 4
+    // The recovery generation is already protected by one finite UIKit
+    // background-task lease. Its expiration handler revokes the generation,
+    // so the capture queue does not need to query UIApplication state or
+    // remaining time from a background thread. This keeps the watcher bounded
+    // without violating UIKit's main-thread contract.
+    return recoveryBackgroundTaskIsActive()
   }
 
   private func beginRecoveryBackgroundTaskIfNeeded(reason: String) {
