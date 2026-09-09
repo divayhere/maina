@@ -60,7 +60,7 @@ if [[ "$build_status" != "0" ]]; then
   echo "Android build failed once; preserve evidence and stop without retry." >&2
   exit "$build_status"
 fi
-if rg -i -q 'ENOSPC|No space left|I/O error|input/output error' "$BUILD_LOG"; then
+if /usr/bin/grep -E -i -q 'ENOSPC|No space left|I/O error|input/output error' "$BUILD_LOG"; then
   echo "Android build log contains a storage/I/O stop marker; preserve evidence and stop." >&2
   exit 1
 fi

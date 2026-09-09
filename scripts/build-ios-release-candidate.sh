@@ -140,7 +140,7 @@ set -e
 if [[ "$build_status" != "0" ]]; then
   fail_terminal "IOS_BUILD_TERMINAL_FAILURE" "$build_status"
 fi
-if rg -i -q 'ENOSPC|No space left|I/O error|input/output error|CodeSign.*failed' "$BUILD_LOG"; then
+if /usr/bin/grep -E -i -q 'ENOSPC|No space left|I/O error|input/output error|CodeSign.*failed' "$BUILD_LOG"; then
   fail_terminal "IOS_BUILD_STORAGE_OR_SIGNING_FAILURE" 1
 fi
 

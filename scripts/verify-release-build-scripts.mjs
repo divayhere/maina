@@ -2,7 +2,7 @@
 
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { existsSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 
@@ -37,6 +37,10 @@ function invoke(script, outputDir, extraEnv = {}) {
 
 try {
   for (const script of scripts) {
+    const scriptSource = readFileSync(script.path, 'utf8');
+    assert.match(scriptSource, /\/usr\/bin\/grep -E -i -q/, `${script.platform} must use the host-stable post-build failure scanner.`);
+    assert.doesNotMatch(scriptSource, /\brg -i -q/, `${script.platform} must not silently depend on ambient ripgrep after mutation.`);
+
     const internal = path.join('/Users/divay/.cache/maina-build-v2/outputs', `storage-contract-must-not-write-${randomUUID()}`);
     const internalResult = invoke(script, internal);
     assert.equal(internalResult.status, 78, `${script.platform} must reject internal evidence output without fallback.`);
