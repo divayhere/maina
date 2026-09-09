@@ -15,7 +15,7 @@
     "ios": {
       "repository": "/Users/divay/Developer/.worktrees/maina-ios-feasibility",
       "branch": "codex/ios-mobile-memory-m3-m4",
-      "productCommit": "b1512d737a0b62019feab851d4df74c14fc1ef2f"
+      "productCommit": "b3bc95d59d59164616decdfc363baa1571c0cf1d"
     },
     "coordinationCommit": "1b9c1c631adaba95d2a3f4a347b28db962e2ccc3",
     "backendSourceCommit": "b879876506aaf7a18f4c2d26b9c5442629f68190",
