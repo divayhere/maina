@@ -29,7 +29,7 @@ cd "$PROJECT_DIR"
 
 PROVENANCE="${MAINA_RELEASE_PROVENANCE:?Set MAINA_RELEASE_PROVENANCE to the Admin-approved dual-platform provenance}"
 if ! "$MAINA_NODE_BIN/node" "$PROJECT_DIR/scripts/release-provenance-cli.mjs" authorize android \
-  "$PROJECT_DIR/release/m3-m4-0.10.65-candidate-plan.json" "$PROVENANCE" "$APK" >/dev/null 2>&1; then
+  "$PROJECT_DIR/release/m3-m4-0.10.66-candidate-plan.json" "$PROVENANCE" "$APK" >/dev/null 2>&1; then
   echo "ANDROID_RELEASE_PROVENANCE_REJECTED" >&2
   exit 1
 fi
