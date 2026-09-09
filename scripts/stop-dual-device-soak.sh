@@ -36,7 +36,9 @@ adb -s "$ANDROID_SERIAL" shell am broadcast \
 # debugger, or sends a process-termination command. Fail closed when the signed
 # runner is unavailable instead of improvising against a live recording.
 test -f "$IOS_XCTESTRUN"
-MAINA_UI_ATTACH_RUNNING=1 xcodebuild test-without-building \
+MAINA_UI_ATTACH_RUNNING=1 xcodebuild \
+  -collect-test-diagnostics never \
+  test-without-building \
   -xctestrun "$IOS_XCTESTRUN" \
   -destination "platform=iOS,id=$IOS_UDID" \
   -only-testing:MainaUITests/MainaUITests/testStopExistingRecording \

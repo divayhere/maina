@@ -101,6 +101,7 @@ if [[ "$TRANSPORT" == 'direct' ]]; then
 fi
 [[ "$TRANSPORT" == 'xcode' ]] || { echo "Unsupported iOS UI-test transport." >&2; exit 64; }
 exec "$PROJECT_DIR/scripts/external-bin/xcodebuild" \
+  -collect-test-diagnostics never \
   test-without-building \
   -xctestrun "$XCTESTRUN" \
   -destination "platform=iOS,id=$IOS_UDID" \

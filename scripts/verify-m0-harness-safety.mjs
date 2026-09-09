@@ -42,6 +42,36 @@ function assertSourceOrder(source, tokens, label) {
   }
 }
 
+function verifyXcodeDiagnosticsDisabled(source, label) {
+  const exactPolicy = '-collect-test-diagnostics never';
+  if (source.split(exactPolicy).length !== 2) {
+    throw new Error(`${label} must set the exact no-diagnostics policy once.`);
+  }
+  const xcodeStart = source.indexOf('xcodebuild');
+  const policyStart = source.indexOf(exactPolicy, xcodeStart);
+  const testStart = source.indexOf('test-without-building', policyStart);
+  if (xcodeStart < 0 || policyStart <= xcodeStart || testStart <= policyStart) {
+    throw new Error(`${label} must bind the no-diagnostics policy to its xcodebuild test invocation.`);
+  }
+}
+
+function verifyXcodeDiagnosticsAdversaries(source, label) {
+  for (const [mutation, replacement] of [
+    ['missing policy', ''],
+    ['on-failure policy', '-collect-test-diagnostics on-failure'],
+    ['duplicated policy', '-collect-test-diagnostics never \\\n+  -collect-test-diagnostics never'],
+  ]) {
+    const mutated = source.replace('-collect-test-diagnostics never', replacement);
+    let rejected = false;
+    try {
+      verifyXcodeDiagnosticsDisabled(mutated, label);
+    } catch {
+      rejected = true;
+    }
+    if (!rejected) throw new Error(`${label} accepted diagnostics adversary: ${mutation}`);
+  }
+}
+
 const IOS_RECORDING_LIFECYCLE_BLOCKS = [
   ['short recording test', '  func testShortRecordingLifecycle() throws {', '  func testRapidPauseResumeFirstTap() throws {', '4a588b98d7eeb9b7d54a3ffead26d8638a00675c170ed6d6c734e7b847bddf16'],
   ['stop helper', '  private func stopCurrentRecording() {', '  private func authorizeMicrophoneIfPresented() {', '8e94a10d137cc14d85d192f34c13adca749b55efaca9ce339424685c06bf168f'],
@@ -141,6 +171,8 @@ if (stop && ui) {
   for (const token of ['test-without-building', 'MAINA_UI_ATTACH_RUNNING=1', 'testStopExistingRecording']) {
     if (!stop.includes(token)) throw new Error(`Soak stop is missing attach-only UI-test token: ${token}`);
   }
+  verifyXcodeDiagnosticsDisabled(stop, 'iOS attach-only stop harness');
+  verifyXcodeDiagnosticsAdversaries(stop, 'iOS attach-only stop harness');
   for (const token of ['attachesToRunningApp', 'app.activate()', 'testStopExistingRecording']) {
     if (!ui.includes(token)) throw new Error(`UI test is missing attach-only behavior: ${token}`);
   }
@@ -236,6 +268,8 @@ if (iosUiRun) {
   if (!iosUiRun.includes('XCTESTRUN_CANDIDATES=("$PRODUCTS_ROOT"/Build/Products/MainaUITests_iphoneos*-arm64.xctestrun)')) {
     throw new Error('iOS UI-test runner is not bound to exactly one physical-device xctestrun product.');
   }
+  verifyXcodeDiagnosticsDisabled(iosUiRun, 'iOS UI-test runner');
+  verifyXcodeDiagnosticsAdversaries(iosUiRun, 'iOS UI-test runner');
 }
 
 if (iosDirectUiRun) {
