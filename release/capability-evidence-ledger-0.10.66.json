@@ -1,0 +1,676 @@
+{
+  "schemaVersion": "maina.capability-evidence-ledger.v1",
+  "schemaSha256": "7271b044744fd2a5f167eb334b3a6ef702853e03f1a2cb17c7a3bcb5d6765c7f",
+  "ledgerId": "maina-0.10.66-capability-evidence-20260909",
+  "capturedAt": "2026-09-09T15:20:32Z",
+  "harness": {
+    "name": "maina-capability-evidence-harness",
+    "version": "1",
+    "appRelease": "0.10.66",
+    "deviceCommandsExecuted": 0
+  },
+  "evidenceModel": {
+    "proofOrder": [
+      "VERIFIED_SOURCE",
+      "VERIFIED_ARTIFACT",
+      "VERIFIED_AUTOMATED_PHYSICAL",
+      "VERIFIED_OWNER_PHYSICAL"
+    ],
+    "outcomeClasses": [
+      "HARNESS_BLOCKED",
+      "FAILED",
+      "NOT_RUN"
+    ]
+  },
+  "baselines": [
+    {
+      "component": "apps_android",
+      "repository": "https://github.com/divayhere/maina.git",
+      "branch": "codex/mobile-memory-m3-m4",
+      "inputRevision": "60c1f5fd2446fdf10f4f55838645e3e8672591f0",
+      "inputUpstreamRevision": "60c1f5fd2446fdf10f4f55838645e3e8672591f0",
+      "inputTreeClean": true,
+      "artifactSourceRevision": "1acac305040d5c0f0cc9722aceafe3e3ecf8aa16",
+      "sourceAheadOfArtifact": true
+    },
+    {
+      "component": "apps_ios",
+      "repository": "https://github.com/divayhere/maina.git",
+      "branch": "codex/ios-mobile-memory-m3-m4",
+      "inputRevision": "e1c06ccc05827923daffe15a672e610d04280a95",
+      "inputUpstreamRevision": "e1c06ccc05827923daffe15a672e610d04280a95",
+      "inputTreeClean": true,
+      "artifactSourceRevision": "d13c6d2f80f2a07e4d1da0bbfdced8dcf565e0b4",
+      "sourceAheadOfArtifact": true
+    },
+    {
+      "component": "backend",
+      "repository": "https://github.com/divayhere/maina-knowledge-cloud.git",
+      "branch": "codex/retrieval-vnext",
+      "inputRevision": "3deba1511283c4f9e76486828bd35fb3367af99d",
+      "inputUpstreamRevision": "3deba1511283c4f9e76486828bd35fb3367af99d",
+      "inputTreeClean": false,
+      "artifactSourceRevision": null,
+      "sourceAheadOfArtifact": null
+    },
+    {
+      "component": "coordination",
+      "repository": "https://github.com/divayhere/maina-coordination.git",
+      "branch": "main",
+      "inputRevision": "197eba87067a5296ac963e3c41735a4e931fc606",
+      "inputUpstreamRevision": "197eba87067a5296ac963e3c41735a4e931fc606",
+      "inputTreeClean": true,
+      "artifactSourceRevision": null,
+      "sourceAheadOfArtifact": null
+    },
+    {
+      "component": "web",
+      "repository": "https://github.com/divayhere/maina-knowledge-cloud-web.git",
+      "branch": "codex/retrieval-vnext",
+      "inputRevision": "069df4c2a0e4b542824a0298f62b5c449e576157",
+      "inputUpstreamRevision": "069df4c2a0e4b542824a0298f62b5c449e576157",
+      "inputTreeClean": true,
+      "artifactSourceRevision": null,
+      "sourceAheadOfArtifact": null
+    }
+  ],
+  "candidate": {
+    "releaseId": "maina-m3-m4-0.10.66",
+    "version": "0.10.66",
+    "androidVersionCode": 92,
+    "iosBuildNumber": "48",
+    "activeCandidateCount": {
+      "android": 1,
+      "ios": 1
+    },
+    "sourceCustody": {
+      "android": {
+        "productCommit": "bcef9acd18e27ded54c2644863b767f2ffe70884",
+        "artifactSourceCommit": "1acac305040d5c0f0cc9722aceafe3e3ecf8aa16",
+        "currentSourceBaseline": "60c1f5fd2446fdf10f4f55838645e3e8672591f0"
+      },
+      "ios": {
+        "productCommit": "b0361150dbf63c993bae6e17c2895c5ecd7edfce",
+        "artifactSourceCommit": "d13c6d2f80f2a07e4d1da0bbfdced8dcf565e0b4",
+        "currentSourceBaseline": "e1c06ccc05827923daffe15a672e610d04280a95"
+      }
+    },
+    "buildBindings": {
+      "coordinationCommit": "1b9c1c631adaba95d2a3f4a347b28db962e2ccc3",
+      "backendSourceCommit": "b879876506aaf7a18f4c2d26b9c5442629f68190",
+      "backendProductionDeployment": "c6b5f0ce-5631-48bf-a83b-c76a2f6c99d0"
+    },
+    "defaultOffFeatures": ["meeting_tags", "pulse", "recall", "smart_recall"],
+    "releasePlan": {
+      "path": "release/m3-m4-0.10.66-candidate-plan.json",
+      "sha256": "66ac574583b67ea21d71e521d8cf814b3901cf066734aca6de57d7dcbc204fb5"
+    },
+    "provenanceSchema": {
+      "path": "release/provenance-0.10.66.schema.json",
+      "sha256": "bb236c2154699b2b9910a291a39c4fac7c8daa595c1e866e684844fa0581d239"
+    },
+    "candidateProvenanceSha256": "c58a2989efb07078b072c2b45e8efc811483242a917f53f05b8d894ef27b90df",
+    "approvedProvenanceSha256": "7ff679654a163c6bf2e9e0cb0dca60de7013d8cae538e95e03bcf55d2ac051e6",
+    "approvalScope": "LOCAL_PRESERVING_INSTALL_AND_AUTOMATED_QUALIFICATION_ONLY"
+  },
+  "evidence": [
+    {
+      "id": "artifact.android.apk.0.10.66",
+      "kind": "ARTIFACT",
+      "platform": "android",
+      "candidate": "0.10.66",
+      "maximumClass": "VERIFIED_ARTIFACT",
+      "privacyClass": "OPAQUE_BINARY",
+      "locator": {
+        "type": "EXTERNAL_FILE",
+        "path": "/Volumes/DivaySSD/MainaBuild/artifacts/apps/android-main/android/Maina-0.10.66-92-candidate/Maina-0.10.66-92.apk",
+        "bytes": 84273245,
+        "mode": "0644",
+        "sha256": "7c0c8f2f676aa12aa0d3c60d7e285dd4d96631eb862041772c105a436c766e14"
+      }
+    },
+    {
+      "id": "artifact.android.build_log.0.10.66",
+      "kind": "ARTIFACT",
+      "platform": "android",
+      "candidate": "0.10.66",
+      "maximumClass": "VERIFIED_ARTIFACT",
+      "privacyClass": "LOCAL_PATH_METADATA",
+      "locator": {
+        "type": "EXTERNAL_FILE",
+        "path": "/Volumes/DivaySSD/MainaBuild/artifacts/apps/android-main/android/Maina-0.10.66-92-candidate/android-build.log",
+        "bytes": 93920,
+        "mode": "0644",
+        "sha256": "22390d277ca473aee13e26e2b04d1272150ae2ab3fb2219dac6de3743f83db7d"
+      }
+    },
+    {
+      "id": "artifact.android.inspection.0.10.66",
+      "kind": "ARTIFACT_INSPECTION",
+      "platform": "android",
+      "candidate": "0.10.66",
+      "maximumClass": "VERIFIED_ARTIFACT",
+      "privacyClass": "LOCAL_PATH_METADATA",
+      "locator": {
+        "type": "EXTERNAL_FILE",
+        "path": "/Volumes/DivaySSD/MainaBuild/artifacts/apps/android-main/android/Maina-0.10.66-92-candidate/android-inspection.json",
+        "bytes": 7794,
+        "mode": "0644",
+        "sha256": "4c691420b4f257367ba628e55fee159f901a4bb76cef5749717a62102607dd64"
+      }
+    },
+    {
+      "id": "artifact.ios.app.0.10.66",
+      "kind": "ARTIFACT",
+      "platform": "ios",
+      "candidate": "0.10.66",
+      "maximumClass": "VERIFIED_ARTIFACT",
+      "privacyClass": "OPAQUE_BINARY",
+      "locator": {
+        "type": "EXTERNAL_FILE",
+        "path": "/Volumes/DivaySSD/MainaBuild/artifacts/apps/ios-feasibility/ios/Maina-0.10.66-48-candidate/Maina-0.10.66-48.app.zip",
+        "bytes": 34188040,
+        "mode": "0644",
+        "sha256": "b7b6e3ae8c02d1bc3b7791365c9690821870f3b7802d31edf86adb1f24d59729"
+      }
+    },
+    {
+      "id": "artifact.ios.build_log.0.10.66",
+      "kind": "ARTIFACT",
+      "platform": "ios",
+      "candidate": "0.10.66",
+      "maximumClass": "VERIFIED_ARTIFACT",
+      "privacyClass": "PRIVATE_BUILD_METADATA",
+      "locator": {
+        "type": "EXTERNAL_FILE",
+        "path": "/Volumes/DivaySSD/MainaBuild/artifacts/apps/ios-feasibility/ios/Maina-0.10.66-48-candidate/ios-build.log",
+        "bytes": 11101993,
+        "mode": "0644",
+        "sha256": "e32f82b83321cc3f4db3a477edf13f73c82d006ce9b96fb7c6ebbead6c31533e"
+      }
+    },
+    {
+      "id": "artifact.ios.dsym.0.10.66",
+      "kind": "ARTIFACT",
+      "platform": "ios",
+      "candidate": "0.10.66",
+      "maximumClass": "VERIFIED_ARTIFACT",
+      "privacyClass": "OPAQUE_BINARY",
+      "locator": {
+        "type": "EXTERNAL_FILE",
+        "path": "/Volumes/DivaySSD/MainaBuild/artifacts/apps/ios-feasibility/ios/Maina-0.10.66-48-candidate/Maina-0.10.66-48.app.dSYM.zip",
+        "bytes": 31904154,
+        "mode": "0644",
+        "sha256": "0612a68a8232786f1fc7efcb0b8792f7eae04a2ac8ed897c397c8ced3836fd92"
+      }
+    },
+    {
+      "id": "artifact.ios.inspection.0.10.66",
+      "kind": "ARTIFACT_INSPECTION",
+      "platform": "ios",
+      "candidate": "0.10.66",
+      "maximumClass": "VERIFIED_ARTIFACT",
+      "privacyClass": "PRIVATE_BUILD_METADATA",
+      "locator": {
+        "type": "EXTERNAL_FILE",
+        "path": "/Volumes/DivaySSD/MainaBuild/artifacts/apps/ios-feasibility/ios/Maina-0.10.66-48-candidate/ios-inspection.json",
+        "bytes": 2342,
+        "mode": "0644",
+        "sha256": "bb03cdc6f288b8864e8cfca438288b159df14de3e0fd9c6addb788e7ab97b166"
+      }
+    },
+    {
+      "id": "authorization.owner.0.10.66",
+      "kind": "OWNER_AUTHORIZATION",
+      "platform": "cross_platform",
+      "candidate": "0.10.66",
+      "maximumClass": "VERIFIED_ARTIFACT",
+      "privacyClass": "LOCAL_PATH_METADATA",
+      "locator": {
+        "type": "EXTERNAL_FILE",
+        "path": "/Volumes/DivaySSD/MainaBuild/artifacts/apps/owner-authorizations/Maina-0.10.66-owner-authorization-20260909/owner-release-authorization.json",
+        "bytes": 1208,
+        "mode": "0600",
+        "sha256": "8955bdbc75f7d0e22c313e00ba862a581ad7a2bb49aeccd40a4de8c8e1574e0e"
+      }
+    },
+    {
+      "id": "automation.android.0.10.66",
+      "kind": "HARNESS_DIAGNOSTIC",
+      "platform": "android",
+      "candidate": "0.10.66",
+      "maximumClass": "HARNESS_BLOCKED",
+      "privacyClass": "SANITIZED",
+      "locator": {
+        "type": "EXTERNAL_FILE",
+        "path": "/Volumes/DivaySSD/MainaBuild/artifacts/apps/install-qualification/Maina-0.10.66-20260909-attempt-01/android/automated-suite-01/result.json",
+        "bytes": 1592,
+        "mode": "0600",
+        "sha256": "c7f9ce6cfa350a3675e88f865cb513b491eaf341c9ff2bb2bb1342416d9f8143"
+      }
+    },
+    {
+      "id": "automation.ios.0.10.66",
+      "kind": "HARNESS_DIAGNOSTIC",
+      "platform": "ios",
+      "candidate": "0.10.66",
+      "maximumClass": "HARNESS_BLOCKED",
+      "privacyClass": "RESTRICTED_EXTERNAL",
+      "locator": {
+        "type": "EXTERNAL_FILE",
+        "path": "/Volumes/DivaySSD/MainaBuild/artifacts/apps/install-qualification/Maina-0.10.66-20260909-attempt-01/ios/ui-suite-01/ios-ui-suite-summary.json",
+        "bytes": 963,
+        "mode": "0600",
+        "sha256": "b2aa0ca72705b8a0b5c74c5169cb6bb25bf9813016b47549ddde83c80e573232"
+      }
+    },
+    {
+      "id": "failure.test3.0.10.55",
+      "kind": "FAILURE_REPORT",
+      "platform": "cross_platform",
+      "candidate": "0.10.55",
+      "maximumClass": "FAILED",
+      "privacyClass": "SANITIZED",
+      "locator": {
+        "type": "EXTERNAL_FILE",
+        "path": "/Volumes/DivaySSD/MainaBuild/artifacts/apps/qualification/Maina-0.10.55-test3-deep-research-20260906/report-source.md",
+        "bytes": 19409,
+        "mode": "0600",
+        "sha256": "f2fde356bb51987a6374aefaedb7df26c63b59d5b7b90cd604c10d3d6a584c1a"
+      }
+    },
+    {
+      "id": "provenance.approved.0.10.66",
+      "kind": "PROVENANCE",
+      "platform": "cross_platform",
+      "candidate": "0.10.66",
+      "maximumClass": "VERIFIED_ARTIFACT",
+      "privacyClass": "PRIVATE_BUILD_METADATA",
+      "locator": {
+        "type": "EXTERNAL_FILE",
+        "path": "/Volumes/DivaySSD/MainaBuild/artifacts/apps/dual-provenance/Maina-0.10.66-20260909-attempt-02/owner-approved-dual-provenance.json",
+        "bytes": 15703,
+        "mode": "0600",
+        "sha256": "7ff679654a163c6bf2e9e0cb0dca60de7013d8cae538e95e03bcf55d2ac051e6"
+      }
+    },
+    {
+      "id": "provenance.candidate.0.10.66",
+      "kind": "PROVENANCE",
+      "platform": "cross_platform",
+      "candidate": "0.10.66",
+      "maximumClass": "VERIFIED_ARTIFACT",
+      "privacyClass": "PRIVATE_BUILD_METADATA",
+      "locator": {
+        "type": "EXTERNAL_FILE",
+        "path": "/Volumes/DivaySSD/MainaBuild/artifacts/apps/dual-provenance/Maina-0.10.66-20260909-attempt-01/candidate-dual-provenance.json",
+        "bytes": 14470,
+        "mode": "0600",
+        "sha256": "c58a2989efb07078b072c2b45e8efc811483242a917f53f05b8d894ef27b90df"
+      }
+    },
+    {
+      "id": "provenance.verification.0.10.66",
+      "kind": "PROVENANCE",
+      "platform": "cross_platform",
+      "candidate": "0.10.66",
+      "maximumClass": "VERIFIED_ARTIFACT",
+      "privacyClass": "LOCAL_PATH_METADATA",
+      "locator": {
+        "type": "EXTERNAL_FILE",
+        "path": "/Volumes/DivaySSD/MainaBuild/artifacts/apps/dual-provenance/Maina-0.10.66-20260909-attempt-02/dual-provenance-verification.json",
+        "bytes": 3075,
+        "mode": "0600",
+        "sha256": "4f621af3efc695a9650fef32a12ea429b060fde032bb0de81f4993d0d14b286a"
+      }
+    },
+    {
+      "id": "source.apps_android.input_baseline",
+      "kind": "SOURCE_COMMIT",
+      "platform": "android",
+      "candidate": "current",
+      "maximumClass": "VERIFIED_SOURCE",
+      "privacyClass": "SANITIZED",
+      "locator": {
+        "type": "GIT_COMMIT",
+        "component": "apps_android",
+        "revision": "60c1f5fd2446fdf10f4f55838645e3e8672591f0"
+      }
+    },
+    {
+      "id": "source.apps_ios.input_baseline",
+      "kind": "SOURCE_COMMIT",
+      "platform": "ios",
+      "candidate": "current",
+      "maximumClass": "VERIFIED_SOURCE",
+      "privacyClass": "SANITIZED",
+      "locator": {
+        "type": "GIT_COMMIT",
+        "component": "apps_ios",
+        "revision": "e1c06ccc05827923daffe15a672e610d04280a95"
+      }
+    },
+    {
+      "id": "source.backend.input_baseline",
+      "kind": "SOURCE_COMMIT",
+      "platform": "backend",
+      "candidate": "current",
+      "maximumClass": "VERIFIED_SOURCE",
+      "privacyClass": "SANITIZED",
+      "locator": {
+        "type": "GIT_COMMIT",
+        "component": "backend",
+        "revision": "3deba1511283c4f9e76486828bd35fb3367af99d"
+      }
+    },
+    {
+      "id": "source.coordination.input_baseline",
+      "kind": "SOURCE_COMMIT",
+      "platform": "cross_platform",
+      "candidate": "current",
+      "maximumClass": "VERIFIED_SOURCE",
+      "privacyClass": "SANITIZED",
+      "locator": {
+        "type": "GIT_COMMIT",
+        "component": "coordination",
+        "revision": "197eba87067a5296ac963e3c41735a4e931fc606"
+      }
+    },
+    {
+      "id": "source.web.input_baseline",
+      "kind": "SOURCE_COMMIT",
+      "platform": "web",
+      "candidate": "current",
+      "maximumClass": "VERIFIED_SOURCE",
+      "privacyClass": "SANITIZED",
+      "locator": {
+        "type": "GIT_COMMIT",
+        "component": "web",
+        "revision": "069df4c2a0e4b542824a0298f62b5c449e576157"
+      }
+    }
+  ],
+  "claims": [
+    {
+      "id": "artifact.android.0.10.66",
+      "platform": "android",
+      "candidate": "0.10.66",
+      "requiredClass": "VERIFIED_ARTIFACT",
+      "observedClass": "VERIFIED_ARTIFACT",
+      "evidenceIds": [
+        "artifact.android.apk.0.10.66",
+        "artifact.android.build_log.0.10.66",
+        "artifact.android.inspection.0.10.66",
+        "authorization.owner.0.10.66",
+        "provenance.approved.0.10.66",
+        "provenance.candidate.0.10.66",
+        "provenance.verification.0.10.66"
+      ],
+      "satisfiesRequirement": true,
+      "releaseBlocking": false,
+      "reasonCode": "EXACT_ARTIFACT_AND_PROVENANCE_VERIFIED"
+    },
+    {
+      "id": "artifact.ios.0.10.66",
+      "platform": "ios",
+      "candidate": "0.10.66",
+      "requiredClass": "VERIFIED_ARTIFACT",
+      "observedClass": "VERIFIED_ARTIFACT",
+      "evidenceIds": [
+        "artifact.ios.app.0.10.66",
+        "artifact.ios.build_log.0.10.66",
+        "artifact.ios.dsym.0.10.66",
+        "artifact.ios.inspection.0.10.66",
+        "authorization.owner.0.10.66",
+        "provenance.approved.0.10.66",
+        "provenance.candidate.0.10.66",
+        "provenance.verification.0.10.66"
+      ],
+      "satisfiesRequirement": true,
+      "releaseBlocking": false,
+      "reasonCode": "EXACT_ARTIFACT_AND_PROVENANCE_VERIFIED"
+    },
+    {
+      "id": "automation.android.reliability.0.10.66",
+      "platform": "android",
+      "candidate": "0.10.66",
+      "requiredClass": "VERIFIED_AUTOMATED_PHYSICAL",
+      "observedClass": "HARNESS_BLOCKED",
+      "evidenceIds": ["automation.android.0.10.66"],
+      "satisfiesRequirement": false,
+      "releaseBlocking": false,
+      "reasonCode": "RESULT_LACKS_EXACT_INSTALLED_ARTIFACT_BINDING"
+    },
+    {
+      "id": "automation.ios.ui.0.10.66",
+      "platform": "ios",
+      "candidate": "0.10.66",
+      "requiredClass": "VERIFIED_AUTOMATED_PHYSICAL",
+      "observedClass": "HARNESS_BLOCKED",
+      "evidenceIds": ["automation.ios.0.10.66"],
+      "satisfiesRequirement": false,
+      "releaseBlocking": false,
+      "reasonCode": "RESULT_LACKS_INSTALLED_CANDIDATE_BINDING"
+    },
+    {
+      "id": "cloud.canonical_meetings.live",
+      "platform": "backend",
+      "candidate": "live",
+      "requiredClass": "VERIFIED_AUTOMATED_PHYSICAL",
+      "observedClass": "NOT_RUN",
+      "evidenceIds": [],
+      "satisfiesRequirement": false,
+      "releaseBlocking": false,
+      "reasonCode": "LIVE_JOINED_CONTRACT_NOT_FRESHLY_QUALIFIED"
+    },
+    {
+      "id": "cloud.recall.live",
+      "platform": "backend",
+      "candidate": "live",
+      "requiredClass": "VERIFIED_AUTOMATED_PHYSICAL",
+      "observedClass": "NOT_RUN",
+      "evidenceIds": [],
+      "satisfiesRequirement": false,
+      "releaseBlocking": false,
+      "reasonCode": "LIVE_JOINED_CONTRACT_NOT_FRESHLY_QUALIFIED"
+    },
+    {
+      "id": "cloud.tags.live",
+      "platform": "backend",
+      "candidate": "live",
+      "requiredClass": "VERIFIED_AUTOMATED_PHYSICAL",
+      "observedClass": "NOT_RUN",
+      "evidenceIds": [],
+      "satisfiesRequirement": false,
+      "releaseBlocking": false,
+      "reasonCode": "LIVE_DEPLOYMENT_AND_MIGRATION_NOT_PROVEN"
+    },
+    {
+      "id": "device.android.model_pack.0.10.66",
+      "platform": "android",
+      "candidate": "0.10.66",
+      "requiredClass": "VERIFIED_AUTOMATED_PHYSICAL",
+      "observedClass": "NOT_RUN",
+      "evidenceIds": [],
+      "satisfiesRequirement": false,
+      "releaseBlocking": false,
+      "reasonCode": "CURRENT_SOURCE_POSTDATES_ACTIVE_ARTIFACT"
+    },
+    {
+      "id": "device.ios.model_pack.0.10.66",
+      "platform": "ios",
+      "candidate": "0.10.66",
+      "requiredClass": "VERIFIED_AUTOMATED_PHYSICAL",
+      "observedClass": "NOT_RUN",
+      "evidenceIds": [],
+      "satisfiesRequirement": false,
+      "releaseBlocking": false,
+      "reasonCode": "CURRENT_SOURCE_POSTDATES_ACTIVE_ARTIFACT"
+    },
+    {
+      "id": "source.android.model_pack.current",
+      "platform": "android",
+      "candidate": "current",
+      "requiredClass": "VERIFIED_SOURCE",
+      "observedClass": "VERIFIED_SOURCE",
+      "evidenceIds": ["source.apps_android.input_baseline"],
+      "satisfiesRequirement": true,
+      "releaseBlocking": false,
+      "reasonCode": "SOURCE_POLICY_AND_ADVERSARIES_VERIFIED"
+    },
+    {
+      "id": "source.backend.input_baseline",
+      "platform": "backend",
+      "candidate": "current",
+      "requiredClass": "VERIFIED_SOURCE",
+      "observedClass": "VERIFIED_SOURCE",
+      "evidenceIds": ["source.backend.input_baseline"],
+      "satisfiesRequirement": true,
+      "releaseBlocking": false,
+      "reasonCode": "SOURCE_HEAD_RECORDED_NOT_LIVE_PROOF"
+    },
+    {
+      "id": "source.coordination.input_baseline",
+      "platform": "cross_platform",
+      "candidate": "current",
+      "requiredClass": "VERIFIED_SOURCE",
+      "observedClass": "VERIFIED_SOURCE",
+      "evidenceIds": ["source.coordination.input_baseline"],
+      "satisfiesRequirement": true,
+      "releaseBlocking": false,
+      "reasonCode": "SOURCE_HEAD_RECORDED_NOT_RELEASE_PROOF"
+    },
+    {
+      "id": "source.ios.model_pack.current",
+      "platform": "ios",
+      "candidate": "current",
+      "requiredClass": "VERIFIED_SOURCE",
+      "observedClass": "VERIFIED_SOURCE",
+      "evidenceIds": ["source.apps_ios.input_baseline"],
+      "satisfiesRequirement": true,
+      "releaseBlocking": false,
+      "reasonCode": "SOURCE_POLICY_AND_ADVERSARIES_VERIFIED"
+    },
+    {
+      "id": "source.web.input_baseline",
+      "platform": "web",
+      "candidate": "current",
+      "requiredClass": "VERIFIED_SOURCE",
+      "observedClass": "VERIFIED_SOURCE",
+      "evidenceIds": ["source.web.input_baseline"],
+      "satisfiesRequirement": true,
+      "releaseBlocking": false,
+      "reasonCode": "SOURCE_HEAD_RECORDED_NOT_LIVE_PROOF"
+    },
+    {
+      "id": "test3.android.0.10.55",
+      "platform": "android",
+      "candidate": "0.10.55",
+      "requiredClass": "VERIFIED_OWNER_PHYSICAL",
+      "observedClass": "FAILED",
+      "evidenceIds": ["failure.test3.0.10.55"],
+      "satisfiesRequirement": false,
+      "releaseBlocking": false,
+      "reasonCode": "REJECTED_CALL_DID_NOT_RESUME_UNATTENDED"
+    },
+    {
+      "id": "test3.android.0.10.66",
+      "platform": "android",
+      "candidate": "0.10.66",
+      "requiredClass": "VERIFIED_OWNER_PHYSICAL",
+      "observedClass": "NOT_RUN",
+      "evidenceIds": [],
+      "satisfiesRequirement": false,
+      "releaseBlocking": true,
+      "reasonCode": "PHYSICAL_INCOMING_CALL_NOT_PERFORMED"
+    },
+    {
+      "id": "test3.ios.0.10.55",
+      "platform": "ios",
+      "candidate": "0.10.55",
+      "requiredClass": "VERIFIED_OWNER_PHYSICAL",
+      "observedClass": "FAILED",
+      "evidenceIds": ["failure.test3.0.10.55"],
+      "satisfiesRequirement": false,
+      "releaseBlocking": false,
+      "reasonCode": "REJECTED_CALL_DID_NOT_RESUME_UNATTENDED"
+    },
+    {
+      "id": "test3.ios.0.10.66",
+      "platform": "ios",
+      "candidate": "0.10.66",
+      "requiredClass": "VERIFIED_OWNER_PHYSICAL",
+      "observedClass": "NOT_RUN",
+      "evidenceIds": [],
+      "satisfiesRequirement": false,
+      "releaseBlocking": true,
+      "reasonCode": "PHYSICAL_INCOMING_CALL_NOT_PERFORMED"
+    },
+    {
+      "id": "test5.android.0.10.66",
+      "platform": "android",
+      "candidate": "0.10.66",
+      "requiredClass": "VERIFIED_OWNER_PHYSICAL",
+      "observedClass": "NOT_RUN",
+      "evidenceIds": [],
+      "satisfiesRequirement": false,
+      "releaseBlocking": true,
+      "reasonCode": "FORMAL_OFFLINE_RECONNECT_NOT_PERFORMED"
+    },
+    {
+      "id": "test5.ios.0.10.66",
+      "platform": "ios",
+      "candidate": "0.10.66",
+      "requiredClass": "VERIFIED_OWNER_PHYSICAL",
+      "observedClass": "NOT_RUN",
+      "evidenceIds": [],
+      "satisfiesRequirement": false,
+      "releaseBlocking": true,
+      "reasonCode": "FORMAL_OFFLINE_RECONNECT_NOT_PERFORMED"
+    }
+  ],
+  "summary": {
+    "releaseReady": false,
+    "classCounts": {
+      "VERIFIED_SOURCE": 5,
+      "VERIFIED_ARTIFACT": 2,
+      "VERIFIED_AUTOMATED_PHYSICAL": 0,
+      "VERIFIED_OWNER_PHYSICAL": 0,
+      "HARNESS_BLOCKED": 2,
+      "FAILED": 2,
+      "NOT_RUN": 9
+    },
+    "satisfiedClaimIds": [
+      "artifact.android.0.10.66",
+      "artifact.ios.0.10.66",
+      "source.android.model_pack.current",
+      "source.backend.input_baseline",
+      "source.coordination.input_baseline",
+      "source.ios.model_pack.current",
+      "source.web.input_baseline"
+    ],
+    "unsatisfiedClaimIds": [
+      "automation.android.reliability.0.10.66",
+      "automation.ios.ui.0.10.66",
+      "cloud.canonical_meetings.live",
+      "cloud.recall.live",
+      "cloud.tags.live",
+      "device.android.model_pack.0.10.66",
+      "device.ios.model_pack.0.10.66",
+      "test3.android.0.10.55",
+      "test3.android.0.10.66",
+      "test3.ios.0.10.55",
+      "test3.ios.0.10.66",
+      "test5.android.0.10.66",
+      "test5.ios.0.10.66"
+    ],
+    "releaseBlockingClaimIds": [
+      "test3.android.0.10.66",
+      "test3.ios.0.10.66",
+      "test5.android.0.10.66",
+      "test5.ios.0.10.66"
+    ],
+    "sourceAheadOfArtifactPlatforms": ["android", "ios"],
+    "nextActionCode": "RUN_CURRENT_CANDIDATE_OWNER_PHYSICAL_TEST3_THEN_FORMAL_TEST5"
+  }
+}

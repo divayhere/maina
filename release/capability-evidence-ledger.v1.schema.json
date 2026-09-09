@@ -1,0 +1,407 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://maina.local/schemas/capability-evidence-ledger.v1.json",
+  "title": "Maina capability evidence ledger",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "schemaSha256",
+    "ledgerId",
+    "capturedAt",
+    "harness",
+    "evidenceModel",
+    "baselines",
+    "candidate",
+    "evidence",
+    "claims",
+    "summary"
+  ],
+  "properties": {
+    "schemaVersion": { "const": "maina.capability-evidence-ledger.v1" },
+    "schemaSha256": { "$ref": "#/$defs/sha256" },
+    "ledgerId": { "$ref": "#/$defs/id" },
+    "capturedAt": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
+    },
+    "harness": { "$ref": "#/$defs/harness" },
+    "evidenceModel": { "$ref": "#/$defs/evidenceModel" },
+    "baselines": {
+      "type": "array",
+      "minItems": 5,
+      "maxItems": 5,
+      "items": { "$ref": "#/$defs/baseline" }
+    },
+    "candidate": { "$ref": "#/$defs/candidate" },
+    "evidence": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 64,
+      "items": { "$ref": "#/$defs/evidence" }
+    },
+    "claims": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 128,
+      "items": { "$ref": "#/$defs/claim" }
+    },
+    "summary": { "$ref": "#/$defs/summary" }
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "gitSha": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[a-z0-9][a-z0-9._:-]*$"
+    },
+    "proofClass": {
+      "enum": [
+        "VERIFIED_SOURCE",
+        "VERIFIED_ARTIFACT",
+        "VERIFIED_AUTOMATED_PHYSICAL",
+        "VERIFIED_OWNER_PHYSICAL"
+      ]
+    },
+    "evidenceClass": {
+      "enum": [
+        "VERIFIED_SOURCE",
+        "VERIFIED_ARTIFACT",
+        "VERIFIED_AUTOMATED_PHYSICAL",
+        "VERIFIED_OWNER_PHYSICAL",
+        "HARNESS_BLOCKED",
+        "FAILED",
+        "NOT_RUN"
+      ]
+    },
+    "harness": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "version", "appRelease", "deviceCommandsExecuted"],
+      "properties": {
+        "name": { "const": "maina-capability-evidence-harness" },
+        "version": { "const": "1" },
+        "appRelease": { "const": "0.10.66" },
+        "deviceCommandsExecuted": { "const": 0 }
+      }
+    },
+    "evidenceModel": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["proofOrder", "outcomeClasses"],
+      "properties": {
+        "proofOrder": {
+          "const": [
+            "VERIFIED_SOURCE",
+            "VERIFIED_ARTIFACT",
+            "VERIFIED_AUTOMATED_PHYSICAL",
+            "VERIFIED_OWNER_PHYSICAL"
+          ]
+        },
+        "outcomeClasses": { "const": ["HARNESS_BLOCKED", "FAILED", "NOT_RUN"] }
+      }
+    },
+    "baseline": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "component",
+        "repository",
+        "branch",
+        "inputRevision",
+        "inputUpstreamRevision",
+        "inputTreeClean",
+        "artifactSourceRevision",
+        "sourceAheadOfArtifact"
+      ],
+      "properties": {
+        "component": {
+          "enum": ["apps_android", "apps_ios", "backend", "web", "coordination"]
+        },
+        "repository": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160,
+          "pattern": "^https://github\\.com/divayhere/[A-Za-z0-9._-]+(?:\\.git)?$"
+        },
+        "branch": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9._/-]+$"
+        },
+        "inputRevision": { "$ref": "#/$defs/gitSha" },
+        "inputUpstreamRevision": { "$ref": "#/$defs/gitSha" },
+        "inputTreeClean": { "type": "boolean" },
+        "artifactSourceRevision": {
+          "type": ["string", "null"],
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "sourceAheadOfArtifact": { "type": ["boolean", "null"] }
+      }
+    },
+    "candidate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "releaseId",
+        "version",
+        "androidVersionCode",
+        "iosBuildNumber",
+        "activeCandidateCount",
+        "sourceCustody",
+        "buildBindings",
+        "defaultOffFeatures",
+        "releasePlan",
+        "provenanceSchema",
+        "candidateProvenanceSha256",
+        "approvedProvenanceSha256",
+        "approvalScope"
+      ],
+      "properties": {
+        "releaseId": { "const": "maina-m3-m4-0.10.66" },
+        "version": { "const": "0.10.66" },
+        "androidVersionCode": { "const": 92 },
+        "iosBuildNumber": { "const": "48" },
+        "activeCandidateCount": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["android", "ios"],
+          "properties": {
+            "android": { "const": 1 },
+            "ios": { "const": 1 }
+          }
+        },
+        "sourceCustody": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["android", "ios"],
+          "properties": {
+            "android": { "$ref": "#/$defs/platformSourceCustody" },
+            "ios": { "$ref": "#/$defs/platformSourceCustody" }
+          }
+        },
+        "buildBindings": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["coordinationCommit", "backendSourceCommit", "backendProductionDeployment"],
+          "properties": {
+            "coordinationCommit": { "$ref": "#/$defs/gitSha" },
+            "backendSourceCommit": { "$ref": "#/$defs/gitSha" },
+            "backendProductionDeployment": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+            }
+          }
+        },
+        "defaultOffFeatures": {
+          "const": ["meeting_tags", "pulse", "recall", "smart_recall"]
+        },
+        "releasePlan": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["path", "sha256"],
+          "properties": {
+            "path": { "const": "release/m3-m4-0.10.66-candidate-plan.json" },
+            "sha256": { "$ref": "#/$defs/sha256" }
+          }
+        },
+        "provenanceSchema": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["path", "sha256"],
+          "properties": {
+            "path": { "const": "release/provenance-0.10.66.schema.json" },
+            "sha256": { "$ref": "#/$defs/sha256" }
+          }
+        },
+        "candidateProvenanceSha256": { "$ref": "#/$defs/sha256" },
+        "approvedProvenanceSha256": { "$ref": "#/$defs/sha256" },
+        "approvalScope": { "const": "LOCAL_PRESERVING_INSTALL_AND_AUTOMATED_QUALIFICATION_ONLY" }
+      }
+    },
+    "platformSourceCustody": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["productCommit", "artifactSourceCommit", "currentSourceBaseline"],
+      "properties": {
+        "productCommit": { "$ref": "#/$defs/gitSha" },
+        "artifactSourceCommit": { "$ref": "#/$defs/gitSha" },
+        "currentSourceBaseline": { "$ref": "#/$defs/gitSha" }
+      }
+    },
+    "gitLocator": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "component", "revision"],
+      "properties": {
+        "type": { "const": "GIT_COMMIT" },
+        "component": {
+          "enum": ["apps_android", "apps_ios", "backend", "web", "coordination"]
+        },
+        "revision": { "$ref": "#/$defs/gitSha" }
+      }
+    },
+    "fileLocator": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "path", "bytes", "mode", "sha256"],
+      "properties": {
+        "type": { "const": "EXTERNAL_FILE" },
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512,
+          "pattern": "^/Volumes/DivaySSD/MainaBuild/artifacts/apps/[A-Za-z0-9._/:-]+$"
+        },
+        "bytes": { "type": "integer", "minimum": 0, "maximum": 1000000000 },
+        "mode": { "type": "string", "pattern": "^[0-7]{4}$" },
+        "sha256": { "$ref": "#/$defs/sha256" }
+      }
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "platform", "candidate", "maximumClass", "privacyClass", "locator"],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "kind": {
+          "enum": [
+            "SOURCE_COMMIT",
+            "ARTIFACT",
+            "ARTIFACT_INSPECTION",
+            "PROVENANCE",
+            "OWNER_AUTHORIZATION",
+            "AUTOMATED_RESULT",
+            "OWNER_PHYSICAL_RESULT",
+            "FAILURE_REPORT",
+            "HARNESS_DIAGNOSTIC"
+          ]
+        },
+        "platform": { "enum": ["android", "ios", "backend", "web", "cross_platform"] },
+        "candidate": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 32,
+          "pattern": "^(?:0\\.[0-9]+\\.[0-9]+|current|live)$"
+        },
+        "maximumClass": { "$ref": "#/$defs/evidenceClass" },
+        "privacyClass": { "enum": ["SANITIZED", "LOCAL_PATH_METADATA", "PRIVATE_BUILD_METADATA", "OPAQUE_BINARY", "RESTRICTED_EXTERNAL"] },
+        "locator": {
+          "oneOf": [
+            { "$ref": "#/$defs/gitLocator" },
+            { "$ref": "#/$defs/fileLocator" }
+          ]
+        }
+      }
+    },
+    "claim": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "platform",
+        "candidate",
+        "requiredClass",
+        "observedClass",
+        "evidenceIds",
+        "satisfiesRequirement",
+        "releaseBlocking",
+        "reasonCode"
+      ],
+      "properties": {
+        "id": { "$ref": "#/$defs/id" },
+        "platform": { "enum": ["android", "ios", "backend", "web", "cross_platform"] },
+        "candidate": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 32,
+          "pattern": "^(?:0\\.[0-9]+\\.[0-9]+|current|live)$"
+        },
+        "requiredClass": { "$ref": "#/$defs/proofClass" },
+        "observedClass": { "$ref": "#/$defs/evidenceClass" },
+        "evidenceIds": {
+          "type": "array",
+          "maxItems": 16,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/id" }
+        },
+        "satisfiesRequirement": { "type": "boolean" },
+        "releaseBlocking": { "type": "boolean" },
+        "reasonCode": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 96,
+          "pattern": "^[A-Z][A-Z0-9_]*$"
+        }
+      }
+    },
+    "classCounts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "VERIFIED_SOURCE",
+        "VERIFIED_ARTIFACT",
+        "VERIFIED_AUTOMATED_PHYSICAL",
+        "VERIFIED_OWNER_PHYSICAL",
+        "HARNESS_BLOCKED",
+        "FAILED",
+        "NOT_RUN"
+      ],
+      "properties": {
+        "VERIFIED_SOURCE": { "type": "integer", "minimum": 0, "maximum": 128 },
+        "VERIFIED_ARTIFACT": { "type": "integer", "minimum": 0, "maximum": 128 },
+        "VERIFIED_AUTOMATED_PHYSICAL": { "type": "integer", "minimum": 0, "maximum": 128 },
+        "VERIFIED_OWNER_PHYSICAL": { "type": "integer", "minimum": 0, "maximum": 128 },
+        "HARNESS_BLOCKED": { "type": "integer", "minimum": 0, "maximum": 128 },
+        "FAILED": { "type": "integer", "minimum": 0, "maximum": 128 },
+        "NOT_RUN": { "type": "integer", "minimum": 0, "maximum": 128 }
+      }
+    },
+    "summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "releaseReady",
+        "classCounts",
+        "satisfiedClaimIds",
+        "unsatisfiedClaimIds",
+        "releaseBlockingClaimIds",
+        "sourceAheadOfArtifactPlatforms",
+        "nextActionCode"
+      ],
+      "properties": {
+        "releaseReady": { "type": "boolean" },
+        "classCounts": { "$ref": "#/$defs/classCounts" },
+        "satisfiedClaimIds": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/id" }
+        },
+        "unsatisfiedClaimIds": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/id" }
+        },
+        "releaseBlockingClaimIds": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/id" }
+        },
+        "sourceAheadOfArtifactPlatforms": {
+          "const": ["android", "ios"]
+        },
+        "nextActionCode": { "const": "RUN_CURRENT_CANDIDATE_OWNER_PHYSICAL_TEST3_THEN_FORMAL_TEST5" }
+      }
+    }
+  }
+}
