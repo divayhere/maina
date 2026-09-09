@@ -57,22 +57,39 @@ internal class MainaPostProcessingOutbox(context: Context) :
         windowCount: Int,
         routeRestartCount: Int,
         captureGapMs: Long,
+        modelIdentity: MainaQwenAsr.ModelIdentity? = null,
         forceRetry: Boolean = false,
     ): StartResult {
+        require(modelIdentity == null || validModelIdentity(modelIdentity)) { "native_model_identity_invalid" }
         writableDatabase.beginTransaction()
         try {
             var existingRunId: String? = null
             var existingState: String? = null
             var existingWindowCount = 0
+            var existingModelIdentity: MainaQwenAsr.ModelIdentity? = null
             writableDatabase.rawQuery(
-                "SELECT run_id, state, window_count FROM runs WHERE meeting_id = ?",
+                """SELECT run_id, state, window_count, model_id, model_version, runtime_version,
+                          model_manifest_sha256, model_activation_generation
+                   FROM runs WHERE meeting_id = ?""",
                 arrayOf(meetingId),
             ).use { cursor ->
                 if (cursor.moveToFirst()) {
                     existingRunId = cursor.getString(0)
                     existingState = cursor.getString(1)
                     existingWindowCount = cursor.getInt(2)
+                    if (!cursor.isNull(3) && !cursor.isNull(4) && !cursor.isNull(5)) {
+                        existingModelIdentity = MainaQwenAsr.ModelIdentity(
+                            modelId = cursor.getString(3),
+                            modelVersion = cursor.getString(4),
+                            runtimeVersion = cursor.getString(5),
+                            manifestSha256 = if (cursor.isNull(6)) null else cursor.getString(6),
+                            activationGeneration = if (cursor.isNull(7)) null else cursor.getLong(7),
+                        )
+                    }
                 }
+            }
+            if (existingRunId != null && existingModelIdentity != null && modelIdentity != null && existingModelIdentity != modelIdentity) {
+                throw IllegalStateException("native_model_identity_conflict")
             }
             val canRetryPartial = forceRetry && existingState == STATE_PARTIAL && existingWindowCount == windowCount
             if (existingRunId != null && existingState in TERMINAL_STATES && !canRetryPartial) {
@@ -103,6 +120,7 @@ internal class MainaPostProcessingOutbox(context: Context) :
                         put("failed_windows", 0)
                         put("route_restart_count", routeRestartCount)
                         put("capture_gap_ms", captureGapMs)
+                        putModelIdentity(modelIdentity)
                         putNull("last_error")
                         put("updated_at", System.currentTimeMillis())
                     },
@@ -134,6 +152,7 @@ internal class MainaPostProcessingOutbox(context: Context) :
                     put("failed_windows", 0)
                     put("route_restart_count", routeRestartCount)
                     put("capture_gap_ms", captureGapMs)
+                    putModelIdentity(modelIdentity)
                     putNull("last_error")
                     put("updated_at", System.currentTimeMillis())
                 },
@@ -316,7 +335,8 @@ internal class MainaPostProcessingOutbox(context: Context) :
         """SELECT run_id, state, capture_directory, meeting_started_at, capture_ended_at, duration_ms,
                   audio_duration_ms, segment_count, processed_segments, window_count,
                   completed_windows, failed_windows, route_restart_count, capture_gap_ms,
-                  recovery_rounds, last_error, updated_at
+                  recovery_rounds, last_error, updated_at, model_id, model_version, runtime_version,
+                  model_manifest_sha256, model_activation_generation
            FROM runs WHERE meeting_id = ?""",
         arrayOf(meetingId),
     ).use { run ->
@@ -365,6 +385,11 @@ internal class MainaPostProcessingOutbox(context: Context) :
             "recoveryRounds" to run.getInt(14),
             "lastError" to if (run.isNull(15)) null else run.getString(15),
             "updatedAt" to run.getLong(16),
+            "modelId" to if (run.isNull(17)) null else run.getString(17),
+            "modelVersion" to if (run.isNull(18)) null else run.getString(18),
+            "runtimeVersion" to if (run.isNull(19)) null else run.getString(19),
+            "modelManifestSha256" to if (run.isNull(20)) null else run.getString(20),
+            "modelActivationGeneration" to if (run.isNull(21)) null else run.getLong(21),
             "blocks" to blocks,
         )
     }
@@ -433,6 +458,11 @@ internal class MainaPostProcessingOutbox(context: Context) :
                 route_restart_count INTEGER NOT NULL,
                 capture_gap_ms INTEGER NOT NULL,
                 recovery_rounds INTEGER NOT NULL DEFAULT 0,
+                model_id TEXT,
+                model_version TEXT,
+                runtime_version TEXT,
+                model_manifest_sha256 TEXT,
+                model_activation_generation INTEGER,
                 last_error TEXT,
                 updated_at INTEGER NOT NULL
             )""",
@@ -458,6 +488,7 @@ internal class MainaPostProcessingOutbox(context: Context) :
         if (oldVersion < 3) addWindowEvidenceColumns(db)
         if (oldVersion < 4) addVadEvidenceColumns(db)
         if (oldVersion < 5) addRunRecoveryColumns(db)
+        if (oldVersion < 6) addRunModelIdentityColumns(db)
     }
 
     private fun createWindowResultsTable(db: SQLiteDatabase) {
@@ -533,6 +564,53 @@ internal class MainaPostProcessingOutbox(context: Context) :
         }
     }
 
+    private fun addRunModelIdentityColumns(db: SQLiteDatabase) {
+        val columns = db.rawQuery("PRAGMA table_info(runs)", null).use { cursor ->
+            buildSet {
+                while (cursor.moveToNext()) add(cursor.getString(1))
+            }
+        }
+        val additions = listOf(
+            "model_id TEXT",
+            "model_version TEXT",
+            "runtime_version TEXT",
+            "model_manifest_sha256 TEXT",
+            "model_activation_generation INTEGER",
+        )
+        additions.forEach { declaration ->
+            val column = declaration.substringBefore(' ')
+            if (column !in columns) db.execSQL("ALTER TABLE runs ADD COLUMN $declaration")
+        }
+        db.execSQL(
+            """UPDATE runs SET model_id = ?, model_version = ?, runtime_version = ?
+               WHERE model_id IS NULL AND model_version IS NULL AND runtime_version IS NULL""",
+            arrayOf<Any>(
+                MainaQwenAsr.ENGINE_ID,
+                MainaQwenAsr.LEGACY_MODEL_VERSION,
+                MainaQwenAsr.ENGINE_VERSION,
+            ),
+        )
+    }
+
+    private fun ContentValues.putModelIdentity(identity: MainaQwenAsr.ModelIdentity?) {
+        if (identity == null) return
+        put("model_id", identity.modelId)
+        put("model_version", identity.modelVersion)
+        put("runtime_version", identity.runtimeVersion)
+        if (identity.manifestSha256 == null) putNull("model_manifest_sha256") else put("model_manifest_sha256", identity.manifestSha256)
+        if (identity.activationGeneration == null) putNull("model_activation_generation") else put("model_activation_generation", identity.activationGeneration)
+    }
+
+    private fun validModelIdentity(identity: MainaQwenAsr.ModelIdentity): Boolean {
+        val id = Regex("^[A-Za-z0-9][A-Za-z0-9._:-]{0,191}$")
+        val sha = Regex("^[a-f0-9]{64}$")
+        val lifecyclePairValid = (identity.manifestSha256 == null && identity.activationGeneration == null &&
+            identity.modelVersion == MainaQwenAsr.LEGACY_MODEL_VERSION) ||
+            (identity.manifestSha256?.matches(sha) == true && (identity.activationGeneration ?: 0L) > 0L)
+        return identity.modelId == MainaQwenAsr.ENGINE_ID && identity.modelVersion.matches(id) &&
+            identity.runtimeVersion == MainaQwenAsr.ENGINE_VERSION && lifecyclePairValid
+    }
+
     private fun completedWindowKeys(
         db: SQLiteDatabase,
         meetingId: String,
@@ -549,7 +627,7 @@ internal class MainaPostProcessingOutbox(context: Context) :
 
     companion object {
         private const val DB_NAME = "maina-native-postprocess.db"
-        private const val DB_VERSION = 5
+        private const val DB_VERSION = 6
         const val STATE_RUNNING = "running"
         const val STATE_COMPLETE = "complete"
         const val STATE_PARTIAL = "partial"

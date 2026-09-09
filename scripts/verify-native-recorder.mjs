@@ -63,6 +63,10 @@ for (const invariant of [
   'MODEL_PACK_READER_PIN_FAILED',
   'rollbackAfterOpenFailure',
   'interruptedPromotionAction',
+  'CURRENT_ACQUISITION',
+  'readLifecycleManifest',
+  'DOWNLOAD_WRITE_FAILED',
+  'resultPayloadSha256',
   'StandardCopyOption.ATOMIC_MOVE',
   '0012d9a28f15bd6fb966b62b70a75da3990512fdccce28b83098248ce4be1698',
 ]) {
@@ -74,6 +78,7 @@ for (const invariant of [
   'modelPacks.acquireReady()',
   'rollbackAfterOpenFailure',
   'activePack?.let { runCatching { it.release() } }',
+  'fun modelIdentity()',
   'fun smoke(root: File, uriOrPath: String)',
 ]) {
   if (!qwenAdapter.includes(invariant)) throw new Error(`Android Qwen model-pack integration invariant missing: ${invariant}`);
@@ -84,12 +89,15 @@ for (const invariant of [
   'beginNativeModelPackAcquisition',
   'stageNativeModelPackChunk',
   'verifyAndPromoteNativeModelPack',
+  'lifecycle.noteExactResult(',
+  'NATIVE_MODEL_RESULT_BINDING_FAILED',
 ]) {
   if (!recorderModule.includes(invariant)) throw new Error(`Android model-pack bridge invariant missing: ${invariant}`);
 }
 
 const postProcessing = readFileSync(path.join(androidRoot, 'src/main/java/com/divay/maina/recorder/MainaPostProcessingService.kt'), 'utf8');
 for (const invariant of [
+  'modelIdentity = asr.modelIdentity()',
   'MainaPostProcessingSupport.splitForRetry(window, asr.lowestEnergySplit(uri, window))',
   'MAX_RECOVERY_DEPTH = 2',
   'MAX_RECOVERY_PIECES = 4',
@@ -101,6 +109,16 @@ for (const invariant of [
   'WINDOW_RETRY_PENDING',
 ]) {
   if (!postProcessing.includes(invariant)) throw new Error(`Post-processing reliability invariant missing: ${invariant}`);
+}
+
+const postProcessingOutbox = readFileSync(path.join(androidRoot, 'src/main/java/com/divay/maina/recorder/MainaPostProcessingOutbox.kt'), 'utf8');
+for (const invariant of [
+  'model_manifest_sha256',
+  'model_activation_generation',
+  'native_model_identity_conflict',
+  'DB_VERSION = 6',
+]) {
+  if (!postProcessingOutbox.includes(invariant)) throw new Error(`Post-processing model identity invariant missing: ${invariant}`);
 }
 
 const manifest = readFileSync(path.join(androidRoot, 'src/main/AndroidManifest.xml'), 'utf8');

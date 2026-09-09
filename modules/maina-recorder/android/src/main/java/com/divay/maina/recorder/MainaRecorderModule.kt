@@ -205,7 +205,29 @@ class MainaRecorderModule : Module() {
         }
 
         AsyncFunction("readNativePostProcessingResult") { meetingId: String ->
-            MainaPostProcessingOutbox.shared(requireContext()).read(meetingId)
+            val result = MainaPostProcessingOutbox.shared(requireContext()).read(meetingId)
+                ?: return@AsyncFunction null
+            if (result["state"] !in setOf(
+                    MainaPostProcessingOutbox.STATE_COMPLETE,
+                    MainaPostProcessingOutbox.STATE_PARTIAL,
+                )
+            ) return@AsyncFunction result
+            val lifecycle = modelPacks()
+            val payloadSha = lifecycle.resultPayloadSha256(result)
+            val resultId = lifecycle.resultIdForPayloadSha256(payloadSha)
+                ?: throw IllegalStateException("NATIVE_MODEL_RESULT_BINDING_FAILED")
+            val activationGeneration = (result["modelActivationGeneration"] as? Number)?.toLong()
+            val bound = lifecycle.noteExactResult(
+                modelId = result["modelId"] as? String ?: "",
+                modelVersion = result["modelVersion"] as? String ?: "",
+                runtimeVersion = result["runtimeVersion"] as? String ?: "",
+                manifestSha256 = result["modelManifestSha256"] as? String,
+                activationGeneration = activationGeneration,
+                resultId = resultId,
+                resultPayloadSha256 = payloadSha,
+            )
+            if (!bound) throw IllegalStateException("NATIVE_MODEL_RESULT_BINDING_FAILED")
+            result + mapOf("resultId" to resultId, "resultPayloadSha256" to payloadSha)
         }
 
         Function("isNativePostProcessingServiceRunning") {
