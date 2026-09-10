@@ -29,6 +29,7 @@ function validate(source) {
     '"$PROJECT_DIR/scripts/restore-external-build-links.sh" dependencies',
     '"$PROJECT_DIR/scripts/restore-external-build-links.sh" android',
     '"$MAINA_NODE_BIN/node" "$PROJECT_DIR/coordination/scripts/verify.mjs"',
+    '"$MAINA_NODE_BIN/node" "$PROJECT_DIR/scripts/verify-android-command-surface.mjs"',
     '"$PROJECT_DIR/scripts/ensure-gradle.sh"',
     'cd "$PROJECT_DIR/android"',
     '"$MAINA_GRADLE_HOME/bin/gradle"',
@@ -77,6 +78,7 @@ invariant(
 const adversarial = [
   runner.replace('source "$PROJECT_DIR/scripts/maina-build-env.sh"', '# guard removed'),
   runner.replace('"$PROJECT_DIR/scripts/restore-external-build-links.sh" android', '# Android link restore removed'),
+  runner.replace('"$MAINA_NODE_BIN/node" "$PROJECT_DIR/scripts/verify-android-command-surface.mjs"', '# command-surface verification removed'),
   runner.replace('"$MAINA_GRADLE_HOME/bin/gradle"', 'adb devices\n"$MAINA_GRADLE_HOME/bin/gradle"'),
   runner.replace(':app:compileDebugKotlin', ':app:assembleDebug'),
   runner.replace('--project-cache-dir "$MAINA_GRADLE_PROJECT_CACHE"', '--project-cache-dir /tmp/gradle'),
@@ -95,4 +97,4 @@ for (const [index, candidate] of adversarial.entries()) {
   invariant(rejected, `Adversarial runner mutation ${index + 1} was not rejected.`);
 }
 
-console.log('Android guarded source-test runner contract verified; 6 adversarial mutations rejected.');
+console.log(`Android guarded source-test runner contract verified; ${adversarial.length} adversarial mutations rejected.`);

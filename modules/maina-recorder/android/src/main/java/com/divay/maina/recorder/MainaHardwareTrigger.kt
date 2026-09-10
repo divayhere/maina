@@ -296,10 +296,81 @@ object MainaHardwareTrigger {
         context.applicationContext.getSharedPreferences("maina-control-status", Context.MODE_PRIVATE)
 }
 
-/** Explicit compatibility endpoint for Key Mapper and similar local tools. */
+/** Same-UID compatibility endpoint; external control uses protected OS channels. */
 class MainaCommandReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent?) {
         val command = MainaHardwareTrigger.commandForAction(intent?.action) ?: return
-        MainaHardwareTrigger.emit(context, command, "external-intent")
+        MainaHardwareTrigger.emit(context, command, "internal-intent")
+    }
+}
+
+internal object MainaShellCommandPolicy {
+    const val ACTION = "com.divay.maina.recorder.SHELL_COMMAND"
+    const val EXTRA_COMMAND = "command"
+    const val EXTRA_EXPECTED_STATE = "expectedState"
+    const val EXTRA_NONCE = "nonce"
+    const val RESULT_ACCEPTED = 17051
+    val exactExtraKeys = setOf(EXTRA_COMMAND, EXTRA_EXPECTED_STATE, EXTRA_NONCE)
+    private val noncePattern = Regex("^[A-Za-z0-9_-]{16,64}$")
+
+    fun allowed(
+        action: String?,
+        ordered: Boolean,
+        extraKeys: Set<String>,
+        command: String?,
+        expectedState: String?,
+        currentState: String,
+        replayed: Boolean,
+    ): Boolean {
+        if (action != ACTION || !ordered || extraKeys != exactExtraKeys || replayed) return false
+        if (expectedState != currentState) return false
+        return when (command) {
+            "start" -> currentState == "idle"
+            "pause" -> currentState == "recording"
+            "resume" -> currentState == "paused"
+            "stop" -> currentState == "recording" || currentState == "paused"
+            "toggle" -> currentState == "idle" || currentState == "recording" || currentState == "paused"
+            else -> false
+        }
+    }
+
+    fun validNonce(value: String?): Boolean = value != null && noncePattern.matches(value)
+}
+
+/** Explicit shell-only automation endpoint; ordinary apps cannot hold android.permission.DUMP. */
+class MainaShellCommandReceiver : BroadcastReceiver() {
+    override fun onReceive(context: Context, intent: Intent?) {
+        val commandIntent = intent ?: return
+        val nonce = commandIntent.getStringExtra(MainaShellCommandPolicy.EXTRA_NONCE) ?: return
+        if (!MainaShellCommandPolicy.validNonce(nonce)) return
+        val prefs = context.applicationContext.getSharedPreferences("maina-shell-control", Context.MODE_PRIVATE)
+        val replayed = (0 until NONCE_SLOTS).any { prefs.getString("nonce_$it", null) == nonce }
+        val command = commandIntent.getStringExtra(MainaShellCommandPolicy.EXTRA_COMMAND) ?: return
+        val expectedState = commandIntent.getStringExtra(MainaShellCommandPolicy.EXTRA_EXPECTED_STATE)
+        if (!MainaShellCommandPolicy.allowed(
+                action = commandIntent.action,
+                ordered = isOrderedBroadcast,
+                extraKeys = commandIntent.extras?.keySet().orEmpty(),
+                command = command,
+                expectedState = expectedState,
+                currentState = MainaRecordingService.captureState,
+                replayed = replayed,
+            )
+        ) return
+        val slot = prefs.getInt(NEXT_NONCE_SLOT, 0).coerceIn(0, NONCE_SLOTS - 1)
+        if (!prefs.edit()
+                .putString("nonce_$slot", nonce)
+                .putInt(NEXT_NONCE_SLOT, (slot + 1) % NONCE_SLOTS)
+                .commit()
+        ) return
+        val commandId = MainaHardwareTrigger.emit(context, command, "shell-tool") ?: return
+        if (commandId.isBlank()) return
+        setResultCode(MainaShellCommandPolicy.RESULT_ACCEPTED)
+        setResultData(nonce)
+    }
+
+    private companion object {
+        const val NONCE_SLOTS = 32
+        const val NEXT_NONCE_SLOT = "next_nonce_slot"
     }
 }

@@ -9,6 +9,7 @@ import android.media.AudioDeviceInfo
 import android.media.AudioManager
 import android.os.Build
 import android.provider.Settings
+import androidx.core.content.ContextCompat
 import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
 import java.io.File
@@ -461,12 +462,12 @@ class MainaRecorderModule : Module() {
             addAction(MainaAudioRouteBridge.ACTION_ROUTE_CHANGED)
             addAction(MainaPostProcessingService.ACTION_RESULT_CHANGED)
         }
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            context.registerReceiver(triggerReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
-        } else {
-            @Suppress("DEPRECATION")
-            context.registerReceiver(triggerReceiver, filter)
-        }
+        ContextCompat.registerReceiver(
+            context,
+            triggerReceiver,
+            filter,
+            ContextCompat.RECEIVER_NOT_EXPORTED,
+        )
         triggerReceiverRegistered = true
     }
 

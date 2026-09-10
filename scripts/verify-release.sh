@@ -45,7 +45,7 @@ cd "$PROJECT_DIR/android"
   --gradle-user-home "$GRADLE_USER_HOME" \
   --project-cache-dir "$MAINA_GRADLE_PROJECT_CACHE" \
   -PreactNativeArchitectures="$MAINA_ANDROID_ABI" \
-  :maina-recorder:testDebugUnitTest :maina-recorder:compileDebugKotlin :app:compileDebugKotlin :app:mergeDebugAssets :app:mergeDebugNativeLibs \
+  :maina-recorder:testDebugUnitTest :maina-recorder:compileDebugKotlin :app:compileDebugKotlin :app:mergeDebugAssets :app:mergeDebugNativeLibs :app:processReleaseMainManifest \
   --console=plain --no-daemon
 
 MERGED_NATIVE_ROOT="$MAINA_ANDROID_OUTPUT_ROOT"
@@ -85,11 +85,8 @@ for GENERATED_CODEGEN in \
   fi
 done
 
-DEBUG_MANIFEST="$(find "$MAINA_ANDROID_OUTPUT_ROOT" \
-  -path '*/merged_manifest/debug/processDebugMainManifest/AndroidManifest.xml' \
-  -o -path '*/merged_manifests/debug/processDebugManifest/AndroidManifest.xml' \
-  | head -n 1)"
-if [[ -z "$DEBUG_MANIFEST" || ! -f "$DEBUG_MANIFEST" ]]; then
+DEBUG_MANIFEST="$MAINA_ANDROID_OUTPUT_ROOT/_app/intermediates/merged_manifests/debug/processDebugManifest/AndroidManifest.xml"
+if [[ ! -f "$DEBUG_MANIFEST" || -L "$DEBUG_MANIFEST" ]]; then
   echo "Debug merged manifest not found after local verification build" >&2
   exit 1
 fi
@@ -104,11 +101,16 @@ rg -q 'FOREGROUND_SERVICE_MICROPHONE' "$DEBUG_MANIFEST"
 rg -q 'FOREGROUND_SERVICE_MEDIA_PROCESSING' "$DEBUG_MANIFEST"
 rg -q 'android:foregroundServiceType="mediaProcessing"' "$DEBUG_MANIFEST"
 
-RELEASE_MANIFEST="$(find "$MAINA_ANDROID_OUTPUT_ROOT" \
-  -path '*/merged_manifest/release/processReleaseMainManifest/AndroidManifest.xml' \
-  -o -path '*/merged_manifests/release/processReleaseManifest/AndroidManifest.xml' \
-  | head -n 1)"
-if [[ -n "$RELEASE_MANIFEST" && -f "$RELEASE_MANIFEST" ]] && rg -q '<profileable' "$RELEASE_MANIFEST"; then
+RELEASE_MANIFEST="$MAINA_ANDROID_OUTPUT_ROOT/_app/intermediates/merged_manifest/release/processReleaseMainManifest/AndroidManifest.xml"
+if [[ ! -f "$RELEASE_MANIFEST" || -L "$RELEASE_MANIFEST" ]]; then
+  echo "Release merged manifest not found after processReleaseMainManifest" >&2
+  exit 1
+fi
+"$MAINA_NODE_BIN/node" "$PROJECT_DIR/scripts/verify-android-command-surface.mjs" \
+  --generated-manifest "$PROJECT_DIR/android/app/src/main/AndroidManifest.xml" \
+  --merged-debug-manifest "$DEBUG_MANIFEST" \
+  --merged-release-manifest "$RELEASE_MANIFEST"
+if rg -q '<profileable' "$RELEASE_MANIFEST"; then
   echo "Release manifest must not remain shell-profileable" >&2
   exit 1
 fi

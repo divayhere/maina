@@ -9,7 +9,6 @@ START_WAIT_SECONDS="${MAINA_START_WAIT_SECONDS:-900}"
 ADB="${ADB:-$(command -v adb || true)}"
 RUN_ID="$(date '+%Y%m%d-%H%M%S')"
 OUTPUT_DIR="${MAINA_SOAK_OUTPUT_DIR:-$PROJECT_DIR/.artifacts/soak/$RUN_ID}"
-DEVICE_STOP_LOG="/data/local/tmp/maina-soak-stop-$RUN_ID.log"
 LOGCAT_PID=""
 CAFFEINATE_PID=""
 
@@ -106,8 +105,28 @@ wait_for_device_until() {
 }
 
 send_stop() {
-  "$ADB" shell am broadcast -a com.divay.maina.action.STOP -p "$PACKAGE" \
-    >> "$OUTPUT_DIR/stop-broadcasts.txt" 2>&1 || true
+  local before nonce result completion
+  before="$(notification_title || true)"
+  if [[ "$before" != "Maina is recording" ]]; then
+    printf 'result=blocked reason=maina-not-recording\n' > "$OUTPUT_DIR/stop-maina-shell-control.txt"
+    return 1
+  fi
+  if ! "$ADB" shell dumpsys package com.android.shell 2>/dev/null | grep -q 'android.permission.DUMP: granted=true'; then
+    printf 'result=blocked reason=shell-dump-unavailable\n' > "$OUTPUT_DIR/stop-maina-shell-control.txt"
+    return 1
+  fi
+  nonce="$(uuidgen | tr -d '-')"
+  result="$("$ADB" shell am broadcast \
+    -n "$PACKAGE/com.divay.maina.recorder.MainaShellCommandReceiver" \
+    -a com.divay.maina.recorder.SHELL_COMMAND \
+    --es command stop \
+    --es expectedState recording \
+    --es nonce "$nonce" 2>&1)"
+  completion="$(printf '%s\n' "$result" | awk '/^Broadcast completed:/{line=$0} END{print line}')"
+  case "$completion" in
+    *"result=17051"*"data=\"$nonce\""*) printf 'result=accepted reason=maina-shell-control\n' > "$OUTPUT_DIR/stop-maina-shell-control.txt" ;;
+    *) printf 'result=blocked reason=shell-ack-missing\n' > "$OUTPUT_DIR/stop-maina-shell-control.txt"; return 1 ;;
+  esac
 }
 
 if ! "$ADB" get-state >/dev/null 2>&1; then
@@ -195,13 +214,8 @@ printf 'recording_started_at=%s\nrecording_deadline_at=%s\n' \
   "$(date -u -r "$recording_deadline" '+%Y-%m-%dT%H:%M:%SZ')" \
   >> "$OUTPUT_DIR/metadata.txt"
 
-# Redundant device-local stop timer. The Mac sends the same idempotent command
-# at the deadline, but this survives a temporary wireless-ADB disconnect.
-adb_shell "nohup sh -c 'sleep $DURATION_SECONDS; am broadcast -a com.divay.maina.action.STOP -p $PACKAGE' >'$DEVICE_STOP_LOG' 2>&1 </dev/null &" \
-  > "$OUTPUT_DIR/device-stop-schedule.txt" 2>&1 || true
-
 snapshot "recording-started"
-echo "Recording detected. Stop-and-save is scheduled for $(date -r "$recording_deadline" '+%Y-%m-%d %H:%M:%S %Z')."
+echo "Recording detected. A single protected Maina stop will be sent at $(date -r "$recording_deadline" '+%Y-%m-%d %H:%M:%S %Z')."
 
 while true; do
   remaining=$(( recording_deadline - $(date +%s) ))
@@ -243,9 +257,6 @@ while (( $(date +%s) < stop_wait_deadline )); do
     if [[ "$title" == "Maina is ready" ]]; then
       break
     fi
-    if [[ "$title" == "Maina is recording" || "$title" == "Maina is paused" ]]; then
-      send_stop
-    fi
   fi
   sleep 15
 done
@@ -282,7 +293,6 @@ if "$ADB" get-state >/dev/null 2>&1; then
   adb_shell dumpsys batterystats > "$OUTPUT_DIR/batterystats-final.txt" 2>&1 || true
   adb_shell dumpsys activity services "$PACKAGE" > "$OUTPUT_DIR/services-final.txt" 2>&1 || true
   adb_shell dumpsys notification --noredact > "$OUTPUT_DIR/notifications-final.txt" 2>&1 || true
-  adb_shell cat "$DEVICE_STOP_LOG" > "$OUTPUT_DIR/device-stop-final.txt" 2>&1 || true
 fi
 
 printf 'completed_at=%s\nresult=monitor-complete\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" >> "$OUTPUT_DIR/metadata.txt"

@@ -415,6 +415,9 @@ for (const symbol of [
 ]) {
   if (!manifest.includes(symbol)) throw new Error(`Native recorder manifest is missing ${symbol}.`);
 }
+if (!/<receiver\s+[\s\S]*?android:name="com\.divay\.maina\.recorder\.MainaCommandReceiver"[\s\S]*?android:exported="false"[\s\S]*?>/.test(manifest)) {
+  throw new Error('Native recorder command receiver must be explicitly non-exported.');
+}
 
 const aar = path.join(androidRoot, 'libs', 'sherpa-onnx-1.13.6.aar');
 const archive = execFileSync('unzip', ['-l', aar], { encoding: 'utf8' });

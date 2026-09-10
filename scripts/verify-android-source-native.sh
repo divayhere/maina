@@ -9,6 +9,7 @@ source "$PROJECT_DIR/scripts/maina-build-env.sh"
 "$PROJECT_DIR/scripts/restore-external-build-links.sh" dependencies
 "$PROJECT_DIR/scripts/restore-external-build-links.sh" android
 "$MAINA_NODE_BIN/node" "$PROJECT_DIR/coordination/scripts/verify.mjs"
+"$MAINA_NODE_BIN/node" "$PROJECT_DIR/scripts/verify-android-command-surface.mjs"
 "$PROJECT_DIR/scripts/ensure-gradle.sh"
 
 cd "$PROJECT_DIR/android"

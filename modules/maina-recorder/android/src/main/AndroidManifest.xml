@@ -35,7 +35,7 @@
     <receiver
       android:name="com.divay.maina.recorder.MainaCommandReceiver"
       android:enabled="true"
-      android:exported="true">
+      android:exported="false">
       <intent-filter>
         <action android:name="com.divay.maina.action.START" />
         <action android:name="com.divay.maina.action.TOGGLE" />
@@ -44,5 +44,10 @@
         <action android:name="com.divay.maina.action.STOP" />
       </intent-filter>
     </receiver>
+    <receiver
+      android:name="com.divay.maina.recorder.MainaShellCommandReceiver"
+      android:enabled="true"
+      android:exported="true"
+      android:permission="android.permission.DUMP" />
   </application>
 </manifest>

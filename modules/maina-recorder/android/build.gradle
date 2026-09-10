@@ -15,6 +15,7 @@ android {
 }
 
 dependencies {
+  implementation 'androidx.core:core-ktx:1.17.0'
   implementation 'androidx.work:work-runtime-ktx:2.10.5'
   // Public React Native APIs used by the WorkManager -> Headless JS bridge.
   // The host app supplies the same resolved runtime; this does not add a

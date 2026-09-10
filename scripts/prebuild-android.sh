@@ -11,3 +11,5 @@ node scripts/verify-build-source-state.mjs android "${MAINA_EXPECTED_FINAL_COMMI
 npx expo prebuild --platform android --no-install --clean
 "$PROJECT_DIR/scripts/restore-external-build-links.sh" android
 node scripts/verify-android-config.mjs
+node scripts/verify-android-command-surface.mjs \
+  --generated-manifest "$PROJECT_DIR/android/app/src/main/AndroidManifest.xml"
