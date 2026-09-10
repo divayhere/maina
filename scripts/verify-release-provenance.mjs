@@ -16,7 +16,7 @@ import {
 } from './lib/release-provenance-core.mjs';
 
 const root = path.resolve(import.meta.dirname, '..');
-const planPath = path.join(root, 'release/m3-m4-0.10.67-candidate-plan.json');
+const planPath = path.join(root, 'release/m3-m4-0.10.68-candidate-plan.json');
 const plan = JSON.parse(readFileSync(planPath, 'utf8'));
 const planSha256 = sha256File(planPath);
 const temporary = mkdtempSync(path.join(tmpdir(), 'maina-release-provenance-'));
@@ -108,7 +108,7 @@ function candidateProvenance() {
       backendProductionDeployment: plan.sources.backendProductionDeployment,
     },
     toolchains: {
-      node: 'v24.7.0', expo: '57.0.18', reactNative: '0.86.3',
+      node: 'v24.19.0', expo: '57.0.18', reactNative: '0.86.3',
       android: { jdk: '17.0.16', gradle: '9.3.1', buildTools: '36.0.0', compileSdk: 36, targetSdk: 36 },
       ios: { xcode: '26.4', cocoaPods: '1.17.0', swift: '6.2' },
     },
@@ -122,7 +122,7 @@ function approveCandidate(candidate, mutateEnvelope = null) {
   const directive = 'Owner authorizes this exact local staging release for preserving-data installs and automated qualification on Android and iOS.';
   const envelope = {
     schemaVersion: 'maina.owner-release-authorization.v1',
-    authorizationId: 'maina-0.10.67-owner-direct-test',
+    authorizationId: 'maina-0.10.68-owner-direct-test',
     authorizedBy: 'owner-direct',
     sourceThreadId: '01a048c0-82f8-7183-ac1b-0c9cdad6f2d4',
     directive,
@@ -222,6 +222,9 @@ try {
   const releaseDrift = provenance();
   releaseDrift.release.androidVersionCode = plan.release.androidVersionCode + 1;
   assert.throws(() => validateApprovedRelease(releaseDrift, plan, { planSha256 }), /androidVersionCode/);
+  const nodePatchDrift = provenance();
+  nodePatchDrift.toolchains.node = 'v24.7.0';
+  assert.throws(() => validateApprovedRelease(nodePatchDrift, plan, { planSha256 }), /toolchains\.node/);
   const noActor = provenance();
   noActor.approval.approvedBy = null;
   assert.throws(() => validateApprovedRelease(noActor, plan, { planSha256 }), /approvedBy/);

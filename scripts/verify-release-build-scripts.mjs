@@ -40,6 +40,45 @@ try {
     const scriptSource = readFileSync(script.path, 'utf8');
     assert.match(scriptSource, /\/usr\/bin\/grep -E -i -q/, `${script.platform} must use the host-stable post-build failure scanner.`);
     assert.doesNotMatch(scriptSource, /\brg -i -q/, `${script.platform} must not silently depend on ambient ripgrep after mutation.`);
+    assert.match(scriptSource, /scripts\/verify-release-toolchain\.mjs/);
+    assert.match(scriptSource, /NPM_CLI="\$\{MAINA_NPM_CLI:-\/opt\/homebrew\/lib\/node_modules\/npm\/bin\/npm-cli\.js\}"/);
+    assert.match(scriptSource, /scripts\/lib\/release-build-attempt-guard\.sh/);
+    assert.match(scriptSource, /artifacts\/apps\/release-build-attempts/);
+    assert.ok(scriptSource.indexOf('verify-release-toolchain.mjs') < scriptSource.indexOf('maina_build_attempt_acquire'));
+    assert.ok(scriptSource.indexOf('maina_build_attempt_acquire') < scriptSource.indexOf('maina_storage_mkdir "$OUTPUT_DIR"'));
+    assert.ok(scriptSource.indexOf('maina_build_attempt_acquire') < scriptSource.indexOf(': > "$OUTPUT_DIR/build-attempted"'));
+
+    const substitutedNpmOutput = path.join(temporary, script.platform.toLowerCase(), `substituted-npm-${randomUUID()}`);
+    const substitutedNpm = invoke(script, substitutedNpmOutput, {
+      MAINA_NPM_CLI: path.join(temporary, 'not-the-pinned-npm-cli.js'),
+    });
+    assert.equal(substitutedNpm.status, 2, `${script.platform} must reject a noncanonical selected npm CLI before a build attempt.`);
+    assert.match(substitutedNpm.stderr, /NPM_CLI_PATH_DRIFT/);
+    assert.equal(existsSync(substitutedNpmOutput), false, `${script.platform} npm substitution rejection must not create evidence.`);
+
+    if (script.platform === 'Android') {
+      const prebuildSource = readFileSync(path.join(root, 'scripts/prebuild-android.sh'), 'utf8');
+      assert.match(scriptSource, /EXPO_CLI="\$\{MAINA_EXPO_CLI:-\$PROJECT_DIR\/node_modules\/expo\/bin\/cli\}"/);
+      assert.match(scriptSource, /export PATH="\$NODE_BIN:/);
+      assert.match(prebuildSource, /"\$NODE_BIN\/node" "\$EXPO_CLI" prebuild --platform android --no-install --clean/);
+      assert.doesNotMatch(prebuildSource, /\bnpx\s+expo\b/);
+
+      const missingExpoOutput = path.join(temporary, 'android', `missing-expo-${randomUUID()}`);
+      const missingExpo = invoke(script, missingExpoOutput, {
+        MAINA_NODE_BIN: '/Users/divay/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin',
+        MAINA_EXPO_CLI: path.join(temporary, 'missing-expo-cli'),
+      });
+      assert.equal(missingExpo.status, 2, 'Android must reject an unavailable exact Expo CLI before a build attempt.');
+      assert.match(missingExpo.stderr, /EXPO_WRAPPER_PATH_DRIFT/);
+      assert.equal(existsSync(missingExpoOutput), false, 'Android missing-Expo rejection must not create its evidence root.');
+    }
+
+    if (script.platform === 'iOS') {
+      const prepareSource = readFileSync(path.join(root, 'scripts/prepare-ios-local.sh'), 'utf8');
+      assert.match(prepareSource, /"\$NODE_EXECUTABLE" "\$EXPO_CLI" prebuild --platform ios --no-install --clean/);
+      assert.match(prepareSource, /scripts\/verify-release-toolchain\.mjs/);
+      assert.doesNotMatch(prepareSource, /\bnpx\s+expo\b/);
+    }
 
     const internal = path.join('/Users/divay/.cache/maina-build-v2/outputs', `storage-contract-must-not-write-${randomUUID()}`);
     const internalResult = invoke(script, internal);
