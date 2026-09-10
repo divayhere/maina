@@ -115,6 +115,110 @@ private func testInterruptedPromotionRecovery() {
   passed += 1
 }
 
+private func testBoundedVersionComparisonDoesNotNarrow() {
+  let comparisons: [(String, String, Int)] = [
+    ("17", "17", 0),
+    ("17.0", "17", 0),
+    ("17.0.0", "17.0", 0),
+    ("17.0.1", "17.0", 1),
+    ("18", "17.99999999999999999999999999999999", 1),
+    ("00017.00", "17.0.0", 0),
+    ("17", "99999999999999999999999999999999", -1),
+    ("17.1", "17.99999999999999999999999999999999", -1),
+    ("17.1.1", "17.1.99999999999999999999999999999999", -1),
+  ]
+  for (left, right, expected) in comparisons {
+    expect(MainaModelPackLifecyclePolicy.compareVersions(left, right) == Optional(expected),
+      "bounded version comparison must preserve every decimal component")
+  }
+  expect(MainaModelPackLifecyclePolicy.compareVersions("1.\(String(repeating: "0", count: 62))", "1") == 0,
+    "the exact 64-character boundary remains valid")
+  for invalid in [
+    "", "17.", ".17", "17..0", "17.0.0.0", "-17", "+17", " 17", "17 ", "17\n",
+    "１７", "١٧", String(repeating: "9", count: 65),
+  ] {
+    expect(MainaModelPackLifecyclePolicy.compareVersions("17", invalid) == nil,
+      "invalid, Unicode, or oversized version text must fail closed")
+  }
+  passed += 1
+}
+
+private func testManifestScalarAndContainerShapesFailClosed() {
+  let mutations: [([String: Any]) -> [String: Any]] = [
+    { input in var value = input; value["packVersion"] = 1; return value },
+    { input in var value = input; value["files"] = ["0": (input["files"] as! [[String: Any]])[0]]; return value },
+    { input in var value = input; value["platforms"] = ["0": (input["platforms"] as! [[String: Any]])[0]]; return value },
+    { input in var value = input; value["platforms"] = [NSNull(), (input["platforms"] as! [[String: Any]])[1]]; return value },
+    { input in
+      var value = input; var platforms = value["platforms"] as! [[String: Any]]
+      platforms[0]["minOsVersion"] = 26; value["platforms"] = platforms; return value
+    },
+    { input in
+      var value = input; var platforms = value["platforms"] as! [[String: Any]]
+      platforms[0]["architectures"] = [64]; value["platforms"] = platforms; return value
+    },
+    { input in
+      var value = input; var files = value["files"] as! [[String: Any]]
+      files[0]["chunkSha256"] = [1]; value["files"] = files; return value
+    },
+  ]
+  for mutation in mutations {
+    withTemporaryRoot("manifest-shape") { root in
+      var manifest = mutation(syntheticManifest())
+      rehashManifest(&manifest)
+      expect(manifestBeginFailure(manifest, root: root) == "MANIFEST_INVALID",
+        "scalar and container drift must use the closed manifest reason")
+      expectNoAcquisitionState(root)
+    }
+  }
+  passed += 1
+}
+
+private func testPlatformReasonsAndHostileMinimumFailBeforeAcquisition() {
+  let android = platform("android", "26", "arm64-v8a", "sherpa-onnx-1.13.6",
+    "0012d9a28f15bd6fb966b62b70a75da3990512fdccce28b83098248ce4be1698", String(repeating: "a", count: 64))
+  let ios = platform("ios", "17.0", "arm64", "sherpa-onnx-1.13.4-ios-no-tts",
+    "d8baaa925248e8e8ad23870208cdaf3d093623e6733aede2c23862f30c5aac62", String(repeating: "b", count: 64))
+  for platforms: [[String: Any]] in [[], [android], [android, android], [android, ios, ios]] {
+    withTemporaryRoot("platform-identity") { root in
+      var manifest = syntheticManifest()
+      manifest["platforms"] = platforms
+      rehashManifest(&manifest)
+      expect(manifestBeginFailure(manifest, root: root) == "PLATFORM_COMPATIBILITY_MISMATCH",
+        "platform cardinality and identity must use the compatibility reason")
+      expectNoAcquisitionState(root)
+    }
+  }
+
+  for platforms in [
+    [platform("windows", "17.0", "arm64", "sherpa-onnx-1.13.4-ios-no-tts",
+      "d8baaa925248e8e8ad23870208cdaf3d093623e6733aede2c23862f30c5aac62", String(repeating: "b", count: 64)), ios],
+    [platform("android", String(repeating: "9", count: 65), "arm64-v8a", "sherpa-onnx-1.13.6",
+      "0012d9a28f15bd6fb966b62b70a75da3990512fdccce28b83098248ce4be1698", String(repeating: "a", count: 64)), ios],
+  ] {
+    withTemporaryRoot("platform-structure") { root in
+      var manifest = syntheticManifest()
+      manifest["platforms"] = platforms
+      rehashManifest(&manifest)
+      expect(manifestBeginFailure(manifest, root: root) == "MANIFEST_INVALID",
+        "invalid platform fields must use the structural manifest reason")
+      expectNoAcquisitionState(root)
+    }
+  }
+
+  withTemporaryRoot("hostile-minimum") { root in
+    var manifest = syntheticManifest()
+    var platforms = manifest["platforms"] as! [[String: Any]]
+    platforms[1]["minOsVersion"] = String(repeating: "9", count: 32)
+    manifest["platforms"] = platforms
+    rehashManifest(&manifest)
+    expect(manifestBeginFailure(manifest, root: root) == "PLATFORM_COMPATIBILITY_MISMATCH",
+      "a correctly hashed unrepresentable minimum must remain incompatible")
+    expectNoAcquisitionState(root)
+  }
+  passed += 1
+}
+
 private func testPreRenameCrashUsesStagingAndClearsWriter() {
   withTemporaryRoot("pre-rename") { root in
     let manifest = syntheticManifest()
@@ -430,6 +534,36 @@ private func withTemporaryRoot(_ suffix: String, body: (URL) -> Void) {
   body(root)
 }
 
+private func rehashManifest(_ manifest: inout [String: Any]) {
+  manifest.removeValue(forKey: "manifestSha256")
+  manifest["manifestSha256"] = sha256(canonicalJSON(manifest))
+}
+
+private func manifestBeginFailure(_ manifest: [String: Any], root: URL) -> String {
+  let data = try! JSONSerialization.data(withJSONObject: manifest, options: [.sortedKeys])
+  let text = String(data: data, encoding: .utf8)!
+  do {
+    _ = try MainaModelPackLifecycle(root: root).begin(
+      manifestJSON: text,
+      partialOverheadBytes: 0,
+      safetyMarginBytes: 0
+    )
+    return "NONE"
+  } catch {
+    return (error as NSError).localizedDescription
+  }
+}
+
+private func expectNoAcquisitionState(_ root: URL) {
+  expect(!FileManager.default.fileExists(atPath: root.appendingPathComponent("writer.json").path),
+    "rejected manifests cannot create a writer")
+  expect(!FileManager.default.fileExists(atPath: root.appendingPathComponent("current.json").path),
+    "rejected manifests cannot create current acquisition state")
+  let staging = root.appendingPathComponent("staging", isDirectory: true)
+  let entries = (try? FileManager.default.contentsOfDirectory(atPath: staging.path)) ?? []
+  expect(entries.isEmpty, "rejected manifests cannot create a staging acquisition")
+}
+
 private func prepareReadyLifecycle(_ root: URL) -> (
   lifecycle: MainaModelPackLifecycle,
   manifestSHA: String,
@@ -595,11 +729,14 @@ private struct MainaIOSModelPackLifecycleTests {
     testPromotion()
     testCleanup()
     testInterruptedPromotionRecovery()
+    testBoundedVersionComparisonDoesNotNarrow()
+    testManifestScalarAndContainerShapesFailClosed()
+    testPlatformReasonsAndHostileMinimumFailBeforeAcquisition()
     testPreRenameCrashUsesStagingAndClearsWriter()
     testStatusExposesAcquisitionAndTerminalFailure()
     testResultMappingUsesEngineIdentity()
     testLegacyResultMappingMigrationFailsClosed()
     testResultRecordSchemaAndLocationFailClosed()
-    print("Maina iOS model-pack lifecycle policy tests passed: \(passed)/11")
+    print("Maina iOS model-pack lifecycle policy tests passed: \(passed)/14")
   }
 }

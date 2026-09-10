@@ -91,6 +91,28 @@ enum MainaModelPackLifecyclePolicy {
     if !readyPointsToWriter { return "mark_failed_preserve_current" }
     return previousPointerValid ? "rollback_to_previous" : "invalidate_first_activation"
   }
+
+  /// Compare bounded dotted-decimal versions without narrowing through Int or Double.
+  static func compareVersions(_ left: String, _ right: String) -> Int? {
+    guard let leftParts = versionComponents(left), let rightParts = versionComponents(right) else { return nil }
+    for index in 0..<max(leftParts.count, rightParts.count) {
+      let leftPart = leftParts.indices.contains(index) ? leftParts[index] : "0"
+      let rightPart = rightParts.indices.contains(index) ? rightParts[index] : "0"
+      if leftPart.count != rightPart.count { return leftPart.count > rightPart.count ? 1 : -1 }
+      if leftPart != rightPart { return leftPart > rightPart ? 1 : -1 }
+    }
+    return 0
+  }
+
+  private static func versionComponents(_ value: String) -> [String]? {
+    guard (1...64).contains(value.count),
+      value.range(of: "^[0-9]+(?:\\.[0-9]+){0,2}$", options: .regularExpression) != nil
+    else { return nil }
+    return value.split(separator: ".", omittingEmptySubsequences: false).map { component in
+      let normalized = component.drop(while: { $0 == "0" })
+      return normalized.isEmpty ? "0" : String(normalized)
+    }
+  }
 }
 
 final class MainaModelPackLifecycle {
@@ -617,6 +639,7 @@ final class MainaModelPackLifecycle {
 
   private func parseManifest(_ text: String) throws -> Manifest {
     guard let data = text.data(using: .utf8),
+      (2...1_000_000).contains(data.count),
       let object = try JSONSerialization.jsonObject(with: data) as? [String: Any]
     else { throw failure("MANIFEST_INVALID") }
     try exactKeys(object, expected: manifestKeys, code: "MANIFEST_INVALID")
@@ -629,7 +652,12 @@ final class MainaModelPackLifecycle {
     else { throw failure("MANIFEST_INVALID") }
     for file in fileObjects { try exactKeys(file, expected: fileKeys, code: "MANIFEST_INVALID") }
     for platform in platformObjects { try exactKeys(platform, expected: platformKeys, code: "MANIFEST_INVALID") }
-    let decoded = try JSONDecoder().decode(Manifest.self, from: data)
+    let decoded: Manifest
+    do {
+      decoded = try JSONDecoder().decode(Manifest.self, from: data)
+    } catch {
+      throw failure("MANIFEST_INVALID")
+    }
     var paths = Set<String>()
     var folded = Set<String>()
     for file in decoded.files {
@@ -640,9 +668,7 @@ final class MainaModelPackLifecycle {
         folded.insert(file.path.lowercased()).inserted
       else { throw failure("MANIFEST_PATH_INVALID") }
     }
-    guard paths == Set(requiredFiles.keys), decoded.platforms.count == 2,
-      Set(decoded.platforms.map(\.osFamily)) == Set(["android", "ios"])
-    else { throw failure("MANIFEST_FILE_SET_MISMATCH") }
+    guard paths == Set(requiredFiles.keys) else { throw failure("MANIFEST_FILE_SET_MISMATCH") }
     for platform in decoded.platforms {
       guard ["android", "ios"].contains(platform.osFamily), validVersion(platform.minOsVersion),
         !platform.architectures.isEmpty, Set(platform.architectures).count == platform.architectures.count,
@@ -650,6 +676,9 @@ final class MainaModelPackLifecycle {
         validSHA(platform.runtimeSha256), validSHA(platform.smokeExpectedTextSha256)
       else { throw failure("MANIFEST_INVALID") }
     }
+    guard decoded.platforms.count == 2,
+      Set(decoded.platforms.map(\.osFamily)) == Set(["android", "ios"])
+    else { throw failure("PLATFORM_COMPATIBILITY_MISMATCH") }
     var unsigned = object
     unsigned.removeValue(forKey: "manifestSha256")
     guard sha256(Data(try canonicalJSON(unsigned).utf8)) == manifestSHA else { throw failure("MANIFEST_HASH_MISMATCH") }
@@ -657,16 +686,18 @@ final class MainaModelPackLifecycle {
   }
 
   private func requirePlatformCompatible(_ manifest: Manifest) throws {
-    guard platformCompatible(), manifest.platform.architectures.contains("arm64"),
+    guard let comparison = MainaModelPackLifecyclePolicy.compareVersions(Self.osVersion(), manifest.platform.minOsVersion),
+      platformCompatible(), manifest.platform.architectures.contains("arm64"),
       manifest.platform.runtimeVersion == Self.runtimeVersion,
       manifest.platform.runtimeSha256 == Self.runtimeSHA256,
-      compareVersions(Self.osVersion(), manifest.platform.minOsVersion) >= 0
+      comparison >= 0
     else { throw failure("PLATFORM_COMPATIBILITY_MISMATCH") }
   }
 
   private func platformCompatible() -> Bool {
     #if arch(arm64)
-    return compareVersions(Self.osVersion(), "17.0") >= 0
+    guard let comparison = MainaModelPackLifecyclePolicy.compareVersions(Self.osVersion(), "17.0") else { return false }
+    return comparison >= 0
     #else
     return false
     #endif
@@ -1198,7 +1229,9 @@ final class MainaModelPackLifecycle {
 
   private func validSHA(_ value: String) -> Bool { value.range(of: "^[a-f0-9]{64}$", options: .regularExpression) != nil }
   private func validID(_ value: String) -> Bool { value.range(of: "^[A-Za-z0-9][A-Za-z0-9._:-]{0,191}$", options: .regularExpression) != nil }
-  private func validVersion(_ value: String) -> Bool { value.range(of: "^[0-9]+(?:\\.[0-9]+){0,2}$", options: .regularExpression) != nil }
+  private func validVersion(_ value: String) -> Bool {
+    MainaModelPackLifecyclePolicy.compareVersions(value, value) != nil
+  }
   private func safeRelativePath(_ value: String) -> Bool {
     !value.isEmpty && !value.hasPrefix("/") && !value.contains("\\")
       && value.split(separator: "/", omittingEmptySubsequences: false).allSatisfy { !$0.isEmpty && $0 != "." && $0 != ".." }
@@ -1207,16 +1240,6 @@ final class MainaModelPackLifecycle {
   private static func osVersion() -> String {
     let value = ProcessInfo.processInfo.operatingSystemVersion
     return "\(value.majorVersion).\(value.minorVersion).\(value.patchVersion)"
-  }
-
-  private func compareVersions(_ left: String, _ right: String) -> Int {
-    let a = left.split(separator: ".").compactMap { Int($0) }
-    let b = right.split(separator: ".").compactMap { Int($0) }
-    for index in 0..<max(a.count, b.count) {
-      let comparison = (a.indices.contains(index) ? a[index] : 0) - (b.indices.contains(index) ? b[index] : 0)
-      if comparison != 0 { return comparison > 0 ? 1 : -1 }
-    }
-    return 0
   }
 
   private func failure(_ code: String) -> NSError {
