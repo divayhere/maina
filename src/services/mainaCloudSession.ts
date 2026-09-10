@@ -40,11 +40,13 @@ export type MainaCloudExecutionContext = Readonly<{
   scopesVerifiedAt: number;
 }>;
 
-type MainaCloudSessionGuard = Readonly<{
+export type MainaCloudRequestContext = Readonly<{
   ownerUserId: string;
   accessToken: string;
   scopesVerifiedAt: number | null;
 }>;
+
+type MainaCloudSessionGuard = MainaCloudRequestContext;
 
 export class MainaCloudScopeError extends Error {
   constructor(
@@ -57,6 +59,8 @@ export class MainaCloudScopeError extends Error {
 }
 
 export class MainaCloudSessionMismatchError extends Error {
+  readonly failureClass = 'transport_unknown' as const;
+
   constructor() {
     super('The Maina Cloud session changed while the request was in progress.');
     this.name = 'MainaCloudSessionMismatchError';
@@ -207,6 +211,12 @@ function guardMainaCloudSession(session: MainaCloudSession): MainaCloudSessionGu
   });
 }
 
+export function pinMainaCloudRequestContext(
+  session: MainaCloudSession,
+): MainaCloudRequestContext {
+  return guardMainaCloudSession(session);
+}
+
 async function assertMainaCloudSessionGuard(context: MainaCloudSessionGuard): Promise<void> {
   await withSessionMutation(async () => {
     if (!sessionMatchesGuard(await readStoredSession(), context)) {
@@ -245,6 +255,14 @@ async function clearMainaCloudSessionIfMatching(
   return clearedOwnerUserId !== null;
 }
 
+export async function clearMainaCloudSessionForRequestContext(
+  context: MainaCloudRequestContext,
+): Promise<void> {
+  if (!await clearMainaCloudSessionIfMatching(context)) {
+    throw new MainaCloudSessionMismatchError();
+  }
+}
+
 export async function mainaCloudRequestJson(
   path: string,
   init: RequestInit = {},
@@ -255,6 +273,9 @@ export async function mainaCloudRequestJson(
 ): Promise<MainaCloudJsonResponse> {
   const session = await getMainaCloudSession();
   if (!session) {
+    if (options?.executionContext) {
+      throw new MainaCloudSessionMismatchError();
+    }
     throw new MainaCloudApiError(
       'Maina Cloud is not connected on this phone.',
       401,

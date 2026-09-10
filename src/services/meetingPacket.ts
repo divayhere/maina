@@ -20,7 +20,13 @@ import { log } from '@/services/logger';
 import { maybeQueueMainaKnowledgeCloudSync } from '@/services/mainaKnowledgeCloud';
 import { maybeQueueMainaKnowledgeCloudPacketCorrections } from '@/services/mainaKnowledgeCloudCorrections';
 import { mainaKnowledgeCloudSourceKey } from '@/services/mainaKnowledgeCloudCore';
-import { MainaCloudApiError, getMainaCloudSession, mainaCloudRequestJson } from '@/services/mainaCloudSession';
+import {
+  MainaCloudApiError,
+  getMainaCloudSession,
+  mainaCloudRequestJson,
+  pinMainaCloudRequestContext,
+  type MainaCloudRequestContext,
+} from '@/services/mainaCloudSession';
 import { notifyMeetingPipelineChanged } from '@/services/meetingPipelineSignals';
 import { isTerminalPartialTranscript } from '@/services/transcriptCoverage';
 import {
@@ -293,7 +299,11 @@ async function saveReadyPacket(meeting: Meeting, job: CloudPacketJob) {
   }
 }
 
-async function createCloudJob(meeting: Meeting, regenerate: boolean): Promise<CloudPacketJob> {
+async function createCloudJob(
+  meeting: Meeting,
+  regenerate: boolean,
+  requestContext: MainaCloudRequestContext,
+): Promise<CloudPacketJob> {
   const [transcript, blocks] = await Promise.all([
     buildTranscriptText(meeting.id, { includeTimestamps: false }),
     loadTranscriptBlocks(meeting.id),
@@ -318,21 +328,29 @@ async function createCloudJob(meeting: Meeting, regenerate: boolean): Promise<Cl
         })) } : {}),
       },
     }),
-  });
+  }, { executionContext: requestContext });
   const job = parseJob(response.data);
   if (!job) throw new Error('Maina Cloud returned an invalid notes-job response. Maina will retry safely.');
   return job;
 }
 
-async function getCloudJob(jobId: string): Promise<CloudPacketJob> {
-  const response = await mainaCloudRequestJson(`/v1/meeting-packets/${encodeURIComponent(jobId)}`);
+async function getCloudJob(jobId: string, requestContext: MainaCloudRequestContext): Promise<CloudPacketJob> {
+  const response = await mainaCloudRequestJson(
+    `/v1/meeting-packets/${encodeURIComponent(jobId)}`,
+    {},
+    { executionContext: requestContext },
+  );
   const job = parseJob(response.data);
   if (!job) throw new Error('Maina Cloud returned an invalid notes status. Maina will retry safely.');
   return job;
 }
 
-async function retryCloudJob(jobId: string): Promise<CloudPacketJob> {
-  const response = await mainaCloudRequestJson(`/v1/meeting-packets/${encodeURIComponent(jobId)}/retry`, { method: 'POST' });
+async function retryCloudJob(jobId: string, requestContext: MainaCloudRequestContext): Promise<CloudPacketJob> {
+  const response = await mainaCloudRequestJson(
+    `/v1/meeting-packets/${encodeURIComponent(jobId)}/retry`,
+    { method: 'POST' },
+    { executionContext: requestContext },
+  );
   const job = parseJob(response.data);
   if (!job) throw new Error('Maina Cloud could not requeue the notes job. Maina will retry safely.');
   return job;
@@ -348,10 +366,12 @@ async function reconcileMeetingPacket(
   if (meeting.summaryStatus === 'retryable'
     && options?.forceRetry !== true
     && !cloudRetryDue(meeting.cloudNotesNextRetryAt)) return;
-  if (!await getMainaCloudSession()) {
+  const session = await getMainaCloudSession();
+  if (!session) {
     await setMeetingSummaryState(meetingId, 'failed', { error: 'Connect Maina Cloud once to create notes automatically.' });
     return;
   }
+  const requestContext = pinMainaCloudRequestContext(session);
   // Observe the native enqueue outcome before beginning transport. If this
   // process dies after the request, SQLite plus the OS scheduler retain the
   // recovery generation; server source/job keys keep the call idempotent.
@@ -360,7 +380,9 @@ async function reconcileMeetingPacket(
   try {
     const shouldCreate = options?.regenerate === true || !meeting.cloudNotesJobId;
     operation = shouldCreate ? 'create_job' : 'poll_job';
-    let job = shouldCreate ? await createCloudJob(meeting, options?.regenerate === true) : await getCloudJob(meeting.cloudNotesJobId!);
+    let job = shouldCreate
+      ? await createCloudJob(meeting, options?.regenerate === true, requestContext)
+      : await getCloudJob(meeting.cloudNotesJobId!, requestContext);
     if (job.status === 'ready') {
       await saveReadyPacket(meeting, job);
       return;
@@ -369,7 +391,7 @@ async function reconcileMeetingPacket(
       if (meeting.summaryStatus === 'retryable'
         && (options?.forceRetry === true || cloudRetryDue(meeting.cloudNotesNextRetryAt))) {
         operation = 'retry_provider';
-        job = await retryCloudJob(job.job_id);
+        job = await retryCloudJob(job.job_id, requestContext);
         if (job.status !== 'failed_retryable') {
           await updateMeeting(meetingId, { cloudNotesNextRetryAt: null });
         }
