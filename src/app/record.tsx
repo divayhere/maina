@@ -1386,8 +1386,8 @@ export default function RecordScreen() {
             </View>
           </Animated.View>
         </Animated.View>
-        <AppText variant="timer" style={styles.center}>{formatDuration(elapsed)}</AppText>
-        <AppText variant="title" muted style={styles.center}>
+        <AppText testID="recording-timer" variant="timer" style={styles.center}>{formatDuration(elapsed)}</AppText>
+        <AppText testID="recording-state" variant="title" muted style={styles.center}>
           {paused ? 'Paused' : 'Recording'}
         </AppText>
         <AppText variant="body" muted style={styles.center}>
@@ -1402,8 +1402,8 @@ export default function RecordScreen() {
       ) : null}
 
       <View style={{ paddingBottom: insets.bottom + space.lg, gap: space.md }}>
-        <PrimaryButton label="Stop and save" onPress={stopAndSave} />
-        <SecondaryButton label={paused ? 'Resume' : 'Pause'} onPress={paused ? resumeRecording : pauseRecording} />
+        <PrimaryButton testID="recording-stop-save" label="Stop and save" onPress={stopAndSave} />
+        <SecondaryButton testID="recording-pause-resume" label={paused ? 'Resume' : 'Pause'} onPress={paused ? resumeRecording : pauseRecording} />
         <Pressable onPress={confirmCancel} hitSlop={12}>
           <AppText variant="bodyStrong" color={theme.warn} style={styles.center}>
             Discard this recording

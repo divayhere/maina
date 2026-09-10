@@ -69,6 +69,7 @@
     "verify:mkc-meeting-tags": "node scripts/import-mkc-meeting-tags.mjs --check",
     "verify:native-recorder": "node scripts/verify-native-recorder.mjs",
     "verify:android-command-surface": "node scripts/verify-android-command-surface.mjs",
+    "verify:android-lifecycle-qualification": "node scripts/verify-android-lifecycle-qualification.mjs",
     "verify:android-source-native": "bash scripts/verify-android-source-native.sh",
     "verify:pipeline-wake-api": "node scripts/verify-pipeline-wake-native-api.mjs",
     "verify:m0-harness": "node scripts/verify-m0-harness-safety.mjs && node scripts/verify-m0-replay-harness.mjs && node scripts/verify-release-provenance.mjs",
