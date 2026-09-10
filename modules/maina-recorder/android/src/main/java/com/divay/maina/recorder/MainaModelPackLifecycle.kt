@@ -975,7 +975,6 @@ internal class MainaModelPackLifecycle(
             throw IllegalArgumentException("MANIFEST_FILE_SET_MISMATCH")
         }
         val platforms = raw.opt("platforms") as? JSONArray ?: throw IllegalArgumentException("MANIFEST_INVALID")
-        if (platforms.length() != 2) throw IllegalArgumentException("PLATFORM_COMPATIBILITY_MISMATCH")
         var selected: PlatformSpec? = null
         val names = mutableSetOf<String>()
         for (index in 0 until platforms.length()) {
@@ -1000,7 +999,9 @@ internal class MainaModelPackLifecycle(
                 minOsVersion, architectureValues, runtimeVersion, runtimeSha256, smokeExpectedTextSha256,
             )
         }
-        if (names != setOf("android", "ios") || selected == null) throw IllegalArgumentException("PLATFORM_COMPATIBILITY_MISMATCH")
+        if (platforms.length() != 2 || names != setOf("android", "ios") || selected == null) {
+            throw IllegalArgumentException("PLATFORM_COMPATIBILITY_MISMATCH")
+        }
         val unsigned = JSONObject(raw.toString()).also { it.remove("manifestSha256") }
         if (sha256(canonicalJson(unsigned).toByteArray()) != manifestSha256) {
             throw IllegalArgumentException("MANIFEST_HASH_MISMATCH")
