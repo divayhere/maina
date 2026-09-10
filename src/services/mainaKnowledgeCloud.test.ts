@@ -11,6 +11,8 @@ const {
   mockUpdateMeetingPipelineStage,
   mockGetMainaKnowledgeCloudSettings,
   mockClearMainaCloudSession,
+  mockClearMainaCloudSessionForRequestContext,
+  mockGetMainaCloudSession,
   mockCloudRequest,
 } = vi.hoisted(() => ({
   mockGetMeeting: vi.fn(),
@@ -23,6 +25,8 @@ const {
   mockUpdateMeetingPipelineStage: vi.fn(),
   mockGetMainaKnowledgeCloudSettings: vi.fn(),
   mockClearMainaCloudSession: vi.fn(),
+  mockClearMainaCloudSessionForRequestContext: vi.fn(),
+  mockGetMainaCloudSession: vi.fn(),
   mockCloudRequest: vi.fn(),
 }));
 
@@ -51,7 +55,14 @@ vi.mock('@/services/logger', () => ({
 
 vi.mock('@/services/mainaCloudSession', () => ({
   clearMainaCloudSession: mockClearMainaCloudSession,
+  clearMainaCloudSessionForRequestContext: mockClearMainaCloudSessionForRequestContext,
+  getMainaCloudSession: mockGetMainaCloudSession,
   mainaCloudRequestJson: mockCloudRequest,
+  pinMainaCloudRequestContext: (session: { accessToken: string; scopesVerifiedAt?: number | null; user: { userId: string } }) => ({
+    ownerUserId: session.user.userId,
+    accessToken: session.accessToken,
+    scopesVerifiedAt: session.scopesVerifiedAt ?? null,
+  }),
   shouldClearMainaCloudSession: (cause: { status?: number } | null) => cause?.status === 401,
 }));
 vi.mock('@/services/pipelineWakeScheduler', () => ({
@@ -98,6 +109,12 @@ describe('mainaKnowledgeCloud service', () => {
       enabled: true,
       baseUrl: 'https://mkc-backend.maina-knowledge-cloud.workers.dev',
       token: 'mkc_test_token',
+    });
+    mockGetMainaCloudSession.mockResolvedValue({
+      accessToken: 'mkc_test_token',
+      scopes: [],
+      scopesVerifiedAt: null,
+      user: { userId: 'owner-1', email: 'owner@example.test' },
     });
     mockGetMeeting.mockImplementation(async () => meeting);
     mockGetTranscriptPage.mockResolvedValue({
@@ -149,10 +166,31 @@ describe('mainaKnowledgeCloud service', () => {
     expect(meeting.knowledgeCloudError).toBe(
       'Reconnect Maina Cloud. Your recording and transcript are safe.',
     );
-    expect(mockClearMainaCloudSession).toHaveBeenCalledOnce();
+    expect(mockClearMainaCloudSessionForRequestContext).toHaveBeenCalledWith(
+      expect.objectContaining({ ownerUserId: 'owner-1' }),
+    );
+    expect(mockClearMainaCloudSession).not.toHaveBeenCalled();
     expect(mockUpdateMeetingPipelineStage).toHaveBeenLastCalledWith(expect.objectContaining({
       stage: 'mkc', state: 'failed',
     }));
+  });
+
+  it('requeues a late owner-A 401 when owner B wins the conditional clear', async () => {
+    mockCloudRequest.mockResolvedValue({
+      status: 401,
+      ok: false,
+      data: { error: { code: 'auth_invalid' } },
+    });
+    mockClearMainaCloudSessionForRequestContext.mockRejectedValue(Object.assign(
+      new Error('The Maina Cloud session changed while the request was in progress.'),
+      { name: 'MainaCloudSessionMismatchError', failureClass: 'transport_unknown' },
+    ));
+
+    await runMainaKnowledgeCloudSync('meeting-1');
+
+    expect(meeting.knowledgeCloudSyncStatus).toBe('sync_failed_retryable');
+    expect(meeting.knowledgeCloudFailureClass).toBe('transport_unknown');
+    expect(mockClearMainaCloudSession).not.toHaveBeenCalled();
   });
 
   it('keeps network failures retryable while preserving the frozen payload snapshot', async () => {
@@ -168,6 +206,30 @@ describe('mainaKnowledgeCloud service', () => {
     expect(mockUpdateMeetingPipelineStage).toHaveBeenLastCalledWith(expect.objectContaining({
       stage: 'mkc', state: 'deferred',
     }));
+  });
+
+  it('keeps a pinned owner-session replacement retryable and never clears the replacement', async () => {
+    mockCloudRequest.mockRejectedValue(Object.assign(
+      new Error('The Maina Cloud session changed while the request was in progress.'),
+      { name: 'MainaCloudSessionMismatchError', failureClass: 'transport_unknown' },
+    ));
+
+    await runMainaKnowledgeCloudSync('meeting-1');
+
+    expect(meeting.knowledgeCloudSyncStatus).toBe('sync_failed_retryable');
+    expect(meeting.knowledgeCloudFailureClass).toBe('transport_unknown');
+    expect(mockClearMainaCloudSession).not.toHaveBeenCalled();
+    expect(mockClearMainaCloudSessionForRequestContext).not.toHaveBeenCalled();
+    expect(mockCloudRequest).toHaveBeenCalledWith(
+      '/v1/sources',
+      expect.any(Object),
+      expect.objectContaining({
+        executionContext: expect.objectContaining({
+          ownerUserId: 'owner-1',
+          accessToken: 'mkc_test_token',
+        }),
+      }),
+    );
   });
 
   it('terminalizes malformed successful JSON without retrying or changing source identity', async () => {
@@ -258,7 +320,10 @@ describe('mainaKnowledgeCloud service', () => {
     expect(mockCloudRequest).toHaveBeenCalledWith(
       '/v1/sources',
       expect.objectContaining({ body: frozenPayloadJson }),
-      { acceptHttpErrors: true },
+      expect.objectContaining({
+        acceptHttpErrors: true,
+        executionContext: expect.objectContaining({ ownerUserId: 'owner-1' }),
+      }),
     );
     expect(meeting.knowledgeCloudSyncStatus).toBe('sync_succeeded');
     expect(mockUpdateMeetingPipelineStage).toHaveBeenLastCalledWith(expect.objectContaining({

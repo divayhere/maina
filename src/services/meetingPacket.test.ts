@@ -41,6 +41,11 @@ vi.mock('@/services/mainaCloudSession', () => ({
   },
   getMainaCloudSession: mocks.getSession,
   mainaCloudRequestJson: mocks.cloudRequest,
+  pinMainaCloudRequestContext: (session: { accessToken: string; scopesVerifiedAt?: number | null; user: { userId: string } }) => ({
+    ownerUserId: session.user.userId,
+    accessToken: session.accessToken,
+    scopesVerifiedAt: session.scopesVerifiedAt ?? null,
+  }),
 }));
 vi.mock('@/services/pipelineWakeScheduler', () => ({
   armPipelineNetworkRecovery: vi.fn().mockResolvedValue({ armed: true, generation: 1 }),
@@ -101,7 +106,11 @@ describe('meetingPacket cloud broker integration', () => {
 
     await runMeetingPacketGeneration('m1');
 
-    expect(mocks.cloudRequest).toHaveBeenCalledWith('/v1/meeting-packets', expect.objectContaining({ method: 'POST' }));
+    expect(mocks.cloudRequest).toHaveBeenCalledWith(
+      '/v1/meeting-packets',
+      expect.objectContaining({ method: 'POST' }),
+      expect.objectContaining({ executionContext: expect.objectContaining({ ownerUserId: 'u1' }) }),
+    );
     expect(mocks.saveMeetingPacket).toHaveBeenCalledWith(expect.objectContaining({ providerId: 'google', model: 'managed-model' }));
     expect(mocks.replaceMeetingTodos).toHaveBeenCalledWith('m1', [expect.objectContaining({ text: 'Share revised timing.' })]);
     expect(mocks.maybeQueueSource).toHaveBeenCalledWith('m1');
@@ -145,7 +154,11 @@ describe('meetingPacket cloud broker integration', () => {
 
     await reconcilePendingMeetingPackets();
     expect(mocks.saveMeetingPacket).toHaveBeenCalled();
-    expect(mocks.cloudRequest).toHaveBeenCalledWith('/v1/meeting-packets/job-recovered');
+    expect(mocks.cloudRequest).toHaveBeenCalledWith(
+      '/v1/meeting-packets/job-recovered',
+      {},
+      expect.objectContaining({ executionContext: expect.objectContaining({ ownerUserId: 'u1' }) }),
+    );
   });
 
   it('keeps a user-initiated iOS drain attached until the existing job settles', async () => {
@@ -201,7 +214,11 @@ describe('meetingPacket cloud broker integration', () => {
 
     await runMeetingPacketGeneration('m1', { forceRetry: true });
     expect(mocks.cloudRequest).toHaveBeenCalledOnce();
-    expect(mocks.cloudRequest).toHaveBeenCalledWith('/v1/meeting-packets/stable-job-id');
+    expect(mocks.cloudRequest).toHaveBeenCalledWith(
+      '/v1/meeting-packets/stable-job-id',
+      {},
+      expect.objectContaining({ executionContext: expect.objectContaining({ ownerUserId: 'u1' }) }),
+    );
     expect(mocks.cloudRequest).not.toHaveBeenCalledWith(
       '/v1/meeting-packets',
       expect.objectContaining({ method: 'POST' }),
@@ -249,11 +266,17 @@ describe('meetingPacket cloud broker integration', () => {
     await runMeetingPacketGeneration('m1', { forceRetry: true });
 
     expect(mocks.listMeetingsEligibleForSummaryQueue).toHaveBeenCalledWith({ forceRetry: true });
-    expect(mocks.cloudRequest).toHaveBeenNthCalledWith(1, '/v1/meeting-packets/stable-job-id');
+    expect(mocks.cloudRequest).toHaveBeenNthCalledWith(
+      1,
+      '/v1/meeting-packets/stable-job-id',
+      {},
+      expect.objectContaining({ executionContext: expect.objectContaining({ ownerUserId: 'u1' }) }),
+    );
     expect(mocks.cloudRequest).toHaveBeenNthCalledWith(
       2,
       '/v1/meeting-packets/stable-job-id/retry',
       { method: 'POST' },
+      expect.objectContaining({ executionContext: expect.objectContaining({ ownerUserId: 'u1' }) }),
     );
     expect(mocks.cloudRequest).toHaveBeenCalledTimes(2);
     expect(mocks.cloudRequest).not.toHaveBeenCalledWith(
@@ -286,11 +309,17 @@ describe('meetingPacket cloud broker integration', () => {
     await Promise.all([normal, forced]);
 
     expect(mocks.cloudRequest).toHaveBeenCalledTimes(2);
-    expect(mocks.cloudRequest).toHaveBeenNthCalledWith(1, '/v1/meeting-packets/stable-job-id');
+    expect(mocks.cloudRequest).toHaveBeenNthCalledWith(
+      1,
+      '/v1/meeting-packets/stable-job-id',
+      {},
+      expect.objectContaining({ executionContext: expect.objectContaining({ ownerUserId: 'u1' }) }),
+    );
     expect(mocks.cloudRequest).toHaveBeenNthCalledWith(
       2,
       '/v1/meeting-packets/stable-job-id/retry',
       { method: 'POST' },
+      expect.objectContaining({ executionContext: expect.objectContaining({ ownerUserId: 'u1' }) }),
     );
     expect(meeting.cloudNotesJobId).toBe('stable-job-id');
   });
@@ -367,6 +396,29 @@ describe('meetingPacket cloud broker integration', () => {
       visibleError: expect.stringContaining('continue automatically'),
     }));
     expect(mocks.maybeQueueSource).not.toHaveBeenCalled();
+  });
+
+  it('defers an owner-session replacement under the original pinned request context', async () => {
+    mocks.cloudRequest.mockRejectedValue(Object.assign(
+      new Error('The Maina Cloud session changed while the request was in progress.'),
+      { name: 'MainaCloudSessionMismatchError', failureClass: 'transport_unknown' },
+    ));
+
+    await runMeetingPacketGeneration('m1');
+
+    expect(mocks.persistMeetingPacketRetry).toHaveBeenCalledWith(expect.objectContaining({
+      meetingId: 'm1',
+      failureClass: 'transport_unknown',
+      visibleError: 'Waiting for internet. Maina will continue automatically.',
+    }));
+    expect(mocks.cloudRequest).toHaveBeenCalledWith(
+      '/v1/meeting-packets',
+      expect.any(Object),
+      expect.objectContaining({
+        executionContext: expect.objectContaining({ ownerUserId: 'u1', accessToken: 'opaque' }),
+      }),
+    );
+    expect(mocks.saveMeetingPacket).not.toHaveBeenCalled();
   });
 
   it('persists only safe copy for a retryable malformed-gateway classification', async () => {

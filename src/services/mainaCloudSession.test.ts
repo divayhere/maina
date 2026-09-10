@@ -29,6 +29,7 @@ import {
   getMainaCloudSession,
   mainaCloudRequestJson,
   pinMainaCloudExecutionContext,
+  pinMainaCloudRequestContext,
   requireMainaCloudScope,
   saveMainaCloudSession,
 } from './mainaCloudSession';
@@ -54,6 +55,18 @@ describe('mainaCloudSession', () => {
     await saveMainaCloudSession(validSession);
     expect(await getMainaCloudSession()).toEqual(validSession);
     expect([...store.values()].join('')).not.toContain('provider');
+  });
+
+  it('pins an unverified cloud session for non-scope pipeline requests', async () => {
+    const unverified = { ...validSession, scopes: [], scopesVerifiedAt: null };
+    await saveMainaCloudSession(unverified);
+
+    expect(pinMainaCloudRequestContext(unverified)).toEqual({
+      ownerUserId: 'user-1',
+      accessToken: 'opaque-scoped-token',
+      scopesVerifiedAt: null,
+    });
+    expect(() => pinMainaCloudExecutionContext(unverified)).toThrow('session changed');
   });
 
   it('clears only the signed-in owner cloud cache while preserving local meeting storage', async () => {
@@ -170,6 +183,26 @@ describe('mainaCloudSession', () => {
       .rejects.toMatchObject({ name: 'MainaCloudSessionMismatchError' });
     expect(mocks.fetch).not.toHaveBeenCalled();
     expect(await getMainaCloudSession()).toEqual(ownerB);
+  });
+
+  it('classifies a removed pinned session as session_changed before transport', async () => {
+    const ownerA = {
+      ...validSession,
+      accessToken: 'token-a',
+      scopes: [],
+      scopesVerifiedAt: null,
+      user: { ...validSession.user, userId: 'owner-a' },
+    };
+    await saveMainaCloudSession(ownerA);
+    const requestContext = pinMainaCloudRequestContext(ownerA);
+    await clearMainaCloudSession();
+
+    await expect(mainaCloudRequestJson('/v1/sources', {}, { executionContext: requestContext }))
+      .rejects.toMatchObject({
+        name: 'MainaCloudSessionMismatchError',
+        failureClass: 'transport_unknown',
+      });
+    expect(mocks.fetch).not.toHaveBeenCalled();
   });
 
   it('rejects a pinned owner-session switch while the response is in flight', async () => {

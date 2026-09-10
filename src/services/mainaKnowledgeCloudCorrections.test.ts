@@ -13,6 +13,8 @@ const mocks = vi.hoisted(() => ({
   persistCorrectionRetry: vi.fn(),
   getSettings: vi.fn(),
   clearSession: vi.fn(),
+  clearSessionForRequestContext: vi.fn(),
+  getSession: vi.fn(),
   cloudRequest: vi.fn(),
 }));
 
@@ -39,7 +41,14 @@ vi.mock('@/services/logger', () => ({
 
 vi.mock('@/services/mainaCloudSession', () => ({
   clearMainaCloudSession: mocks.clearSession,
+  clearMainaCloudSessionForRequestContext: mocks.clearSessionForRequestContext,
+  getMainaCloudSession: mocks.getSession,
   mainaCloudRequestJson: mocks.cloudRequest,
+  pinMainaCloudRequestContext: (session: { accessToken: string; scopesVerifiedAt?: number | null; user: { userId: string } }) => ({
+    ownerUserId: session.user.userId,
+    accessToken: session.accessToken,
+    scopesVerifiedAt: session.scopesVerifiedAt ?? null,
+  }),
   shouldClearMainaCloudSession: (cause: { status?: number } | null) => cause?.status === 401,
 }));
 vi.mock('@/services/pipelineWakeScheduler', () => ({
@@ -83,6 +92,12 @@ describe('Maina Knowledge Cloud correction service', () => {
       enabled: true,
       baseUrl: 'https://mkc.example.test/',
       token: 'test-token',
+    });
+    mocks.getSession.mockResolvedValue({
+      accessToken: 'test-token',
+      scopes: [],
+      scopesVerifiedAt: null,
+      user: { userId: 'owner-1', email: 'owner@example.test' },
     });
     mocks.getMeeting.mockResolvedValue({
       id: 'meeting-1',
@@ -202,12 +217,79 @@ describe('Maina Knowledge Cloud correction service', () => {
     expect(mocks.cloudRequest).toHaveBeenCalledWith(
       '/v1/corrections',
       expect.objectContaining({ body: payloadJson }),
-      { acceptHttpErrors: true },
+      expect.objectContaining({
+        acceptHttpErrors: true,
+        executionContext: expect.objectContaining({ ownerUserId: 'owner-1' }),
+      }),
     );
     expect(mocks.updateCorrection).toHaveBeenLastCalledWith('correction:1', expect.objectContaining({
       syncStatus: 'sync_succeeded',
       canonicalSha256: 'correction-sha',
     }));
+  });
+
+  it('clears only the pinned owner after an accepted 401 correction response', async () => {
+    let correction = {
+      correctionKey: 'correction:auth',
+      meetingId: 'meeting-1',
+      fieldPath: 'content.summary',
+      versionTag: 'summary.v2',
+      payloadJson: '{"schema_version":"mkc.correction.v1","correction_key":"correction:auth"}',
+      syncStatus: 'sync_queued',
+    };
+    mocks.getCorrection.mockImplementation(async () => correction);
+    mocks.getMeeting.mockResolvedValue({ id: 'meeting-1', knowledgeCloudSyncStatus: 'sync_succeeded' });
+    mocks.updateCorrection.mockImplementation(async (_key: string, patch: Record<string, unknown>) => {
+      correction = { ...correction, ...patch } as typeof correction;
+    });
+    mocks.cloudRequest.mockResolvedValue({
+      status: 401,
+      ok: false,
+      data: { error: { code: 'auth_invalid' } },
+    });
+
+    await runCorrectionSync(correction.correctionKey);
+
+    expect(mocks.clearSessionForRequestContext).toHaveBeenCalledWith(
+      expect.objectContaining({ ownerUserId: 'owner-1' }),
+    );
+    expect(mocks.clearSession).not.toHaveBeenCalled();
+    expect(correction.syncStatus).toBe('sync_failed_auth');
+  });
+
+  it('requeues a late owner-A 401 when owner B wins the conditional clear', async () => {
+    let correction = {
+      correctionKey: 'correction:late-auth',
+      meetingId: 'meeting-1',
+      fieldPath: 'content.summary',
+      versionTag: 'summary.v2',
+      payloadJson: '{"schema_version":"mkc.correction.v1","correction_key":"correction:late-auth"}',
+      syncStatus: 'sync_queued',
+      retryCount: 0,
+    };
+    mocks.getCorrection.mockImplementation(async () => correction);
+    mocks.getMeeting.mockResolvedValue({ id: 'meeting-1', knowledgeCloudSyncStatus: 'sync_succeeded' });
+    mocks.updateCorrection.mockImplementation(async (_key: string, patch: Record<string, unknown>) => {
+      correction = { ...correction, ...patch } as typeof correction;
+    });
+    mocks.cloudRequest.mockResolvedValue({
+      status: 401,
+      ok: false,
+      data: { error: { code: 'auth_invalid' } },
+    });
+    mocks.clearSessionForRequestContext.mockRejectedValue(Object.assign(
+      new Error('The Maina Cloud session changed while the request was in progress.'),
+      { name: 'MainaCloudSessionMismatchError', failureClass: 'transport_unknown' },
+    ));
+
+    await runCorrectionSync(correction.correctionKey);
+
+    expect(mocks.persistCorrectionRetry).toHaveBeenCalledWith(expect.objectContaining({
+      correctionKey: correction.correctionKey,
+      syncStatus: 'sync_failed_retryable',
+      failureClass: 'transport_unknown',
+    }));
+    expect(mocks.clearSession).not.toHaveBeenCalled();
   });
 
   it('does not send a superseding correction before its predecessor succeeds', async () => {
@@ -250,6 +332,46 @@ describe('Maina Knowledge Cloud correction service', () => {
     expect(mocks.cloudRequest).toHaveBeenCalledTimes(1);
     expect(state.get(previous.correctionKey)?.syncStatus).toBe('sync_failed_retryable');
     expect(state.get(next.correctionKey)?.syncStatus).toBe('sync_queued');
+  });
+
+  it('requeues a pinned owner-session replacement without clearing the new owner', async () => {
+    let correction = {
+      correctionKey: 'correction:owner-switch',
+      meetingId: 'meeting-1',
+      sourceKey: 'meeting:maina:meeting-1',
+      fieldPath: 'content.summary',
+      versionTag: 'summary.v2',
+      payloadJson: '{"correction_key":"correction:owner-switch"}',
+      syncStatus: 'sync_queued',
+      retryCount: 0,
+      nextRetryAt: null,
+    };
+    mocks.getMeeting.mockResolvedValue({ id: 'meeting-1', knowledgeCloudSyncStatus: 'sync_succeeded' });
+    mocks.getCorrection.mockImplementation(async () => correction);
+    mocks.updateCorrection.mockImplementation(async (_key: string, patch: Record<string, unknown>) => {
+      correction = { ...correction, ...patch } as typeof correction;
+    });
+    mocks.cloudRequest.mockRejectedValue(Object.assign(
+      new Error('The Maina Cloud session changed while the request was in progress.'),
+      { name: 'MainaCloudSessionMismatchError', failureClass: 'transport_unknown' },
+    ));
+
+    await runCorrectionSync(correction.correctionKey);
+
+    expect(mocks.persistCorrectionRetry).toHaveBeenCalledWith(expect.objectContaining({
+      correctionKey: correction.correctionKey,
+      syncStatus: 'sync_failed_retryable',
+      failureClass: 'transport_unknown',
+    }));
+    expect(mocks.clearSession).not.toHaveBeenCalled();
+    expect(mocks.clearSessionForRequestContext).not.toHaveBeenCalled();
+    expect(mocks.cloudRequest).toHaveBeenCalledWith(
+      '/v1/corrections',
+      expect.any(Object),
+      expect.objectContaining({
+        executionContext: expect.objectContaining({ ownerUserId: 'owner-1' }),
+      }),
+    );
   });
 
   it('does not bypass a persisted correction retry due time', async () => {
