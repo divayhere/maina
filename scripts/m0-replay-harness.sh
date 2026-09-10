@@ -44,12 +44,79 @@ ANDROID_PACKAGE="${MAINA_ANDROID_PACKAGE:-$PROVENANCE_ANDROID_PACKAGE}"
 IOS_BUNDLE_ID="${MAINA_IOS_BUNDLE_ID:-$PROVENANCE_IOS_BUNDLE_ID}"
 [[ "$ANDROID_PACKAGE" == "$PROVENANCE_ANDROID_PACKAGE" ]] || { echo "Android package override conflicts with approved provenance." >&2; exit 1; }
 [[ "$IOS_BUNDLE_ID" == "$PROVENANCE_IOS_BUNDLE_ID" ]] || { echo "iOS bundle override conflicts with approved provenance." >&2; exit 1; }
-PMD="${MAINA_PMD:-/Users/divay/Developer/.tools/maina-pymobiledevice3/bin/pymobiledevice3}"
+XCRUN="${MAINA_XCRUN:-/usr/bin/xcrun}"
 ROOT="${MAINA_M0_EVIDENCE_ROOT:-$PROJECT_DIR/.artifacts/m0-replay}"
 CURRENT_FILE="$ROOT/current-$LANE"
 LEGACY_CURRENT_FILE="$ROOT/current"
 
 android() { adb -s "$ANDROID_SERIAL" "$@"; }
+
+ios_runtime_identity_probe() (
+  test -x "$XCRUN" || return 1
+  local run_root capability_started_ms capability_completed_ms
+  run_root="$(mktemp -d "${TMPDIR:-/tmp}/maina-m0-ios-runtime.XXXXXX")" || return 1
+  trap 'rm -R -- "$run_root"' EXIT
+  trap 'exit 130' HUP INT TERM
+  chmod 700 "$run_root"
+  "$XCRUN" devicectl list devices --json-output "$run_root/devices.json" \
+    --quiet --timeout 10 >/dev/null 2>&1 || return 1
+  capability_started_ms="$(node -p 'Date.now()')"
+  "$XCRUN" devicectl device info processes --device "$IOS_COREDEVICE_ID" \
+    --columns '*' --json-output "$run_root/processes.json" --quiet --timeout 15 \
+    >/dev/null 2>&1 || return 1
+  capability_completed_ms="$(node -p 'Date.now()')"
+  "$XCRUN" devicectl device info apps --device "$IOS_COREDEVICE_ID" \
+    --bundle-id "$IOS_BUNDLE_ID" --columns '*' --json-output "$run_root/apps.json" \
+    --quiet --timeout 10 >/dev/null 2>&1 || return 1
+  node --input-type=module - "$PROJECT_DIR/scripts/lib/renewal-core.mjs" \
+    "$run_root/devices.json" "$run_root/processes.json" "$run_root/apps.json" \
+    "$IOS_COREDEVICE_ID" "$IOS_UDID" "$IOS_BUNDLE_ID" \
+    "$PROVENANCE_IOS_VERSION" \
+    "$PROVENANCE_IOS_BUILD" "$capability_started_ms" "$capability_completed_ms" \
+    >/dev/null 2>&1 <<'NODE'
+import { readFileSync } from 'node:fs';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import path from 'node:path';
+const [
+  , , renewalPath, devicesPath, processesPath, appsPath, deviceId, udid,
+  bundleId, version, build, startedAtMs, completedAtMs,
+] = process.argv;
+const { findInstalledIosApp, findQualifiedIosDevice, validateInstalledIosArtifact } = await import(pathToFileURL(renewalPath));
+const expected = { deviceId, udid, marketingName: 'iPhone 15', nowMs: Date.now() };
+const proof = {
+  schemaVersion: 'maina.ios-coredevice-capability-proof.v1',
+  deviceId,
+  operation: 'device-info-processes',
+  timeoutMs: 15_000,
+  startedAtMs: Number(startedAtMs),
+  completedAtMs: Number(completedAtMs),
+  exitCode: 0,
+};
+const device = findQualifiedIosDevice(JSON.parse(readFileSync(devicesPath, 'utf8')), expected, proof);
+if (device.connectionProperties?.transportType !== 'wired') throw new Error('M0 requires exact wired transport.');
+const payload = JSON.parse(readFileSync(appsPath, 'utf8'));
+const matches = (payload?.result?.apps ?? []).filter((item) => item?.bundleIdentifier === bundleId);
+if (matches.length !== 1) throw new Error('Installed iOS app cardinality mismatch.');
+const installed = findInstalledIosApp(payload, bundleId);
+validateInstalledIosArtifact(installed, { bundleId, version, build });
+const app = matches[0];
+if (app.name !== 'Maina' || typeof app.url !== 'string') throw new Error('Installed iOS app runtime identity is invalid.');
+const appUrl = new URL(app.url);
+if (appUrl.protocol !== 'file:' || appUrl.username || appUrl.password || appUrl.search || appUrl.hash) {
+  throw new Error('Installed iOS app runtime URL is invalid.');
+}
+const appPath = fileURLToPath(appUrl);
+if (!appPath.endsWith('/Maina.app/')) throw new Error('Installed iOS app runtime path is invalid.');
+const expectedExecutable = path.posix.join(appPath, 'Maina');
+const processPayload = JSON.parse(readFileSync(processesPath, 'utf8'));
+const processMatches = (processPayload?.result?.runningProcesses ?? []).filter((item) => (
+  item?.executable === expectedExecutable
+  && Number.isSafeInteger(item.processIdentifier)
+  && item.processIdentifier > 0
+));
+if (processMatches.length !== 1) throw new Error('Running iOS app process cardinality mismatch.');
+NODE
+)
 
 current_output_dir() {
   test -s "$CURRENT_FILE" || return 1
@@ -84,8 +151,16 @@ monitor_healthy() {
   pid="$(cat "$pid_file")"
   kill -0 "$pid" 2>/dev/null || { echo "$label monitor is not alive" >&2; return 1; }
   test -s "$log_file" || { echo "$label log has not grown" >&2; return 1; }
-  tail -n 1 "$log_file" | grep -q 'observer_status=PASS$' \
+  local last_sample sample_epoch now_epoch sample_age
+  last_sample="$(tail -n 1 "$log_file")"
+  [[ "$last_sample" =~ ^[^[:space:]]+[[:space:]]lane=(android|ios)[[:space:]]observer_status=PASS[[:space:]]sample_epoch=([0-9]+)$ ]] \
     || { echo "$label reports an unavailable endpoint" >&2; return 1; }
+  sample_epoch="${BASH_REMATCH[2]}"
+  now_epoch="$(date +%s)"
+  [[ "$now_epoch" =~ ^[0-9]+$ ]] || { echo "$label freshness clock is invalid" >&2; return 1; }
+  sample_age=$((now_epoch - sample_epoch))
+  (( sample_age >= 0 && sample_age <= 45 )) \
+    || { echo "$label last successful sample is stale" >&2; return 1; }
 }
 
 monitor_lane_health() {
@@ -100,12 +175,13 @@ monitor_lane_health() {
         fi
         ;;
       ios)
-        if "$PMD" apps query "$IOS_BUNDLE_ID" --udid "$IOS_UDID" >/dev/null 2>&1; then
+        if ios_runtime_identity_probe; then
           status="PASS"
         fi
         ;;
     esac
-    printf '%s lane=%s observer_status=%s\n' "$(date -Iseconds)" "$LANE" "$status"
+    printf '%s lane=%s observer_status=%s sample_epoch=%s\n' \
+      "$(date -Iseconds)" "$LANE" "$status" "$(date +%s)"
     sample_count=$((sample_count + 1))
     (( sample_count < 720 )) || return 3
     sleep 5
@@ -158,30 +234,75 @@ preflight_android() {
   printf 'M0 Android replay preflight passed for the approved package and artifact identity.\n'
 }
 
-preflight_ios() {
-  test -x "$PMD"
-  local ios_devices ios_apps
-  # CoreDevice can remain in a stale "connecting" state even while usbmux and
-  # DeveloperTools services are healthy. Verify the exact physical USB device
-  # and installed staging bundle through the same transport used for evidence.
-  ios_devices="$("$PMD" usbmux list)"
-  IOS_DEVICES="$ios_devices" IOS_UDID="$IOS_UDID" node -e '
-    const devices = JSON.parse(process.env.IOS_DEVICES);
-    const expected = devices.find((device) => device.Identifier === process.env.IOS_UDID);
-    if (!expected || expected.ConnectionType !== "USB" || expected.ProductType !== "iPhone15,4") process.exit(1);
-  '
-  ios_apps="$("$PMD" apps query "$IOS_BUNDLE_ID" --udid "$IOS_UDID")"
-  IOS_APPS="$ios_apps" IOS_BUNDLE_ID="$IOS_BUNDLE_ID" \
-    PROVENANCE_IOS_VERSION="$PROVENANCE_IOS_VERSION" PROVENANCE_IOS_BUILD="$PROVENANCE_IOS_BUILD" node -e '
-    const apps = JSON.parse(process.env.IOS_APPS);
-    const app = apps[process.env.IOS_BUNDLE_ID];
-    if (!app
-      || app.CFBundleShortVersionString !== process.env.PROVENANCE_IOS_VERSION
-      || app.CFBundleVersion !== process.env.PROVENANCE_IOS_BUILD) process.exit(1);
-  '
+preflight_ios() (
+  test -x "$XCRUN" || { echo "M0_IOS_COREDEVICE_TOOL_UNAVAILABLE" >&2; return 1; }
+  local run_root capability_started_ms capability_completed_ms preflight_status=0
+  run_root="$(mktemp -d "${TMPDIR:-/tmp}/maina-m0-ios-preflight.XXXXXX")" \
+    || { echo "M0_IOS_PRIVATE_TEMP_UNAVAILABLE" >&2; return 1; }
+  trap 'rm -R -- "$run_root"' EXIT
+  trap 'exit 130' HUP INT TERM
+  chmod 700 "$run_root"
 
-  printf 'M0 iOS replay preflight passed for the approved bundle and artifact identity.\n'
-}
+  capability_started_ms="$(node -p 'Date.now()')"
+  if ! "$XCRUN" devicectl device info processes --device "$IOS_COREDEVICE_ID" \
+    --timeout 15 --quiet >/dev/null 2>&1; then
+    echo "M0_IOS_CAPABILITY_PROOF_FAILED" >&2
+    preflight_status=1
+  fi
+  capability_completed_ms="$(node -p 'Date.now()')"
+
+  if [[ "$preflight_status" == "0" ]] \
+    && ! "$XCRUN" devicectl list devices --json-output "$run_root/devices.json" \
+      --quiet --timeout 10 >/dev/null 2>&1; then
+    echo "M0_IOS_DEVICE_LIST_FAILED" >&2
+    preflight_status=1
+  fi
+  if [[ "$preflight_status" == "0" ]] \
+    && ! "$XCRUN" devicectl device info apps --device "$IOS_COREDEVICE_ID" \
+      --bundle-id "$IOS_BUNDLE_ID" --columns '*' --json-output "$run_root/apps.json" \
+      --quiet --timeout 10 >/dev/null 2>&1; then
+    echo "M0_IOS_APP_QUERY_FAILED" >&2
+    preflight_status=1
+  fi
+
+  if [[ "$preflight_status" == "0" ]] && ! node --input-type=module - \
+    "$PROJECT_DIR/scripts/lib/renewal-core.mjs" "$run_root/devices.json" "$run_root/apps.json" \
+    "$IOS_COREDEVICE_ID" "$IOS_UDID" "$IOS_BUNDLE_ID" \
+    "$PROVENANCE_IOS_VERSION" "$PROVENANCE_IOS_BUILD" \
+    "$capability_started_ms" "$capability_completed_ms" >/dev/null 2>&1 <<'NODE'
+import { readFileSync } from 'node:fs';
+import { pathToFileURL } from 'node:url';
+const [
+  , , renewalPath, devicesPath, appsPath, deviceId, udid, bundleId,
+  version, build, startedAtMs, completedAtMs,
+] = process.argv;
+const { findInstalledIosApp, findQualifiedIosDevice, validateInstalledIosArtifact } = await import(pathToFileURL(renewalPath));
+const expected = { deviceId, udid, marketingName: 'iPhone 15', nowMs: Date.now() };
+const proof = {
+  schemaVersion: 'maina.ios-coredevice-capability-proof.v1',
+  deviceId,
+  operation: 'device-info-processes',
+  timeoutMs: 15_000,
+  startedAtMs: Number(startedAtMs),
+  completedAtMs: Number(completedAtMs),
+  exitCode: 0,
+};
+const device = findQualifiedIosDevice(JSON.parse(readFileSync(devicesPath, 'utf8')), expected, proof);
+if (device.connectionProperties?.transportType !== 'wired') throw new Error('M0 requires exact wired transport.');
+const appsPayload = JSON.parse(readFileSync(appsPath, 'utf8'));
+const matches = (appsPayload?.result?.apps ?? []).filter((item) => item?.bundleIdentifier === bundleId);
+if (matches.length !== 1) throw new Error('Installed iOS app cardinality mismatch.');
+const installed = findInstalledIosApp(appsPayload, bundleId);
+validateInstalledIosArtifact(installed, { bundleId, version, build });
+NODE
+  then
+    echo "M0_IOS_IDENTITY_REJECTED" >&2
+    preflight_status=1
+  fi
+
+  [[ "$preflight_status" == "0" ]] || return "$preflight_status"
+  printf 'M0 iOS replay preflight passed for the approved CoreDevice, bundle, and artifact identity.\n'
+)
 
 preflight() {
   case "$LANE" in
@@ -224,7 +345,7 @@ snapshot() {
       fi
       ;;
     ios)
-      "$PMD" apps query "$IOS_BUNDLE_ID" --udid "$IOS_UDID" >/dev/null 2>&1 && app_status="PASS"
+      ios_runtime_identity_probe && app_status="PASS"
       if ! (set -o noclobber; printf 'schemaVersion=maina.m0-sanitized-snapshot.v1\nlane=ios\napp_endpoint_probe=%s\n' \
         "$app_status" > "$status_path"); then
         echo "Snapshot evidence creation failed closed." >&2
@@ -235,6 +356,10 @@ snapshot() {
   if ! (set -o noclobber; date -u '+%Y-%m-%dT%H:%M:%SZ' > "$timestamp_path"); then
     echo "Snapshot timestamp creation failed closed." >&2
     return 2
+  fi
+  if [[ "$LANE" == "ios" && "$app_status" != "PASS" ]]; then
+    echo "iOS snapshot reports an unavailable or mismatched installed app endpoint." >&2
+    return 1
   fi
 }
 

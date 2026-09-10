@@ -28,6 +28,7 @@ function invoke(script, outputDir, extraEnv = {}) {
       MAINA_RELEASE_OUTPUT_DIR: outputDir,
       MAINA_RELEASE_OUTPUT_ROOT: temporary,
       MAINA_IOS_RELEASE_OUTPUT_ROOT: temporary,
+      MAINA_IOS_DERIVED_DATA_ROOT: path.join(temporary, 'derived-data'),
       MAINA_ADMIN_CAPACITY_CLEARANCE: 'approved',
       ...extraEnv,
     },
