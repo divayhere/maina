@@ -11,6 +11,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
+import { performance } from 'node:perf_hooks';
 import { fileURLToPath } from 'node:url';
 import { spawn, spawnSync } from 'node:child_process';
 
@@ -29,6 +30,7 @@ const endpoint = 'adb-47011FDAP000VE-test._adb-tls-connect._tcp';
 const deviceSerial = '47011FDAP000VE';
 const packageName = 'com.divay.maina';
 const lockDirectory = join(locks, `${deviceSerial}--${packageName}`);
+const activeChildren = new Set();
 
 mkdirSync(join(androidHome, 'platform-tools'), { recursive: true });
 mkdirSync(tools, { recursive: true });
@@ -65,6 +67,7 @@ state="\${FAKE_INSTALL_STATE:?}"
 printf 'adb\\n' >> "$state/adb-invocations"
 endpoint="\${MAINA_ADB_SERIAL:?}"
 if [[ "\${1:-}" == "devices" ]]; then
+  [[ "\${FAKE_INSTALL_EARLY_EXIT:-0}" != "1" ]] || exit 93
   printf 'List of devices attached\\n%s device product:komodo model:Pixel_9_Pro transport_id:1\\n' "$endpoint"
   exit 0
 fi
@@ -83,12 +86,14 @@ case "\${1:-}:\${2:-}:\${3:-}" in
     cp "$state/installed.apk" "$3"
     ;;
   install:-r:*)
+    [[ "\${FAKE_INSTALL_PRE_MARKER_DELAY_SECONDS:-0}" == "0" ]] \\
+      || sleep "\${FAKE_INSTALL_PRE_MARKER_DELAY_SECONDS}"
     printf 'install\\n' >> "$state/install-count"
     : > "$state/install-started"
     while [[ ! -f "$state/release-install" ]]; do sleep 0.02; done
     cp "$3" "$state/installed.apk"
-    printf '92' > "$state/version-code"
-    printf '0.10.66' > "$state/version-name"
+    printf '93' > "$state/version-code"
+    printf '0.10.67' > "$state/version-name"
     printf 'Performing Streamed Install\\nSuccess\\n'
     ;;
   *)
@@ -110,7 +115,7 @@ chmodSync(apksigner, 0o755);
 
 const aapt = join(tools, 'aapt');
 writeFileSync(aapt, `#!/usr/bin/env bash
-printf "package: name='com.divay.maina' versionCode='92' versionName='0.10.66' platformBuildVersionName=''\\n"
+printf "package: name='com.divay.maina' versionCode='93' versionName='0.10.67' platformBuildVersionName=''\\n"
 `);
 chmodSync(aapt, 0o755);
 
@@ -137,8 +142,8 @@ function resetInstalled({ identical = false } = {}) {
   }
   if (identical) {
     copyFileSync(candidate, join(state, 'installed.apk'));
-    writeFileSync(join(state, 'version-code'), '92');
-    writeFileSync(join(state, 'version-name'), '0.10.66');
+    writeFileSync(join(state, 'version-code'), '93');
+    writeFileSync(join(state, 'version-name'), '0.10.67');
   } else {
     writeFileSync(join(state, 'installed.apk'), 'previous-installed-apk');
     writeFileSync(join(state, 'version-code'), '67');
@@ -146,31 +151,129 @@ function resetInstalled({ identical = false } = {}) {
   }
 }
 
-function spawnInstaller() {
-  const child = spawn('bash', [installer, candidate], {
+function spawnInstaller(extraEnv = {}, command = 'bash') {
+  const child = spawn(command, [installer, candidate], {
     cwd: repoRoot,
-    env,
+    env: { ...env, ...extraEnv },
     stdio: ['ignore', 'pipe', 'pipe'],
+    detached: true,
   });
+  activeChildren.add(child);
+  child.spawnEstablished = false;
+  child.spawnResultPromise = new Promise((resolve) => {
+    child.once('spawn', () => {
+      child.spawnEstablished = true;
+      resolve({ state: 'spawned' });
+    });
+    child.once('error', (error) => resolve({
+      state: 'error',
+      code: typeof error?.code === 'string' ? error.code : 'UNKNOWN',
+    }));
+  });
+  child.closePromise = new Promise((resolve) => child.once('close', (code, signal) => {
+    activeChildren.delete(child);
+    resolve({ code, signal });
+  }));
+  child.stdout.resume();
   child.sanitizedStderr = '';
   child.stderr.on('data', (chunk) => { child.sanitizedStderr += chunk; });
   return child;
 }
 
-function waitFor(path, timeoutMs = 3_000) {
-  const started = Date.now();
+function spawnInstallerSync(extraEnv = {}) {
+  return spawnSync('bash', [installer, candidate], {
+    cwd: repoRoot,
+    env: { ...env, ...extraEnv },
+    encoding: 'utf8',
+    timeout: 15_000,
+    killSignal: 'SIGKILL',
+  });
+}
+
+function waitForMarkerOrExit(child, path, timeoutMs = 15_000) {
+  const started = performance.now();
   return new Promise((resolve, reject) => {
+    let timer = null;
+    let settled = false;
+    const finish = (callback, value) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      callback(value);
+    };
+    child.spawnResultPromise.then((result) => {
+      if (result.state === 'error') {
+        finish(reject, new Error(`INSTALLER_CHILD_SPAWN_FAILED:code=${result.code}`));
+      }
+    });
+    child.closePromise.then(({ code, signal }) => {
+      if (existsSync(path)) finish(resolve);
+      else finish(reject, new Error(`INSTALLER_CHILD_EXITED_BEFORE_MARKER:exit=${code ?? 'null'}:signal=${signal ?? 'null'}`));
+    });
     const check = () => {
-      if (existsSync(path)) return resolve();
-      if (Date.now() - started >= timeoutMs) return reject(new Error(`Timed out waiting for ${path}`));
-      setTimeout(check, 10);
+      if (existsSync(path)) return finish(resolve);
+      if (performance.now() - started >= timeoutMs) {
+        return finish(reject, new Error('INSTALLER_MARKER_TIMEOUT'));
+      }
+      timer = setTimeout(check, 10);
     };
     check();
   });
 }
 
 function waitForExit(child) {
-  return new Promise((resolve) => child.once('close', (code, signal) => resolve({ code, signal })));
+  return child.closePromise;
+}
+
+function waitForCloseWithDeadline(child, timeoutMs) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      resolve({ state: 'timeout' });
+    }, timeoutMs);
+    child.closePromise.then((result) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve({ state: 'closed', result });
+    });
+  });
+}
+
+async function stopChild(child) {
+  writeFileSync(join(state, 'release-install'), 'release');
+  const canSignal = child.spawnEstablished
+    && Number.isSafeInteger(child.pid)
+    && child.pid > 0
+    && child.exitCode === null
+    && child.signalCode === null;
+  if (canSignal) child.kill('SIGTERM');
+  const graceful = await waitForCloseWithDeadline(child, 2_000);
+  if (graceful.state === 'closed') return graceful.result;
+  if (!canSignal) throw new Error('INSTALLER_CHILD_CLEANUP_TIMEOUT');
+  try {
+    process.kill(-child.pid, 'SIGKILL');
+  } catch (error) {
+    if (error?.code !== 'ESRCH') throw error;
+  }
+  const forced = await waitForCloseWithDeadline(child, 2_000);
+  if (forced.state !== 'closed') throw new Error('INSTALLER_CHILD_CLEANUP_TIMEOUT');
+  return forced.result;
+}
+
+async function awaitChildCloseBounded(child, timeoutCode, timeoutMs = 5_000) {
+  const completion = await waitForCloseWithDeadline(child, timeoutMs);
+  if (completion.state === 'closed') return completion.result;
+  await stopChild(child);
+  throw new Error(timeoutCode);
+}
+
+async function stopAllChildren() {
+  const children = [...activeChildren];
+  if (children.length === 0) return;
+  await Promise.all(children.map((child) => stopChild(child)));
 }
 
 try {
@@ -197,45 +300,67 @@ try {
   assert.equal(existsSync(lockDirectory), false);
 
   resetInstalled();
-  const first = spawnInstaller();
-  const firstExit = waitForExit(first);
-  await waitFor(join(state, 'install-started')).catch((error) => {
-    first.kill('SIGTERM');
-    throw new Error(`${error.message}; installer stderr: ${first.sanitizedStderr}`);
-  });
+  const spawnFailure = spawnInstaller({}, join(root, 'missing-installer-executable'));
+  await assert.rejects(
+    waitForMarkerOrExit(spawnFailure, join(state, 'install-started')),
+    /INSTALLER_CHILD_SPAWN_FAILED:code=ENOENT/,
+  );
+  await waitForExit(spawnFailure);
+  assert.equal(spawnFailure.spawnEstablished, false);
+
+  resetInstalled();
+  const earlyExit = spawnInstaller({ FAKE_INSTALL_EARLY_EXIT: '1' });
+  const earlyExitResult = waitForExit(earlyExit);
+  await assert.rejects(
+    waitForMarkerOrExit(earlyExit, join(state, 'install-started')),
+    /INSTALLER_CHILD_EXITED_BEFORE_MARKER:exit=93:signal=null/,
+  );
+  assert.deepEqual(await earlyExitResult, { code: 93, signal: null });
+
+  resetInstalled();
+  const first = spawnInstaller({ FAKE_INSTALL_PRE_MARKER_DELAY_SECONDS: '3.2' });
+  try {
+    await waitForMarkerOrExit(first, join(state, 'install-started'));
+  } catch (error) {
+    const exit = await stopChild(first);
+    throw new Error(`${error.message}; exit=${exit.code}; signal=${exit.signal}; installer stderr: ${first.sanitizedStderr}`);
+  }
   const activeState = readFileSync(join(lockDirectory, 'state'), 'utf8');
   assert.match(activeState, /candidate_sha256=[a-f0-9]{64}/);
   assert.match(activeState, /outcome=running/);
   assert.equal(existsSync(join(state, 'java-invocations')), true);
-  const second = spawnSync('bash', [installer, candidate], { cwd: repoRoot, env, encoding: 'utf8' });
+  const second = spawnInstallerSync();
   assert.equal(second.status, 75);
   assert.match(second.stderr, /running or has an unknown outcome/);
   assert.equal(readFileSync(join(state, 'install-count'), 'utf8').trim().split('\n').length, 1);
   writeFileSync(join(state, 'release-install'), 'release');
-  assert.deepEqual(await firstExit, { code: 0, signal: null });
+  assert.deepEqual(await awaitChildCloseBounded(first, 'INSTALLER_CHILD_COMPLETION_TIMEOUT'), { code: 0, signal: null });
   assert.equal(existsSync(lockDirectory), false);
   assert.equal(readFileSync(join(state, 'install-count'), 'utf8').trim().split('\n').length, 1);
 
   resetInstalled();
   const interrupted = spawnInstaller();
-  const interruptedExit = waitForExit(interrupted);
-  await waitFor(join(state, 'install-started')).catch((error) => {
-    interrupted.kill('SIGTERM');
-    throw new Error(`${error.message}; installer stderr: ${interrupted.sanitizedStderr}`);
-  });
+  try {
+    await waitForMarkerOrExit(interrupted, join(state, 'install-started'));
+  } catch (error) {
+    const exit = await stopChild(interrupted);
+    throw new Error(`${error.message}; exit=${exit.code}; signal=${exit.signal}; installer stderr: ${interrupted.sanitizedStderr}`);
+  }
+  assert.equal(interrupted.spawnEstablished, true);
+  assert.ok(Number.isSafeInteger(interrupted.pid) && interrupted.pid > 0);
   interrupted.kill('SIGTERM');
   writeFileSync(join(state, 'release-install'), 'release');
-  const interruptedResult = await interruptedExit;
+  const interruptedResult = await awaitChildCloseBounded(interrupted, 'INSTALLER_CHILD_INTERRUPTION_TIMEOUT');
   assert.notEqual(interruptedResult.code, 0);
   const retainedLock = join(lockDirectory, 'state');
   assert.equal(existsSync(retainedLock), true);
   assert.match(readFileSync(retainedLock, 'utf8'), /outcome=reconciliation_required/);
-  const refused = spawnSync('bash', [installer, candidate], { cwd: repoRoot, env, encoding: 'utf8' });
+  const refused = spawnInstallerSync();
   assert.equal(refused.status, 75);
   assert.equal(readFileSync(join(state, 'install-count'), 'utf8').trim().split('\n').length, 1);
 
   resetInstalled({ identical: true });
-  const alreadyInstalled = spawnSync('bash', [installer, candidate], { cwd: repoRoot, env, encoding: 'utf8' });
+  const alreadyInstalled = spawnInstallerSync();
   assert.equal(alreadyInstalled.status, 0, alreadyInstalled.stderr);
   assert.match(alreadyInstalled.stdout, /already installed/);
   assert.equal(existsSync(join(state, 'install-count')), false);
@@ -243,5 +368,6 @@ try {
 
   console.log('Android installer single-flight policy verified.');
 } finally {
+  await stopAllChildren();
   rmSync(root, { recursive: true, force: true });
 }
