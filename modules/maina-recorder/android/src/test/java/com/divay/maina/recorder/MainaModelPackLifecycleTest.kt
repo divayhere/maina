@@ -3,6 +3,7 @@ package com.divay.maina.recorder
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.json.JSONArray
@@ -49,6 +50,109 @@ class MainaModelPackLifecycleTest {
         assertEquals(220L, MainaModelPackLifecyclePolicy.requiredSpace(100, 10, 100, 10))
         assertNull(MainaModelPackLifecyclePolicy.requiredSpace(100, -1, 100, 10))
         assertNull(MainaModelPackLifecyclePolicy.requiredSpace(Long.MAX_VALUE, 1, 0, 0))
+    }
+
+    @Test
+    fun `manifest parsing rejects json scalar coercion and oversized versions`() {
+        val variants = listOf<(JSONObject) -> Unit>(
+            { it.put("packVersion", 1) },
+            { it.getJSONArray("files").getJSONObject(0).put("byteCount", "44148281") },
+            { it.getJSONArray("files").getJSONObject(0).put("chunkSizeBytes", 9_007_199_254_740_992L) },
+            { it.getJSONArray("files").getJSONObject(0).put("chunkSha256", JSONArray().put(1)) },
+            { it.getJSONArray("platforms").getJSONObject(0).put("osFamily", JSONObject().put("value", "android")) },
+            { it.getJSONArray("platforms").getJSONObject(0).put("minOsVersion", 26) },
+            { it.getJSONArray("platforms").getJSONObject(0).put("architectures", JSONArray().put(64)) },
+            { it.put("platforms", JSONObject().put("0", it.getJSONArray("platforms").getJSONObject(0))) },
+            { it.put("platforms", JSONArray().put(JSONObject.NULL).put(platform("ios", "17.0", "arm64", "sherpa-onnx-1.13.4-ios-no-tts", "d8baaa925248e8e8ad23870208cdaf3d093623e6733aede2c23862f30c5aac62", "b".repeat(64)))) },
+            { it.getJSONArray("platforms").getJSONObject(0).put("minOsVersion", "9".repeat(65)) },
+        )
+        for (mutate in variants) {
+            val root = Files.createTempDirectory("maina-model-pack-strict-manifest").toFile().canonicalFile
+            try {
+                val manifest = syntheticManifest()
+                mutate(manifest)
+                rehashManifest(manifest)
+                val failure = assertThrows(IllegalArgumentException::class.java) {
+                    MainaModelPackLifecycle(root = root, directorySync = {}).begin(manifest.toString(), 0, 0)
+                }
+                assertEquals("MANIFEST_INVALID", failure.message)
+                assertFalse(root.resolve("writer.json").exists())
+            } finally {
+                root.deleteRecursively()
+            }
+        }
+    }
+
+    @Test
+    fun `version comparison uses the bounded ascii grammar without integer narrowing`() {
+        val comparisons = listOf(
+            Triple("17", "17", 0),
+            Triple("17.0", "17", 0),
+            Triple("17.0.0", "17.0", 0),
+            Triple("17.0.1", "17.0", 1),
+            Triple("18", "17.99999999999999999999999999999999", 1),
+            Triple("00017.00", "17.0.0", 0),
+            Triple("17", "99999999999999999999999999999999", -1),
+            Triple("17.1", "17.99999999999999999999999999999999", -1),
+            Triple("17.1.1", "17.1.99999999999999999999999999999999", -1),
+        )
+        for ((left, right, expected) in comparisons) {
+            assertEquals(expected, MainaModelPackLifecyclePolicy.compareVersions(left, right))
+        }
+        assertEquals(0, MainaModelPackLifecyclePolicy.compareVersions("1.${"0".repeat(62)}", "1"))
+        for (invalid in listOf(
+            "", "17.", ".17", "17..0", "17.0.0.0", "-17", "+17", " 17", "17 ", "17\n",
+            "１７", "١٧", "9".repeat(65),
+        )) {
+            val failure = assertThrows(IllegalArgumentException::class.java) {
+                MainaModelPackLifecyclePolicy.compareVersions("36", invalid)
+            }
+            assertEquals("MANIFEST_INVALID", failure.message)
+        }
+    }
+
+    @Test
+    fun `platform structure and platform identity use stable distinct reasons before writes`() {
+        fun assertRejected(expected: String, platforms: Any) {
+            val root = Files.createTempDirectory("maina-model-pack-platform-reason").toFile().canonicalFile
+            try {
+                val manifest = syntheticManifest().put("platforms", platforms)
+                rehashManifest(manifest)
+                val failure = assertThrows(IllegalArgumentException::class.java) {
+                    MainaModelPackLifecycle(root = root, directorySync = {}).begin(manifest.toString(), 0, 0)
+                }
+                assertEquals(expected, failure.message)
+                assertFalse(root.resolve("writer.json").exists())
+                assertFalse(root.resolve("current.json").exists())
+            } finally {
+                root.deleteRecursively()
+            }
+        }
+
+        val android = platform("android", "26", "arm64-v8a", "sherpa-onnx-1.13.6", "0012d9a28f15bd6fb966b62b70a75da3990512fdccce28b83098248ce4be1698", "a".repeat(64))
+        val ios = platform("ios", "17.0", "arm64", "sherpa-onnx-1.13.4-ios-no-tts", "d8baaa925248e8e8ad23870208cdaf3d093623e6733aede2c23862f30c5aac62", "b".repeat(64))
+        for (platforms in listOf(
+            JSONArray(),
+            JSONArray().put(android),
+            JSONArray().put(android).put(android),
+            JSONArray().put(android).put(ios).put(ios),
+        )) assertRejected("PLATFORM_COMPATIBILITY_MISMATCH", platforms)
+
+        assertRejected("MANIFEST_INVALID", JSONObject().put("0", android))
+        assertRejected("MANIFEST_INVALID", JSONArray().put(JSONObject.NULL).put(ios))
+        assertRejected("MANIFEST_INVALID", JSONArray().put(JSONObject(android.toString()).put("osFamily", "windows")).put(ios))
+        assertRejected("MANIFEST_INVALID", JSONArray().put(JSONObject(android.toString()).put("minOsVersion", 26)).put(ios))
+        assertRejected("MANIFEST_INVALID", JSONArray().put(JSONObject(android.toString()).put("architectures", JSONArray().put("arm64-v8a").put(64))).put(ios))
+    }
+
+    @Test
+    fun `integral json numbers remain valid without string coercion`() {
+        assertEquals(44_148_281L, MainaModelPackLifecyclePolicy.exactPositiveSafeLong(44_148_281))
+        assertEquals(44_148_281L, MainaModelPackLifecyclePolicy.exactPositiveSafeLong(44_148_281L))
+        assertEquals(44_148_281L, MainaModelPackLifecyclePolicy.exactPositiveSafeLong(44_148_281.0))
+        assertNull(MainaModelPackLifecyclePolicy.exactPositiveSafeLong("44148281"))
+        assertNull(MainaModelPackLifecyclePolicy.exactPositiveSafeLong(44_148_281.5))
+        assertNull(MainaModelPackLifecyclePolicy.exactPositiveSafeLong(9_007_199_254_740_992L))
     }
 
     @Test
@@ -294,6 +398,11 @@ class MainaModelPackLifecycleTest {
             .put("smokeInputSha256", hashCharacter.toString().repeat(64))
         manifest.put("manifestSha256", sha256(canonicalJson(manifest)))
         return manifest
+    }
+
+    private fun rehashManifest(manifest: JSONObject) {
+        manifest.remove("manifestSha256")
+        manifest.put("manifestSha256", sha256(canonicalJson(manifest)))
     }
 
     private fun platform(os: String, min: String, architecture: String, runtime: String, runtimeSha: String, smokeSha: String) =

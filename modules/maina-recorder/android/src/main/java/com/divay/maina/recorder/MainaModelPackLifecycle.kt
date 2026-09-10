@@ -17,6 +17,8 @@ import java.util.Comparator
 import java.util.UUID
 
 internal object MainaModelPackLifecyclePolicy {
+    private const val MAX_SAFE_JSON_INTEGER = 9_007_199_254_740_991L
+
     private val transitions = setOf(
         "unavailable>downloading:manifest_valid_and_space_preflight_passed",
         "downloading>downloading:exact_chunk_progress_committed",
@@ -97,6 +99,40 @@ internal object MainaModelPackLifecyclePolicy {
         !readyPointsToWriter -> "mark_failed_preserve_current"
         previousPointerValid -> "rollback_to_previous"
         else -> "invalidate_first_activation"
+    }
+
+    /** Compare bounded dotted-decimal versions without narrowing through Int/Double. */
+    fun compareVersions(left: String, right: String): Int {
+        val a = versionComponents(left) ?: throw IllegalArgumentException("MANIFEST_INVALID")
+        val b = versionComponents(right) ?: throw IllegalArgumentException("MANIFEST_INVALID")
+        for (index in 0 until maxOf(a.size, b.size)) {
+            val leftPart = a.getOrNull(index) ?: "0"
+            val rightPart = b.getOrNull(index) ?: "0"
+            val lengthComparison = leftPart.length.compareTo(rightPart.length)
+            if (lengthComparison != 0) return lengthComparison
+            val lexicalComparison = leftPart.compareTo(rightPart)
+            if (lexicalComparison != 0) return lexicalComparison
+        }
+        return 0
+    }
+
+    /** Decode JSON integer values without accepting strings or lossy values. */
+    fun exactPositiveSafeLong(value: Any?): Long? {
+        val exact = when (value) {
+            is Byte -> value.toLong()
+            is Short -> value.toLong()
+            is Int -> value.toLong()
+            is Long -> value
+            is Float -> value.toDouble().takeIf { it.isFinite() && it == it.toLong().toDouble() }?.toLong() ?: return null
+            is Double -> value.takeIf { it.isFinite() && it == it.toLong().toDouble() }?.toLong() ?: return null
+            else -> return null
+        }
+        return exact.takeIf { it in 1L..MAX_SAFE_JSON_INTEGER }
+    }
+
+    private fun versionComponents(value: String): List<String>? {
+        if (value.length !in 1..64 || !value.matches(Regex("^[0-9]+(?:\\.[0-9]+){0,2}$"))) return null
+        return value.split('.').map { component -> component.trimStart('0').ifEmpty { "0" } }
     }
 }
 
@@ -656,60 +692,76 @@ internal class MainaModelPackLifecycle(
     }
 
     private fun parseManifest(value: String): Manifest {
+        if (value.length !in 2..MAX_MANIFEST_CHARACTERS) throw IllegalArgumentException("MANIFEST_INVALID")
         val raw = runCatching { JSONObject(value) }.getOrElse { throw IllegalArgumentException("MANIFEST_INVALID") }
         requireExactKeys(raw, MANIFEST_KEYS, "MANIFEST_INVALID")
-        if (raw.optString("schemaVersion") != "maina.model-pack-manifest.v1" || raw.optString("packId") != PACK_ID ||
-            raw.optString("engineId") != ENGINE_ID || raw.optString("formatVersion") != "1" ||
-            !validId(raw.optString("packVersion")) || !validSha(raw.optString("smokeInputSha256")) ||
-            !validSha(raw.optString("manifestSha256"))
+        val schemaVersion = exactString(raw, "schemaVersion")
+        val packId = exactString(raw, "packId")
+        val packVersion = exactString(raw, "packVersion") ?: throw IllegalArgumentException("MANIFEST_INVALID")
+        val engineId = exactString(raw, "engineId")
+        val formatVersion = exactString(raw, "formatVersion")
+        val smokeInputSha256 = exactString(raw, "smokeInputSha256") ?: throw IllegalArgumentException("MANIFEST_INVALID")
+        val manifestSha256 = exactString(raw, "manifestSha256") ?: throw IllegalArgumentException("MANIFEST_INVALID")
+        if (schemaVersion != "maina.model-pack-manifest.v1" || packId != PACK_ID ||
+            engineId != ENGINE_ID || formatVersion != "1" ||
+            !validId(packVersion) || !validSha(smokeInputSha256) || !validSha(manifestSha256)
         ) throw IllegalArgumentException("MANIFEST_INVALID")
-        val filesValue = raw.optJSONArray("files") ?: throw IllegalArgumentException("MANIFEST_INVALID")
+        val filesValue = raw.opt("files") as? JSONArray ?: throw IllegalArgumentException("MANIFEST_INVALID")
         val files = mutableListOf<FileSpec>()
         val paths = mutableSetOf<String>()
         val folded = mutableSetOf<String>()
         for (index in 0 until filesValue.length()) {
-            val file = filesValue.optJSONObject(index) ?: throw IllegalArgumentException("MANIFEST_INVALID")
+            val file = filesValue.opt(index) as? JSONObject ?: throw IllegalArgumentException("MANIFEST_INVALID")
             requireExactKeys(file, FILE_KEYS, "MANIFEST_INVALID")
-            val path = file.optString("path")
-            val byteCount = file.optLong("byteCount", -1L)
-            val chunkSize = file.optLong("chunkSizeBytes", -1L)
-            val chunks = file.optJSONArray("chunkSha256") ?: throw IllegalArgumentException("MANIFEST_INVALID")
-            val chunkHashes = (0 until chunks.length()).map { chunks.optString(it) }
-            if (!safeRelativePath(path) || byteCount <= 0L || chunkSize <= 0L || !validSha(file.optString("sha256")) ||
+            val path = exactString(file, "path") ?: throw IllegalArgumentException("MANIFEST_INVALID")
+            val byteCount = MainaModelPackLifecyclePolicy.exactPositiveSafeLong(file.opt("byteCount"))
+                ?: throw IllegalArgumentException("MANIFEST_INVALID")
+            val chunkSize = MainaModelPackLifecyclePolicy.exactPositiveSafeLong(file.opt("chunkSizeBytes"))
+                ?: throw IllegalArgumentException("MANIFEST_INVALID")
+            val fileSha256 = exactString(file, "sha256") ?: throw IllegalArgumentException("MANIFEST_INVALID")
+            val chunks = file.opt("chunkSha256") as? JSONArray ?: throw IllegalArgumentException("MANIFEST_INVALID")
+            val chunkHashes = (0 until chunks.length()).map { chunks.opt(it) as? String ?: throw IllegalArgumentException("MANIFEST_INVALID") }
+            if (!safeRelativePath(path) || !validSha(fileSha256) ||
                 chunkHashes.size.toLong() != ((byteCount - 1L) / chunkSize) + 1L || chunkHashes.any { !validSha(it) } ||
                 !paths.add(path) || !folded.add(path.lowercase())
             ) throw IllegalArgumentException("MANIFEST_PATH_INVALID")
-            files += FileSpec(path, byteCount, file.getString("sha256"), chunkSize, chunkHashes)
+            files += FileSpec(path, byteCount, fileSha256, chunkSize, chunkHashes)
         }
         if (files.size != REQUIRED_FILES.size || REQUIRED_FILES.any { (path, bytes) -> files.none { it.path == path && it.byteCount == bytes } }) {
             throw IllegalArgumentException("MANIFEST_FILE_SET_MISMATCH")
         }
-        val platforms = raw.optJSONArray("platforms") ?: throw IllegalArgumentException("MANIFEST_INVALID")
+        val platforms = raw.opt("platforms") as? JSONArray ?: throw IllegalArgumentException("MANIFEST_INVALID")
         if (platforms.length() != 2) throw IllegalArgumentException("PLATFORM_COMPATIBILITY_MISMATCH")
         var selected: PlatformSpec? = null
         val names = mutableSetOf<String>()
         for (index in 0 until platforms.length()) {
-            val candidate = platforms.optJSONObject(index) ?: throw IllegalArgumentException("MANIFEST_INVALID")
+            val candidate = platforms.opt(index) as? JSONObject ?: throw IllegalArgumentException("MANIFEST_INVALID")
             requireExactKeys(candidate, PLATFORM_KEYS, "MANIFEST_INVALID")
-            val name = candidate.optString("osFamily")
-            val architectures = candidate.optJSONArray("architectures") ?: throw IllegalArgumentException("MANIFEST_INVALID")
-            val architectureValues = (0 until architectures.length()).map { architectures.optString(it) }
-            if (name !in setOf("android", "ios") || !names.add(name) || architectureValues.isEmpty() ||
+            val name = exactString(candidate, "osFamily") ?: throw IllegalArgumentException("MANIFEST_INVALID")
+            val minOsVersion = exactString(candidate, "minOsVersion") ?: throw IllegalArgumentException("MANIFEST_INVALID")
+            val runtimeVersion = exactString(candidate, "runtimeVersion") ?: throw IllegalArgumentException("MANIFEST_INVALID")
+            val runtimeSha256 = exactString(candidate, "runtimeSha256") ?: throw IllegalArgumentException("MANIFEST_INVALID")
+            val smokeExpectedTextSha256 = exactString(candidate, "smokeExpectedTextSha256") ?: throw IllegalArgumentException("MANIFEST_INVALID")
+            val architectures = candidate.opt("architectures") as? JSONArray ?: throw IllegalArgumentException("MANIFEST_INVALID")
+            val architectureValues = (0 until architectures.length()).map {
+                architectures.opt(it) as? String ?: throw IllegalArgumentException("MANIFEST_INVALID")
+            }
+            if (name !in setOf("android", "ios") || architectureValues.isEmpty() ||
                 architectureValues.any { !validId(it) } || architectureValues.toSet().size != architectureValues.size ||
-                !validVersion(candidate.optString("minOsVersion")) || !validId(candidate.optString("runtimeVersion")) ||
-                !validSha(candidate.optString("runtimeSha256")) || !validSha(candidate.optString("smokeExpectedTextSha256"))
+                !validVersion(minOsVersion) || !validId(runtimeVersion) ||
+                !validSha(runtimeSha256) || !validSha(smokeExpectedTextSha256)
             ) throw IllegalArgumentException("MANIFEST_INVALID")
+            names.add(name)
             if (name == PLATFORM) selected = PlatformSpec(
-                candidate.getString("minOsVersion"), architectureValues, candidate.getString("runtimeVersion"),
-                candidate.getString("runtimeSha256"), candidate.getString("smokeExpectedTextSha256"),
+                minOsVersion, architectureValues, runtimeVersion, runtimeSha256, smokeExpectedTextSha256,
             )
         }
         if (names != setOf("android", "ios") || selected == null) throw IllegalArgumentException("PLATFORM_COMPATIBILITY_MISMATCH")
         val unsigned = JSONObject(raw.toString()).also { it.remove("manifestSha256") }
-        if (sha256(canonicalJson(unsigned).toByteArray()) != raw.getString("manifestSha256")) {
+        if (sha256(canonicalJson(unsigned).toByteArray()) != manifestSha256) {
             throw IllegalArgumentException("MANIFEST_HASH_MISMATCH")
         }
-        return Manifest(raw, raw.getString("packVersion"), files, selected, raw.getString("smokeInputSha256"), raw.getString("manifestSha256"))
+        return Manifest(raw, packVersion, files, selected, smokeInputSha256, manifestSha256)
     }
 
     private fun readManifest(pack: File): Manifest? = runCatching { parseManifest(File(pack, "manifest.json").readText()) }.getOrNull()
@@ -717,7 +769,7 @@ internal class MainaModelPackLifecycle(
     private fun requirePlatformCompatible(manifest: Manifest) {
         if (!platformCompatible() || !manifest.platform.architectures.contains("arm64-v8a") ||
             manifest.platform.runtimeVersion != RUNTIME_VERSION || manifest.platform.runtimeSha256 != RUNTIME_SHA256 ||
-            compareVersions(Build.VERSION.SDK_INT.toString(), manifest.platform.minOsVersion) < 0
+            MainaModelPackLifecyclePolicy.compareVersions(Build.VERSION.SDK_INT.toString(), manifest.platform.minOsVersion) < 0
         ) throw IllegalStateException("PLATFORM_COMPATIBILITY_MISMATCH")
     }
 
@@ -905,6 +957,7 @@ internal class MainaModelPackLifecycle(
         const val PREVIOUS_POINTER = "previous-ready.json"
         const val WRITER = "writer.json"
         const val CURRENT_ACQUISITION = "current.json"
+        const val MAX_MANIFEST_CHARACTERS = 1_000_000
         val MANIFEST_KEYS = setOf("schemaVersion", "packId", "packVersion", "engineId", "formatVersion", "files", "platforms", "smokeInputSha256", "manifestSha256")
         val FILE_KEYS = setOf("path", "byteCount", "sha256", "chunkSizeBytes", "chunkSha256")
         val PLATFORM_KEYS = setOf("osFamily", "minOsVersion", "architectures", "runtimeVersion", "runtimeSha256", "smokeExpectedTextSha256")
@@ -924,7 +977,7 @@ internal class MainaModelPackLifecycle(
 
         fun validSha(value: String) = value.matches(Regex("^[a-f0-9]{64}$"))
         fun validId(value: String) = value.matches(Regex("^[A-Za-z0-9][A-Za-z0-9._:-]{0,191}$"))
-        fun validVersion(value: String) = value.matches(Regex("^[0-9]+(?:\\.[0-9]+){0,2}$"))
+        fun validVersion(value: String) = value.length in 1..64 && value.matches(Regex("^[0-9]+(?:\\.[0-9]+){0,2}$"))
         fun safeRelativePath(value: String): Boolean = value.isNotBlank() && !value.startsWith("/") && !value.contains('\\') &&
             value.split('/').all { it.isNotBlank() && it != "." && it != ".." }
 
@@ -932,6 +985,8 @@ internal class MainaModelPackLifecycle(
             val actual = value.keys().asSequence().toSet()
             if (actual != expected) throw IllegalArgumentException(code)
         }
+
+        fun exactString(value: JSONObject, key: String): String? = value.opt(key) as? String
 
         fun canonicalJson(value: Any?): String = when (value) {
             null, JSONObject.NULL -> "null"
@@ -982,16 +1037,6 @@ internal class MainaModelPackLifecycle(
                 if (remaining > 0L) break
             }
             result
-        }
-
-        fun compareVersions(left: String, right: String): Int {
-            val a = left.split('.').mapNotNull(String::toIntOrNull)
-            val b = right.split('.').mapNotNull(String::toIntOrNull)
-            for (index in 0 until maxOf(a.size, b.size)) {
-                val compared = (a.getOrNull(index) ?: 0).compareTo(b.getOrNull(index) ?: 0)
-                if (compared != 0) return compared
-            }
-            return 0
         }
 
         fun ensureDirectory(directory: File) {

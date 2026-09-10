@@ -85,6 +85,99 @@ describe('native model-pack manifest', () => {
     for (const value of variants) expect(decodeNativeModelPackManifest(value).ok).toBe(false);
   });
 
+  it('rejects scalar coercion and bounds dotted versions without Number narrowing', () => {
+    const variants: unknown[] = [
+      { ...fixture().manifest, packVersion: 1 },
+      { ...fixture().manifest, files: [{ ...fixture().manifest.files[0], byteCount: '44148281' }, ...fixture().manifest.files.slice(1)] },
+      { ...fixture().manifest, files: [{ ...fixture().manifest.files[0], chunkSizeBytes: Number.MAX_SAFE_INTEGER + 1 }, ...fixture().manifest.files.slice(1)] },
+      { ...fixture().manifest, files: [{ ...fixture().manifest.files[0], chunkSha256: [1] }, ...fixture().manifest.files.slice(1)] },
+      { ...fixture().manifest, platforms: [{ ...fixture().manifest.platforms[0], osFamily: { value: 'android' } }, fixture().manifest.platforms[1]] },
+      { ...fixture().manifest, platforms: [{ ...fixture().manifest.platforms[0], minOsVersion: 26 }, fixture().manifest.platforms[1]] },
+      { ...fixture().manifest, platforms: [{ ...fixture().manifest.platforms[0], architectures: [64] }, fixture().manifest.platforms[1]] },
+      { ...fixture().manifest, platforms: { 0: fixture().manifest.platforms[0] } },
+      { ...fixture().manifest, platforms: [null, fixture().manifest.platforms[1]] },
+      { ...fixture().manifest, platforms: [{ ...fixture().manifest.platforms[0], minOsVersion: '9'.repeat(65) }, fixture().manifest.platforms[1]] },
+    ];
+    for (const value of variants) expect(decodeNativeModelPackManifest(value)).toMatchObject({ ok: false, code: 'MANIFEST_INVALID' });
+
+    const hugeMinimum = fixture();
+    hugeMinimum.manifest.platforms[0].minOsVersion = '9'.repeat(32);
+    expect(validateNativeModelPack(hugeMinimum.manifest, {
+      computedManifestSha256: hugeMinimum.manifest.manifestSha256,
+      observedFiles: hugeMinimum.observedFiles,
+      platform: 'android',
+      osVersion: '36',
+      architecture: 'arm64-v8a',
+      runtimeVersion: 'sherpa-onnx-1.13.6',
+      runtimeSha256: 'a'.repeat(64),
+    })).toMatchObject({ ok: false, code: 'PLATFORM_COMPATIBILITY_MISMATCH' });
+  });
+
+  it('uses one bounded ASCII dotted-version grammar for manifest and runtime values', () => {
+    const validComparisons = [
+      ['17', '17', true],
+      ['17.0', '17', true],
+      ['17.0.0', '17.0', true],
+      ['17.0.1', '17.0', true],
+      ['18', '17.99999999999999999999999999999999', true],
+      ['00017.00', '17.0.0', true],
+      ['17', '00017.00', true],
+      ['17', '99999999999999999999999999999999', false],
+      ['17.1', '17.99999999999999999999999999999999', false],
+      ['17.1.1', '17.1.99999999999999999999999999999999', false],
+    ] as const;
+    for (const [actual, minimum, compatible] of validComparisons) {
+      const current = fixture();
+      current.manifest.platforms[0].minOsVersion = minimum;
+      expect(validateNativeModelPack(current.manifest, {
+        computedManifestSha256: current.manifest.manifestSha256,
+        observedFiles: current.observedFiles,
+        platform: 'android',
+        osVersion: actual,
+        architecture: 'arm64-v8a',
+        runtimeVersion: 'sherpa-onnx-1.13.6',
+        runtimeSha256: 'a'.repeat(64),
+      }).ok).toBe(compatible);
+    }
+
+    const invalidVersions: unknown[] = [
+      '', '17.', '.17', '17..0', '17.0.0.0', '-17', '+17', ' 17', '17 ', '17\n',
+      '１７', '١٧', '9'.repeat(65), 17, null,
+    ];
+    for (const invalid of invalidVersions) {
+      const current = fixture();
+      current.manifest.platforms[0].minOsVersion = invalid as string;
+      expect(decodeNativeModelPackManifest(current.manifest))
+        .toMatchObject({ ok: false, code: 'MANIFEST_INVALID' });
+      expect(() => validate({ osVersion: invalid as string })).not.toThrow();
+      expect(validate({ osVersion: invalid as string }))
+        .toMatchObject({ ok: false, code: 'PLATFORM_COMPATIBILITY_MISMATCH' });
+    }
+
+    const boundary = fixture();
+    boundary.manifest.platforms[0].minOsVersion = `1.${'0'.repeat(62)}`;
+    expect(boundary.manifest.platforms[0].minOsVersion).toHaveLength(64);
+    expect(decodeNativeModelPackManifest(boundary.manifest).ok).toBe(true);
+  });
+
+  it('classifies platform structure separately from platform cardinality and identity', () => {
+    const android = fixture().manifest.platforms[0];
+    const ios = fixture().manifest.platforms[1];
+    for (const platforms of [[], [android], [android, android], [android, ios, ios]]) {
+      expect(decodeNativeModelPackManifest({ ...fixture().manifest, platforms }))
+        .toMatchObject({ ok: false, code: 'PLATFORM_COMPATIBILITY_MISMATCH' });
+    }
+    for (const platforms of [
+      [null, ios],
+      [{ ...android, osFamily: 'windows' }, ios],
+      [{ ...android, minOsVersion: 26 }, ios],
+      [{ ...android, architectures: ['arm64-v8a', 64] }, ios],
+    ]) {
+      expect(decodeNativeModelPackManifest({ ...fixture().manifest, platforms }))
+        .toMatchObject({ ok: false, code: 'MANIFEST_INVALID' });
+    }
+  });
+
   it('rejects traversal, absolute, duplicate and case-fold-colliding paths', () => {
     for (const path of ['../conv_frontend.onnx', '/conv_frontend.onnx', 'tokenizer//vocab.json', 'tokenizer\\vocab.json']) {
       const { manifest } = fixture();
