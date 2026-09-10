@@ -52,8 +52,10 @@ export function collectAndroidPreflight({ env = process.env, run = runCommand } 
   const androidHome = env.MAINA_ANDROID_HOME ?? env.ANDROID_HOME ?? '/Users/divay/Library/Android/sdk';
   const gradleHome = env.MAINA_GRADLE_HOME ?? `${expectedStorageRoot}/caches/toolchains/maina-build-tools/gradle/gradle-9.3.1`;
   const adb = join(androidHome, 'platform-tools', 'adb');
+  const commandEnv = { ...env, JAVA_HOME: javaHome, ANDROID_HOME: androidHome };
+  const execute = (command, args) => run(command, args, commandEnv);
 
-  const nodeVersion = run(join(nodeBin, 'node'), ['--version']);
+  const nodeVersion = execute(join(nodeBin, 'node'), ['--version']);
   record('node', nodeVersion.ok && nodeVersion.stdout.trim() === 'v24.19.0', 'NODE_24_19_0_UNAVAILABLE');
 
   let guardPass = false;
@@ -64,13 +66,13 @@ export function collectAndroidPreflight({ env = process.env, run = runCommand } 
     guardPass = false;
   }
   if (guardPass) {
-    const guarded = run(storageGuard, []);
+    const guarded = execute(storageGuard, []);
     guardPass = guarded.ok && guarded.stdout === `${expectedStorageRoot}\n`;
   }
   record('storage_guard', guardPass, 'STORAGE_GUARD_REJECTED');
 
-  const head = run('git', ['-C', projectDir, 'rev-parse', 'HEAD']);
-  const upstream = run('git', ['-C', projectDir, 'rev-parse', '@{upstream}']);
+  const head = execute('git', ['-C', projectDir, 'rev-parse', 'HEAD']);
+  const upstream = execute('git', ['-C', projectDir, 'rev-parse', '@{upstream}']);
   const expectedRevision = env.MAINA_EXPECTED_FINAL_COMMIT ?? head.stdout.trim();
   record(
     'source_revision',
@@ -78,7 +80,7 @@ export function collectAndroidPreflight({ env = process.env, run = runCommand } 
       && head.stdout.trim() === expectedRevision && upstream.stdout.trim() === expectedRevision,
     'SOURCE_REVISION_MISMATCH',
   );
-  const status = run('git', ['-C', projectDir, 'status', '--porcelain']);
+  const status = execute('git', ['-C', projectDir, 'status', '--porcelain']);
   record('clean_worktree', status.ok && status.stdout === '', 'SOURCE_WORKTREE_DIRTY');
 
   const helpers = [
@@ -90,7 +92,7 @@ export function collectAndroidPreflight({ env = process.env, run = runCommand } 
   ];
   record('helper_runtime', helpers.every((path) => isReadable(join(projectDir, path))), 'HELPER_RUNTIME_UNAVAILABLE');
 
-  const java = run(join(javaHome, 'bin', 'java'), ['-version']);
+  const java = execute(join(javaHome, 'bin', 'java'), ['-version']);
   record('jdk', java.ok && /(?:version\s+"17\.|openjdk\s+17\.)/.test(`${java.stdout}\n${java.stderr}`), 'JDK_17_UNAVAILABLE');
 
   const buildTools = newestBuildTools(androidHome);
@@ -98,16 +100,16 @@ export function collectAndroidPreflight({ env = process.env, run = runCommand } 
   const aapt = buildTools ? join(androidHome, 'build-tools', buildTools, 'aapt') : '';
   record('android_sdk', isExecutable(adb) && isExecutable(apksigner) && isExecutable(aapt), 'ANDROID_SDK_UNAVAILABLE');
 
-  const gradle = run(join(gradleHome, 'bin', 'gradle'), ['--version']);
+  const gradle = execute(join(gradleHome, 'bin', 'gradle'), ['--version']);
   record('gradle', gradle.ok && /^Gradle 9\.3\.1$/m.test(gradle.stdout), 'GRADLE_9_3_1_UNAVAILABLE');
 
   const endpoint = env.MAINA_ADB_SERIAL ?? 'adb-47011FDAP000VE-9s0wNO._adb-tls-connect._tcp';
   const hardwareSerial = env.MAINA_DEVICE_SERIAL ?? '47011FDAP000VE';
-  const devices = run(adb, ['devices']);
+  const devices = execute(adb, ['devices']);
   const matching = devices.stdout.split('\n').filter((line) => line.startsWith(`${endpoint}\tdevice`)).length;
-  const state = run(adb, ['-s', endpoint, 'get-state']);
-  const serial = run(adb, ['-s', endpoint, 'shell', 'getprop', 'ro.serialno']);
-  const model = run(adb, ['-s', endpoint, 'shell', 'getprop', 'ro.product.model']);
+  const state = execute(adb, ['-s', endpoint, 'get-state']);
+  const serial = execute(adb, ['-s', endpoint, 'shell', 'getprop', 'ro.serialno']);
+  const model = execute(adb, ['-s', endpoint, 'shell', 'getprop', 'ro.product.model']);
   record(
     'adb_endpoint',
     endpoint.endsWith('._adb-tls-connect._tcp') && matching === 1 && state.ok
@@ -138,8 +140,8 @@ function loadContract() {
   return JSON.parse(readFileSync(join(projectDir, 'coordination', 'operations', 'contracts', 'qualification-harness.v1.json'), 'utf8'));
 }
 
-function runCommand(command, args) {
-  const result = spawnSync(command, args, { encoding: 'utf8', env: process.env });
+function runCommand(command, args, env = process.env) {
+  const result = spawnSync(command, args, { encoding: 'utf8', env: { ...env } });
   return Object.freeze({ ok: result.status === 0, stdout: result.stdout ?? '', stderr: result.stderr ?? '' });
 }
 
@@ -197,6 +199,53 @@ export async function selfTest() {
     evidenceAttemptMarkerCreated: false,
   });
 
+  const canonicalJavaHome = `${expectedStorageRoot}/caches/toolchains/maina-build-tools/jdk17/Contents/Home`;
+  const canonicalAndroidHome = '/Users/divay/Library/Android/sdk';
+  const canonicalGradleHome = `${expectedStorageRoot}/caches/toolchains/maina-build-tools/gradle/gradle-9.3.1`;
+  const expectedRevision = 'a'.repeat(40);
+  const endpoint = 'adb-47011FDAP000VE-test._adb-tls-connect._tcp';
+  const ambientJavaHome = process.env.JAVA_HOME;
+  const ambientAndroidHome = process.env.ANDROID_HOME;
+  const commandEnvironments = [];
+  const environmentResults = collectAndroidPreflight({
+    env: {
+      PATH: '/usr/bin:/bin',
+      MAINA_NODE_BIN: '/Users/divay/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin',
+      MAINA_JAVA_HOME: canonicalJavaHome,
+      MAINA_ANDROID_HOME: canonicalAndroidHome,
+      MAINA_GRADLE_HOME: canonicalGradleHome,
+      MAINA_EXPECTED_FINAL_COMMIT: expectedRevision,
+      MAINA_ADB_SERIAL: endpoint,
+      MAINA_DEVICE_SERIAL: '47011FDAP000VE',
+    },
+    run: (command, args, commandEnv) => {
+      commandEnvironments.push(commandEnv);
+      if (command === storageGuard) return commandResult(true, `${expectedStorageRoot}\n`);
+      if (command === 'git' && args.at(-1) === 'HEAD') return commandResult(true, `${expectedRevision}\n`);
+      if (command === 'git' && args.at(-1) === '@{upstream}') return commandResult(true, `${expectedRevision}\n`);
+      if (command === 'git' && args.includes('status')) return commandResult(true, '');
+      if (command === join(canonicalJavaHome, 'bin', 'java')) return commandResult(true, '', 'openjdk version "17.0.20.1"');
+      if (command === join(canonicalGradleHome, 'bin', 'gradle')) return commandResult(true, 'Gradle 9.3.1\n');
+      if (command.endsWith('/node')) return commandResult(true, 'v24.19.0\n');
+      if (command.endsWith('/adb') && args.length === 1 && args[0] === 'devices') {
+        return commandResult(true, `List of devices attached\n${endpoint}\tdevice\n`);
+      }
+      if (command.endsWith('/adb') && args.at(-1) === 'get-state') return commandResult(true, 'device\n');
+      if (command.endsWith('/adb') && args.at(-1) === 'ro.serialno') return commandResult(true, '47011FDAP000VE\n');
+      if (command.endsWith('/adb') && args.at(-1) === 'ro.product.model') return commandResult(true, 'Pixel 9 Pro\n');
+      return commandResult(false, '', 'UNEXPECTED_SYNTHETIC_COMMAND');
+    },
+  });
+  assert.ok(environmentResults.every(({ status }) => status === 'PASS'));
+  assert.ok(commandEnvironments.length > 0);
+  for (const commandEnv of commandEnvironments) {
+    assert.equal(commandEnv.JAVA_HOME, canonicalJavaHome);
+    assert.equal(commandEnv.ANDROID_HOME, canonicalAndroidHome);
+    assert.equal(commandEnv.PATH, '/usr/bin:/bin');
+  }
+  assert.equal(process.env.JAVA_HOME, ambientJavaHome);
+  assert.equal(process.env.ANDROID_HOME, ambientAndroidHome);
+
   let observerCalls = 0;
   const observer = await runReadOnlyObserver(async () => {
     observerCalls += 1;
@@ -236,6 +285,7 @@ export async function selfTest() {
   const source = (path) => readFileSync(join(projectDir, path), 'utf8');
   const build = source('scripts/build-android-release-candidate.sh');
   assert.ok(build.indexOf('android-lane.mjs" preflight') < build.indexOf(': > "$OUTPUT_DIR/build-attempted"'));
+  assert.doesNotMatch(build, /android-lane\.mjs" preflight >\/dev\/null/);
   assert.ok(build.indexOf('verify-build-source-state.mjs android') < build.indexOf(': > "$OUTPUT_DIR/build-attempted"'));
   const installer = source('scripts/install-android-preserving-data.sh');
   assert.ok(installer.indexOf('inspect_installed "$RUN_DIR/installed-before.apk"') < installer.indexOf('mkdir "$LOCK_DIR"'));
@@ -251,7 +301,11 @@ export async function selfTest() {
   assert.doesNotMatch(replay, /android_serial=%s|ios_udid=%s|ios_coredevice_id=%s/);
   syntheticReplayTest();
 
-  console.log('Android qualification adapter self-tests passed (preflight 2, observer 1, mutation 2, script boundaries 12, replay 1).');
+  console.log('Android qualification adapter self-tests passed (preflight 3, observer 1, mutation 2, script boundaries 13, replay 1).');
+}
+
+function commandResult(ok, stdout = '', stderr = '') {
+  return Object.freeze({ ok, stdout, stderr });
 }
 
 function syntheticReplayTest() {

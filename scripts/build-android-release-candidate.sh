@@ -53,7 +53,7 @@ export MAINA_EXPO_CLI="$EXPO_CLI"
 export PATH="$NODE_BIN:${PATH:-/usr/bin:/bin}"
 [[ "$(command -v node)" == "$NODE_BIN/node" ]] || { echo "Pinned Node runtime is not first on PATH." >&2; exit 2; }
 MAINA_EXPECTED_FINAL_COMMIT="$EXPECTED_FINAL" "$NODE_EXECUTABLE" \
-  "$PROJECT_DIR/scripts/qualification/android-lane.mjs" preflight >/dev/null
+  "$PROJECT_DIR/scripts/qualification/android-lane.mjs" preflight
 
 # Build/cache helpers may create external directories only after the complete
 # side-effect-free qualification preflight has passed.
