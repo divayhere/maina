@@ -148,6 +148,7 @@ export type NativeModelPackValidation<T = undefined> =
 
 const SHA256 = /^[a-f0-9]{64}$/;
 const ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,191}$/;
+const DOTTED_VERSION = /^[0-9]+(?:\.[0-9]+){0,2}$/;
 const REQUIRED_FILES = new Map<string, number>([
   ['conv_frontend.onnx', 44_148_281],
   ['encoder.int8.onnx', 182_491_662],
@@ -185,17 +186,21 @@ function safePath(value: string): boolean {
   return parts.every((part) => part.length > 0 && part !== '.' && part !== '..');
 }
 
-function compareVersion(actual: string, minimum: string): boolean {
-  const decode = (value: string) => {
-    if (!/^\d+(?:\.\d+){0,2}$/.test(value)) return null;
-    return value.split('.').map(Number);
-  };
-  const left = decode(actual);
-  const right = decode(minimum);
+function decodeVersion(value: unknown): string[] | null {
+  if (typeof value !== 'string' || value.length < 1 || value.length > 64 || !DOTTED_VERSION.test(value)) {
+    return null;
+  }
+  return value.split('.').map((part) => part.replace(/^0+(?=[0-9])/, ''));
+}
+
+function compareVersion(actual: unknown, minimum: unknown): boolean {
+  const left = decodeVersion(actual);
+  const right = decodeVersion(minimum);
   if (!left || !right) return false;
   for (let index = 0; index < Math.max(left.length, right.length); index += 1) {
-    const a = left[index] ?? 0;
-    const b = right[index] ?? 0;
+    const a = left[index] ?? '0';
+    const b = right[index] ?? '0';
+    if (a.length !== b.length) return a.length > b.length;
     if (a !== b) return a > b;
   }
   return true;
@@ -236,13 +241,18 @@ export function decodeNativeModelPackManifest(value: unknown): NativeModelPackVa
   const folded = new Set<string>();
   for (const candidate of value.files) {
     if (!record(candidate) || !exactKeys(candidate, FILE_KEYS)
-      || typeof candidate.path !== 'string' || !safePath(candidate.path)
+      || typeof candidate.path !== 'string'
       || !safePositive(candidate.byteCount)
-      || typeof candidate.sha256 !== 'string' || !SHA256.test(candidate.sha256)
+      || typeof candidate.sha256 !== 'string'
       || !safePositive(candidate.chunkSizeBytes)
       || !Array.isArray(candidate.chunkSha256)
+      || !candidate.chunkSha256.every((digest) => typeof digest === 'string')) {
+      return { ok: false, code: 'MANIFEST_INVALID' };
+    }
+    if (!safePath(candidate.path)
+      || !SHA256.test(candidate.sha256)
       || candidate.chunkSha256.length !== Math.ceil(candidate.byteCount / candidate.chunkSizeBytes)
-      || !candidate.chunkSha256.every((digest) => typeof digest === 'string' && SHA256.test(digest))) {
+      || !candidate.chunkSha256.every((digest) => SHA256.test(digest))) {
       return { ok: false, code: 'MANIFEST_PATH_INVALID' };
     }
     const lower = candidate.path.toLocaleLowerCase('en-US');
@@ -260,18 +270,17 @@ export function decodeNativeModelPackManifest(value: unknown): NativeModelPackVa
   const platformNames = new Set<string>();
   for (const candidate of value.platforms) {
     if (!record(candidate) || !exactKeys(candidate, PLATFORM_KEYS)
-      || !['android', 'ios'].includes(String(candidate.osFamily))
-      || typeof candidate.minOsVersion !== 'string' || !/^\d+(?:\.\d+){0,2}$/.test(candidate.minOsVersion)
+      || typeof candidate.osFamily !== 'string' || !['android', 'ios'].includes(candidate.osFamily)
+      || decodeVersion(candidate.minOsVersion) === null
       || !Array.isArray(candidate.architectures) || candidate.architectures.length === 0
       || !candidate.architectures.every((entry) => typeof entry === 'string' && ID.test(entry))
       || new Set(candidate.architectures).size !== candidate.architectures.length
       || typeof candidate.runtimeVersion !== 'string' || !ID.test(candidate.runtimeVersion)
       || typeof candidate.runtimeSha256 !== 'string' || !SHA256.test(candidate.runtimeSha256)
-      || typeof candidate.smokeExpectedTextSha256 !== 'string' || !SHA256.test(candidate.smokeExpectedTextSha256)
-      || platformNames.has(String(candidate.osFamily))) {
+      || typeof candidate.smokeExpectedTextSha256 !== 'string' || !SHA256.test(candidate.smokeExpectedTextSha256)) {
       return { ok: false, code: 'MANIFEST_INVALID' };
     }
-    platformNames.add(String(candidate.osFamily));
+    platformNames.add(candidate.osFamily);
     platforms.push(candidate as unknown as NativeModelPackManifestPlatform);
   }
   if (platforms.length !== 2 || !platformNames.has('android') || !platformNames.has('ios')) {
