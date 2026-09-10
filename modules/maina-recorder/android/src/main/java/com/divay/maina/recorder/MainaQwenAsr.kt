@@ -25,6 +25,7 @@ internal class MainaQwenAsr(private val context: Context) {
     private var recognizer: OfflineRecognizer? = null
     private val modelPacks = MainaModelPackLifecycle(context)
     private var activePack: MainaModelPackLifecycle.ReadyHandle? = null
+    private var pinnedModelIdentity: ModelIdentity? = null
 
     data class ModelStatus(val ready: Boolean, val root: String, val reason: String? = null) {
         fun asMap() = mapOf("ready" to ready, "root" to root, "reason" to reason)
@@ -72,12 +73,10 @@ internal class MainaQwenAsr(private val context: Context) {
     }
 
     fun status(): ModelStatus {
-        val lifecycleStatus = runCatching { modelPacks.status() }.getOrElse {
+        val handle = runCatching { modelPacks.acquireReady() }.getOrElse {
             return ModelStatus(false, "", "MODEL_PACK_STATE_INVALID")
         }
-        if (lifecycleStatus.state != "unavailable") {
-            val handle = modelPacks.acquireReady()
-                ?: return ModelStatus(false, "", lifecycleStatus.reasonCode)
+        if (handle != null) {
             return try {
                 val invalid = invalidModelFile(handle.root)
                 if (invalid == null) ModelStatus(true, handle.root.absolutePath)
@@ -88,20 +87,61 @@ internal class MainaQwenAsr(private val context: Context) {
         }
         val root = modelRoot()
         val invalid = invalidModelFile(root)
-        return if (invalid == null) ModelStatus(true, root.absolutePath) else ModelStatus(false, root.absolutePath, invalid)
+        if (invalid == null) return ModelStatus(true, root.absolutePath)
+        val lifecycleReason = runCatching { modelPacks.status().reasonCode }.getOrDefault("MODEL_PACK_STATE_INVALID")
+        return ModelStatus(false, root.absolutePath, lifecycleReason.takeUnless { it == "NONE" } ?: invalid)
     }
 
     @Synchronized
     fun modelIdentity(): ModelIdentity {
         resolveModelForRecognizer()
-        val handle = activePack
-        return ModelIdentity(
-            modelId = ENGINE_ID,
-            modelVersion = handle?.packVersion ?: LEGACY_MODEL_VERSION,
-            runtimeVersion = handle?.runtimeVersion ?: ENGINE_VERSION,
-            manifestSha256 = handle?.manifestSha256,
-            activationGeneration = handle?.activationGeneration,
+        return checkNotNull(pinnedModelIdentity) { "MODEL_PACK_IDENTITY_UNAVAILABLE" }
+    }
+
+    /**
+     * Install the durable model-generation fence while the exact managed pack
+     * reader is still pinned and before the terminal Outbox transaction may
+     * commit. A failed fence aborts that transaction; a crash after the fence
+     * merely retains the pack conservatively for the next recovery pass.
+     */
+    @Synchronized
+    fun bindExactResultBeforeCommit(result: Map<String, Any?>): Boolean {
+        val binding = exactResultBinding(result) ?: return false
+        return modelPacks.prepareExactResult(
+            modelId = binding.first.modelId,
+            modelVersion = binding.first.modelVersion,
+            runtimeVersion = binding.first.runtimeVersion,
+            manifestSha256 = binding.first.manifestSha256,
+            activationGeneration = binding.first.activationGeneration,
+            resultId = binding.second,
+            resultPayloadSha256 = binding.third,
         )
+    }
+
+    @Synchronized
+    fun commitExactResult(result: Map<String, Any?>): Boolean {
+        val binding = exactResultBinding(result) ?: return false
+        return modelPacks.noteExactResult(
+            modelId = binding.first.modelId,
+            modelVersion = binding.first.modelVersion,
+            runtimeVersion = binding.first.runtimeVersion,
+            manifestSha256 = binding.first.manifestSha256,
+            activationGeneration = binding.first.activationGeneration,
+            resultId = binding.second,
+            resultPayloadSha256 = binding.third,
+        )
+    }
+
+    private fun exactResultBinding(result: Map<String, Any?>): Triple<ModelIdentity, String, String>? {
+        val identity = checkNotNull(pinnedModelIdentity) { "MODEL_PACK_IDENTITY_UNAVAILABLE" }
+        if (result["modelId"] != identity.modelId || result["modelVersion"] != identity.modelVersion ||
+            result["runtimeVersion"] != identity.runtimeVersion ||
+            result["modelManifestSha256"] != identity.manifestSha256 ||
+            (result["modelActivationGeneration"] as? Number)?.toLong() != identity.activationGeneration
+        ) return null
+        val payloadSha = modelPacks.resultPayloadSha256(result)
+        val resultId = modelPacks.resultIdForPayloadSha256(payloadSha) ?: return null
+        return Triple(identity, resultId, payloadSha)
     }
 
     /** Select a quiet boundary near the middle of a failed ASR window.
@@ -289,29 +329,61 @@ internal class MainaQwenAsr(private val context: Context) {
     private fun resolveModelForRecognizer(): ModelStatus {
         val existing = activePack
         if (existing != null) {
+            check(pinnedModelIdentity == identityFor(existing)) { "MODEL_PACK_IDENTITY_CHANGED" }
             return ModelStatus(true, existing.root.absolutePath)
         }
         if (recognizer != null) {
             return status()
         }
-        val lifecycleStatus = modelPacks.status()
-        if (lifecycleStatus.state == "ready") {
-            val handle = modelPacks.acquireReady() ?: error("MODEL_PACK_STATE_INVALID")
+        val pinned = pinnedModelIdentity
+        if (pinned != null && pinned.manifestSha256 == null) {
+            val legacy = modelRoot()
+            val invalid = invalidModelFile(legacy)
+            check(invalid == null) { invalid ?: "Qwen legacy model is unavailable" }
+            return ModelStatus(true, legacy.absolutePath)
+        }
+        val handle = modelPacks.acquireReady()
+        if (handle != null) {
+            val selectedIdentity = identityFor(handle)
+            if (pinned != null && pinned != selectedIdentity) {
+                runCatching { handle.release() }
+                error("MODEL_PACK_IDENTITY_CHANGED")
+            }
             val invalid = invalidModelFile(handle.root)
             if (invalid == null) {
                 activePack = handle
+                pinnedModelIdentity = selectedIdentity
                 return ModelStatus(true, handle.root.absolutePath)
             }
             runCatching { modelPacks.rollbackAfterOpenFailure(handle) }
             runCatching { handle.release() }
             error("Verified Qwen model pack could not be opened")
         }
-        check(lifecycleStatus.state == "unavailable") { lifecycleStatus.reasonCode }
+        check(pinned == null) { "MODEL_PACK_IDENTITY_UNAVAILABLE" }
         val legacy = modelRoot()
         val invalid = invalidModelFile(legacy)
-        check(invalid == null) { invalid ?: "Qwen model pack is unavailable" }
+        check(invalid == null) {
+            runCatching { modelPacks.status().reasonCode }.getOrDefault("MODEL_PACK_STATE_INVALID").takeUnless { it == "NONE" }
+                ?: invalid
+                ?: "Qwen model pack is unavailable"
+        }
+        pinnedModelIdentity = ModelIdentity(
+            modelId = ENGINE_ID,
+            modelVersion = LEGACY_MODEL_VERSION,
+            runtimeVersion = ENGINE_VERSION,
+            manifestSha256 = null,
+            activationGeneration = null,
+        )
         return ModelStatus(true, legacy.absolutePath)
     }
+
+    private fun identityFor(handle: MainaModelPackLifecycle.ReadyHandle) = ModelIdentity(
+        modelId = ENGINE_ID,
+        modelVersion = handle.packVersion,
+        runtimeVersion = handle.runtimeVersion,
+        manifestSha256 = handle.manifestSha256,
+        activationGeneration = handle.activationGeneration,
+    )
 
     private fun invalidModelFile(root: File): String? {
         val invalid = REQUIRED_FILES.entries.firstOrNull { (relative, expectedBytes) ->

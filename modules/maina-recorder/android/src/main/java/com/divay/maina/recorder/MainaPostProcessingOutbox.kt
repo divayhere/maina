@@ -280,19 +280,39 @@ internal class MainaPostProcessingOutbox(context: Context) :
         completedWindows: Int,
         failedWindows: Int,
         lastError: String?,
-    ) = writableDatabase.update(
-        "runs",
-        ContentValues().apply {
-            put("state", if (failedWindows == 0) STATE_COMPLETE else STATE_PARTIAL)
-            put("processed_segments", processedSegments)
-            put("completed_windows", completedWindows)
-            put("failed_windows", failedWindows)
-            if (lastError == null) putNull("last_error") else put("last_error", lastError)
-            put("updated_at", System.currentTimeMillis())
-        },
-        "meeting_id = ?",
-        arrayOf(meetingId),
-    )
+        bindExactResultBeforeCommit: (Map<String, Any?>) -> Boolean,
+    ): Map<String, Any?> {
+        val database = writableDatabase
+        database.beginTransaction()
+        try {
+            val updated = database.update(
+                "runs",
+                ContentValues().apply {
+                    put("state", if (failedWindows == 0) STATE_COMPLETE else STATE_PARTIAL)
+                    put("processed_segments", processedSegments)
+                    put("completed_windows", completedWindows)
+                    put("failed_windows", failedWindows)
+                    if (lastError == null) putNull("last_error") else put("last_error", lastError)
+                    put("updated_at", System.currentTimeMillis())
+                },
+                "meeting_id = ?",
+                arrayOf(meetingId),
+            )
+            if (updated != 1) throw IllegalStateException("native_result_finish_missing")
+            val result = readFromDatabase(database, meetingId)
+                ?: throw IllegalStateException("native_result_finish_missing")
+            if (!bindExactResultBeforeCommit(result)) {
+                throw IllegalStateException("native_model_result_binding_failed")
+            }
+            // If the process dies after the external model fence but before
+            // this commit, the pack is conservatively retained. Once this
+            // transaction commits, the matching fence is already durable.
+            database.setTransactionSuccessful()
+            return result
+        } finally {
+            database.endTransaction()
+        }
+    }
 
     fun defer(meetingId: String, error: String) = writableDatabase.update(
         "runs",
@@ -331,7 +351,9 @@ internal class MainaPostProcessingOutbox(context: Context) :
         }
     }
 
-    fun read(meetingId: String): Map<String, Any?>? = readableDatabase.rawQuery(
+    fun read(meetingId: String): Map<String, Any?>? = readFromDatabase(readableDatabase, meetingId)
+
+    private fun readFromDatabase(database: SQLiteDatabase, meetingId: String): Map<String, Any?>? = database.rawQuery(
         """SELECT run_id, state, capture_directory, meeting_started_at, capture_ended_at, duration_ms,
                   audio_duration_ms, segment_count, processed_segments, window_count,
                   completed_windows, failed_windows, route_restart_count, capture_gap_ms,
@@ -343,7 +365,7 @@ internal class MainaPostProcessingOutbox(context: Context) :
         if (!run.moveToFirst()) return null
         val runId = run.getString(0)
         val blocks = mutableListOf<Map<String, Any?>>()
-        readableDatabase.rawQuery(
+        database.rawQuery(
             """SELECT sequence, segment_index, started_at, ended_at, language, text
                FROM blocks WHERE meeting_id = ? AND run_id = ? ORDER BY sequence ASC""",
             arrayOf(meetingId, runId),

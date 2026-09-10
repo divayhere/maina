@@ -381,37 +381,42 @@ internal class MainaPostProcessingService : Service() {
                 )
                 chunkCursorAt += chunkDurationMs
             }
+
+            val hasTranscript = outbox.lastBlockTextBefore(meetingId, start.runId, Int.MAX_VALUE).isNotBlank()
+            val coverageComplete = MainaPostProcessingSupport.coverageComplete(
+                totalWindows,
+                completedWindows,
+                failedWindows,
+            )
+            val finalError = if (coverageComplete) null else (lastError ?: "Local transcription coverage is incomplete.")
+            val terminalResult = outbox.finish(meetingId, processedSegments, completedWindows, failedWindows, finalError) { result ->
+                asr.bindExactResultBeforeCommit(result)
+            }
+            if (!asr.commitExactResult(terminalResult)) {
+                throw IllegalStateException("native_model_result_binding_failed")
+            }
+            Log.i(
+                "MainaPostProcessing",
+                "Finished local transcription meetingId=$meetingId hasTranscript=$hasTranscript processedSegments=$processedSegments completedWindows=$completedWindows failedWindows=$failedWindows finalError=${finalError ?: "none"}",
+            )
+            notifyResultChanged(
+                meetingId,
+                if (coverageComplete) MainaPostProcessingOutbox.STATE_COMPLETE else MainaPostProcessingOutbox.STATE_PARTIAL,
+            )
+            updateProgress(
+                when {
+                    coverageComplete -> "Transcript ready"
+                    hasTranscript -> "Recovering saved speech"
+                    else -> "Transcript recovery queued"
+                },
+                completedWindows + failedWindows,
+                totalWindows,
+            )
+            return coverageComplete
         } finally {
             asr.release()
             voiceActivity.release()
         }
-
-        val hasTranscript = outbox.lastBlockTextBefore(meetingId, start.runId, Int.MAX_VALUE).isNotBlank()
-        val coverageComplete = MainaPostProcessingSupport.coverageComplete(
-            totalWindows,
-            completedWindows,
-            failedWindows,
-        )
-        val finalError = if (coverageComplete) null else (lastError ?: "Local transcription coverage is incomplete.")
-        outbox.finish(meetingId, processedSegments, completedWindows, failedWindows, finalError)
-        Log.i(
-            "MainaPostProcessing",
-            "Finished local transcription meetingId=$meetingId hasTranscript=$hasTranscript processedSegments=$processedSegments completedWindows=$completedWindows failedWindows=$failedWindows finalError=${finalError ?: "none"}",
-        )
-        notifyResultChanged(
-            meetingId,
-            if (coverageComplete) MainaPostProcessingOutbox.STATE_COMPLETE else MainaPostProcessingOutbox.STATE_PARTIAL,
-        )
-        updateProgress(
-            when {
-                coverageComplete -> "Transcript ready"
-                hasTranscript -> "Recovering saved speech"
-                else -> "Transcript recovery queued"
-            },
-            completedWindows + failedWindows,
-            totalWindows,
-        )
-        return coverageComplete
     }
 
     private data class WindowDecodeOutcome(

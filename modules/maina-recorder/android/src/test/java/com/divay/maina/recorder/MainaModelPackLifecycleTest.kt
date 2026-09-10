@@ -28,6 +28,417 @@ class MainaModelPackLifecycleTest {
     }
 
     @Test
+    fun `candidate acquisition telemetry does not mask the retained ready pack`() {
+        listOf("downloading", "failed_download", "failed_verification", "failed_smoke").forEach { state ->
+            val root = Files.createTempDirectory("maina-model-pack-serving-$state").toFile().canonicalFile
+            try {
+                val ready = syntheticManifest(packVersion = "ready-a", hashCharacter = 'a')
+                val candidate = syntheticManifest(packVersion = "candidate-b", hashCharacter = 'b')
+                installPack(root, ready, generation = 1L)
+                root.resolve("ready.json").writeText(pointer(ready, 1L).toString())
+                root.resolve("staging/${candidate.getString("manifestSha256")}").apply {
+                    mkdirs()
+                    resolve("manifest.json").writeText(candidate.toString())
+                }
+                root.resolve("records/${candidate.getString("manifestSha256")}.json").apply {
+                    parentFile!!.mkdirs()
+                    writeText(record(candidate, state, if (state.startsWith("failed_")) "SYNTHETIC_FAILURE" else "NONE").toString())
+                }
+                root.resolve("current.json").writeText(writer(candidate.getString("manifestSha256")).toString())
+
+                val lifecycle = MainaModelPackLifecycle(root = root, directorySync = {})
+                assertEquals(state, lifecycle.status().state)
+                val selected = lifecycle.acquireReady()
+                assertEquals(ready.getString("manifestSha256"), selected?.manifestSha256)
+                selected?.release()
+            } finally {
+                root.deleteRecursively()
+            }
+        }
+    }
+
+    @Test
+    fun `present invalid ready pointer never falls through as absent`() {
+        val root = Files.createTempDirectory("maina-model-pack-invalid-ready").toFile().canonicalFile
+        try {
+            val missing = syntheticManifest(packVersion = "missing-ready", hashCharacter = 'a')
+            root.resolve("ready.json").writeText(pointer(missing, 1L).toString())
+            val lifecycle = MainaModelPackLifecycle(root = root, directorySync = {})
+
+            assertEquals("rollback_pending", lifecycle.status().state)
+            assertTrue(runCatching { lifecycle.acquireReady() }.isFailure)
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `open failure rollback replays every durable cutpoint and retains previous ready`() {
+        for (cutpoint in 1..7) {
+            val root = Files.createTempDirectory("maina-model-pack-rollback-$cutpoint").toFile().canonicalFile
+            try {
+                val previous = syntheticManifest(packVersion = "ready-a", hashCharacter = 'a')
+                val failed = syntheticManifest(packVersion = "candidate-b", hashCharacter = 'b')
+                installPack(root, previous, generation = 1L)
+                installPack(root, failed, generation = 2L)
+                root.resolve("ready.json").writeText(pointer(failed, 2L).toString())
+                root.resolve("previous-ready.json").writeText(pointer(previous, 1L).toString())
+                root.resolve("current.json").writeText(writer(failed.getString("manifestSha256")).toString())
+
+                var durableWrites = 0
+                val lifecycle = MainaModelPackLifecycle(root = root, directorySync = {
+                    durableWrites += 1
+                    if (durableWrites == cutpoint) throw IllegalStateException("SYNTHETIC_PROCESS_DEATH")
+                })
+                val failedHandle = lifecycle.acquireReady()!!
+                runCatching { lifecycle.rollbackAfterOpenFailure(failedHandle) }
+                failedHandle.release()
+
+                val restarted = MainaModelPackLifecycle(root = root, directorySync = {})
+                val status = restarted.status()
+                assertEquals("failed_smoke", status.state)
+                assertEquals("MODEL_OPEN_FAILED_ROLLED_BACK", status.reasonCode)
+                val restored = restarted.acquireReady()
+                assertEquals(previous.getString("manifestSha256"), restored?.manifestSha256)
+                restored?.release()
+                assertFalse(root.resolve("open-rollback.json").exists())
+                assertFalse(root.resolve("previous-ready.json").exists())
+            } finally {
+                root.deleteRecursively()
+            }
+        }
+    }
+
+    @Test
+    fun `open failure cannot roll back a generation after its first exact result`() {
+        val root = Files.createTempDirectory("maina-model-pack-post-result-rollback").toFile().canonicalFile
+        try {
+            val previous = syntheticManifest(packVersion = "ready-a", hashCharacter = 'a')
+            val active = syntheticManifest(packVersion = "candidate-b", hashCharacter = 'b')
+            installPack(root, previous, generation = 1L)
+            installPack(root, active, generation = 2L)
+            root.resolve("ready.json").writeText(pointer(active, 2L).toString())
+            root.resolve("previous-ready.json").writeText(pointer(previous, 1L).toString())
+            root.resolve("current.json").writeText(writer(active.getString("manifestSha256")).toString())
+            val lifecycle = MainaModelPackLifecycle(root = root, directorySync = {})
+            val handle = lifecycle.acquireReady()!!
+            val payloadSha = lifecycle.resultPayloadSha256(mapOf("runId" to "bound-result", "state" to "complete"))
+            val resultId = lifecycle.resultIdForPayloadSha256(payloadSha)!!
+            assertTrue(lifecycle.noteExactResult(
+                modelId = "qwen3-0.6b-int8",
+                modelVersion = active.getString("packVersion"),
+                runtimeVersion = "sherpa-onnx-1.13.6",
+                manifestSha256 = active.getString("manifestSha256"),
+                activationGeneration = 2L,
+                resultId = resultId,
+                resultPayloadSha256 = payloadSha,
+            ))
+
+            assertFalse(lifecycle.rollbackAfterOpenFailure(handle))
+            val stillActive = lifecycle.acquireReady()
+            assertEquals(active.getString("manifestSha256"), stillActive?.manifestSha256)
+            stillActive?.release()
+            assertEquals("ready", lifecycle.status().state)
+            assertTrue(root.resolve("results/${active.getString("manifestSha256")}-2.json").isFile)
+            assertFalse(root.resolve("open-rollback.json").exists())
+            handle.release()
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `one failing reader cannot roll back a generation held by another reader`() {
+        val root = Files.createTempDirectory("maina-model-pack-concurrent-reader").toFile().canonicalFile
+        try {
+            val previous = syntheticManifest(packVersion = "ready-a", hashCharacter = 'a')
+            val active = syntheticManifest(packVersion = "candidate-b", hashCharacter = 'b')
+            installPack(root, previous, generation = 1L)
+            installPack(root, active, generation = 2L)
+            root.resolve("ready.json").writeText(pointer(active, 2L).toString())
+            root.resolve("previous-ready.json").writeText(pointer(previous, 1L).toString())
+            root.resolve("current.json").writeText(writer(active.getString("manifestSha256")).toString())
+            val lifecycle = MainaModelPackLifecycle(root = root, directorySync = {})
+            val failingReader = lifecycle.acquireReady()!!
+            val activeReader = lifecycle.acquireReady()!!
+
+            assertTrue(lifecycle.rollbackAfterOpenFailure(failingReader))
+            assertTrue(root.resolve("open-rollback.json").isFile)
+            assertTrue(runCatching { lifecycle.acquireReady() }.isFailure)
+            failingReader.release()
+            val payloadSha = lifecycle.resultPayloadSha256(mapOf("runId" to "concurrent-reader", "state" to "complete"))
+            assertTrue(lifecycle.noteExactResult(
+                modelId = "qwen3-0.6b-int8",
+                modelVersion = active.getString("packVersion"),
+                runtimeVersion = "sherpa-onnx-1.13.6",
+                manifestSha256 = active.getString("manifestSha256"),
+                activationGeneration = 2L,
+                resultId = lifecycle.resultIdForPayloadSha256(payloadSha)!!,
+                resultPayloadSha256 = payloadSha,
+            ))
+            assertEquals("ready", lifecycle.status().state)
+            activeReader.release()
+            assertFalse(root.resolve("open-rollback.json").exists())
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `prepared fence retains bytes without claiming a phantom first exact result`() {
+        val root = Files.createTempDirectory("maina-model-pack-prepared-result").toFile().canonicalFile
+        try {
+            val previous = syntheticManifest(packVersion = "ready-a", hashCharacter = 'a')
+            val active = syntheticManifest(packVersion = "candidate-b", hashCharacter = 'b')
+            installPack(root, previous, generation = 1L)
+            installPack(root, active, generation = 2L)
+            root.resolve("ready.json").writeText(pointer(active, 2L).toString())
+            root.resolve("previous-ready.json").writeText(pointer(previous, 1L).toString())
+            root.resolve("current.json").writeText(writer(active.getString("manifestSha256")).toString())
+            val lifecycle = MainaModelPackLifecycle(root = root, directorySync = {})
+            val handle = lifecycle.acquireReady()!!
+            val uncommittedSha = lifecycle.resultPayloadSha256(mapOf("runId" to "run-1", "updatedAt" to 1L))
+            val uncommittedId = lifecycle.resultIdForPayloadSha256(uncommittedSha)!!
+
+            assertTrue(lifecycle.prepareExactResult(
+                modelId = "qwen3-0.6b-int8",
+                modelVersion = active.getString("packVersion"),
+                runtimeVersion = "sherpa-onnx-1.13.6",
+                manifestSha256 = active.getString("manifestSha256"),
+                activationGeneration = 2L,
+                resultId = uncommittedId,
+                resultPayloadSha256 = uncommittedSha,
+            ))
+            assertFalse(root.resolve("results/${active.getString("manifestSha256")}-2.json").exists())
+            assertTrue(lifecycle.rollbackAfterOpenFailure(handle))
+            handle.release()
+            val restored = lifecycle.acquireReady()
+            assertEquals(previous.getString("manifestSha256"), restored?.manifestSha256)
+            restored?.release()
+            assertTrue(root.resolve("packs/${active.getString("manifestSha256")}").isDirectory)
+
+            // A rolled-back transaction cannot turn a different later payload
+            // into the first exact result without its own matching preparation.
+            val committedSha = lifecycle.resultPayloadSha256(mapOf("runId" to "run-1", "updatedAt" to 2L))
+            val committedId = lifecycle.resultIdForPayloadSha256(committedSha)!!
+            assertFalse(lifecycle.noteExactResult(
+                modelId = "qwen3-0.6b-int8",
+                modelVersion = active.getString("packVersion"),
+                runtimeVersion = "sherpa-onnx-1.13.6",
+                manifestSha256 = active.getString("manifestSha256"),
+                activationGeneration = 2L,
+                resultId = committedId,
+                resultPayloadSha256 = committedSha,
+            ))
+            // If the original Outbox transaction did commit but the process
+            // died before finalization, its exact prepared payload remains
+            // finalizable even though serving has safely rolled back to A.
+            assertTrue(lifecycle.noteExactResult(
+                modelId = "qwen3-0.6b-int8",
+                modelVersion = active.getString("packVersion"),
+                runtimeVersion = "sherpa-onnx-1.13.6",
+                manifestSha256 = active.getString("manifestSha256"),
+                activationGeneration = 2L,
+                resultId = uncommittedId,
+                resultPayloadSha256 = uncommittedSha,
+            ))
+            val mapping = JSONObject(root.resolve("results/${active.getString("manifestSha256")}-2.json").readText())
+            assertEquals(uncommittedId, mapping.getString("firstExactResultId"))
+            assertEquals(uncommittedSha, mapping.getString("firstExactResultSha256"))
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `transient status reader defers but cannot lose an open failure rollback`() {
+        val root = Files.createTempDirectory("maina-model-pack-deferred-reader-rollback").toFile().canonicalFile
+        try {
+            val previous = syntheticManifest(packVersion = "ready-a", hashCharacter = 'a')
+            val failed = syntheticManifest(packVersion = "candidate-b", hashCharacter = 'b')
+            installPack(root, previous, generation = 1L)
+            installPack(root, failed, generation = 2L)
+            root.resolve("ready.json").writeText(pointer(failed, 2L).toString())
+            root.resolve("previous-ready.json").writeText(pointer(previous, 1L).toString())
+            root.resolve("current.json").writeText(writer(failed.getString("manifestSha256")).toString())
+            val lifecycle = MainaModelPackLifecycle(root = root, directorySync = {})
+            val failingReader = lifecycle.acquireReady()!!
+            val statusReader = lifecycle.acquireReady()!!
+
+            assertTrue(lifecycle.rollbackAfterOpenFailure(failingReader))
+            assertTrue(root.resolve("open-rollback.json").isFile)
+            failingReader.release()
+            assertEquals(failed.getString("manifestSha256"), JSONObject(root.resolve("ready.json").readText()).getString("manifestSha256"))
+
+            // Releasing the unrelated transient reader replays the already
+            // durable rollback request without requiring a second failure.
+            statusReader.release()
+            assertFalse(root.resolve("open-rollback.json").exists())
+            val restored = lifecycle.acquireReady()
+            assertEquals(previous.getString("manifestSha256"), restored?.manifestSha256)
+            restored?.release()
+            assertEquals("failed_smoke", lifecycle.status().state)
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `stale reader pin is removed and does not permanently suppress rollback`() {
+        val root = Files.createTempDirectory("maina-model-pack-stale-reader").toFile().canonicalFile
+        try {
+            val previous = syntheticManifest(packVersion = "ready-a", hashCharacter = 'a')
+            val failed = syntheticManifest(packVersion = "candidate-b", hashCharacter = 'b')
+            installPack(root, previous, generation = 1L)
+            installPack(root, failed, generation = 2L)
+            root.resolve("ready.json").writeText(pointer(failed, 2L).toString())
+            root.resolve("previous-ready.json").writeText(pointer(previous, 1L).toString())
+            root.resolve("current.json").writeText(writer(failed.getString("manifestSha256")).toString())
+            val stalePin = root.resolve("readers/${failed.getString("manifestSha256")}/stale-reader").apply {
+                parentFile!!.mkdirs()
+                writeText("generation=2\n")
+            }
+            val lifecycle = MainaModelPackLifecycle(root = root, directorySync = {})
+            val failedHandle = lifecycle.acquireReady()!!
+
+            assertTrue(lifecycle.rollbackAfterOpenFailure(failedHandle))
+            failedHandle.release()
+            assertFalse(stalePin.exists())
+            val restored = lifecycle.acquireReady()
+            assertEquals(previous.getString("manifestSha256"), restored?.manifestSha256)
+            restored?.release()
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `ready rollback preserves an unrelated exact acquisition writer and telemetry`() {
+        val root = Files.createTempDirectory("maina-model-pack-rollback-with-writer").toFile().canonicalFile
+        try {
+            val previous = syntheticManifest(packVersion = "ready-a", hashCharacter = 'a')
+            val failed = syntheticManifest(packVersion = "candidate-b", hashCharacter = 'b')
+            val downloading = syntheticManifest(packVersion = "candidate-c", hashCharacter = 'c')
+            installPack(root, previous, generation = 1L)
+            installPack(root, failed, generation = 2L)
+            root.resolve("ready.json").writeText(pointer(failed, 2L).toString())
+            root.resolve("previous-ready.json").writeText(pointer(previous, 1L).toString())
+            root.resolve("staging/${downloading.getString("manifestSha256")}").apply {
+                mkdirs()
+                resolve("manifest.json").writeText(downloading.toString())
+            }
+            root.resolve("records/${downloading.getString("manifestSha256")}.json").writeText(
+                record(downloading, "downloading", "NONE").toString(),
+            )
+            val writer = writer(downloading.getString("manifestSha256"))
+            root.resolve("writer.json").writeText(writer.toString())
+            root.resolve("current.json").writeText(writer.toString())
+            val lifecycle = MainaModelPackLifecycle(root = root, directorySync = {})
+            val failedHandle = lifecycle.acquireReady()!!
+
+            assertTrue(lifecycle.rollbackAfterOpenFailure(failedHandle))
+            failedHandle.release()
+            val restored = lifecycle.acquireReady()
+            assertEquals(previous.getString("manifestSha256"), restored?.manifestSha256)
+            restored?.release()
+            assertEquals("downloading", lifecycle.status().state)
+            assertEquals(
+                downloading.getString("manifestSha256"),
+                JSONObject(root.resolve("writer.json").readText()).getString("manifestSha256"),
+            )
+            assertEquals(
+                downloading.getString("manifestSha256"),
+                JSONObject(root.resolve("current.json").readText()).getString("manifestSha256"),
+            )
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `durable result cancels a replayed open failure intent before pointer mutation`() {
+        val root = Files.createTempDirectory("maina-model-pack-result-wins-rollback").toFile().canonicalFile
+        try {
+            val previous = syntheticManifest(packVersion = "ready-a", hashCharacter = 'a')
+            val active = syntheticManifest(packVersion = "candidate-b", hashCharacter = 'b')
+            installPack(root, previous, generation = 1L)
+            installPack(root, active, generation = 2L)
+            root.resolve("ready.json").writeText(pointer(active, 2L).toString())
+            root.resolve("previous-ready.json").writeText(pointer(previous, 1L).toString())
+            root.resolve("current.json").writeText(writer(active.getString("manifestSha256")).toString())
+            val lifecycle = MainaModelPackLifecycle(root = root, directorySync = {})
+            val payloadSha = lifecycle.resultPayloadSha256(mapOf("runId" to "durable-result", "state" to "complete"))
+            val resultId = lifecycle.resultIdForPayloadSha256(payloadSha)!!
+            assertTrue(lifecycle.noteExactResult(
+                modelId = "qwen3-0.6b-int8",
+                modelVersion = active.getString("packVersion"),
+                runtimeVersion = "sherpa-onnx-1.13.6",
+                manifestSha256 = active.getString("manifestSha256"),
+                activationGeneration = 2L,
+                resultId = resultId,
+                resultPayloadSha256 = payloadSha,
+            ))
+            root.resolve("open-rollback.json").writeText(JSONObject()
+                .put("schemaVersion", "maina.model-pack-open-rollback.v1")
+                .put("failedManifestSha256", active.getString("manifestSha256"))
+                .put("failedActivationGeneration", 2L)
+                .put("ignoredReaderPinName", "synthetic-failed-reader")
+                .put("previousReady", pointer(previous, 1L))
+                .toString())
+
+            assertEquals("ready", lifecycle.status().state)
+            val stillActive = lifecycle.acquireReady()
+            assertEquals(active.getString("manifestSha256"), stillActive?.manifestSha256)
+            stillActive?.release()
+            assertFalse(root.resolve("open-rollback.json").exists())
+            assertTrue(root.resolve("previous-ready.json").isFile)
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `durable rollback intent is reconciled before accepting a later exact result`() {
+        val root = Files.createTempDirectory("maina-model-pack-rollback-wins-result").toFile().canonicalFile
+        try {
+            val previous = syntheticManifest(packVersion = "ready-a", hashCharacter = 'a')
+            val failed = syntheticManifest(packVersion = "candidate-b", hashCharacter = 'b')
+            installPack(root, previous, generation = 1L)
+            installPack(root, failed, generation = 2L)
+            root.resolve("ready.json").writeText(pointer(failed, 2L).toString())
+            root.resolve("previous-ready.json").writeText(pointer(previous, 1L).toString())
+            root.resolve("current.json").writeText(writer(failed.getString("manifestSha256")).toString())
+            var writes = 0
+            val lifecycle = MainaModelPackLifecycle(root = root, directorySync = {
+                writes += 1
+                if (writes == 1) throw IllegalStateException("SYNTHETIC_PROCESS_DEATH")
+            })
+            val failedHandle = lifecycle.acquireReady()!!
+            assertTrue(runCatching { lifecycle.rollbackAfterOpenFailure(failedHandle) }.isFailure)
+            assertTrue(root.resolve("open-rollback.json").isFile)
+            failedHandle.release()
+            val payloadSha = lifecycle.resultPayloadSha256(mapOf("runId" to "late-result", "state" to "complete"))
+
+            assertFalse(lifecycle.noteExactResult(
+                modelId = "qwen3-0.6b-int8",
+                modelVersion = failed.getString("packVersion"),
+                runtimeVersion = "sherpa-onnx-1.13.6",
+                manifestSha256 = failed.getString("manifestSha256"),
+                activationGeneration = 2L,
+                resultId = lifecycle.resultIdForPayloadSha256(payloadSha)!!,
+                resultPayloadSha256 = payloadSha,
+            ))
+            val restored = lifecycle.acquireReady()
+            assertEquals(previous.getString("manifestSha256"), restored?.manifestSha256)
+            restored?.release()
+            assertFalse(root.resolve("results/${failed.getString("manifestSha256")}-2.json").exists())
+            assertFalse(root.resolve("open-rollback.json").exists())
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
     fun `resumes only the exact manifest platform file and verified prefix`() {
         val declared = listOf("a".repeat(64), "b".repeat(64), "c".repeat(64))
         assertEquals(2, MainaModelPackLifecyclePolicy.resumePrefix(
@@ -246,9 +657,49 @@ class MainaModelPackLifecycleTest {
         }
     }
 
+    @Test
+    fun `legacy result remains bindable after a managed pack becomes ready`() {
+        val root = Files.createTempDirectory("maina-model-pack-legacy-result-after-promotion").toFile().canonicalFile
+        try {
+            val managed = syntheticManifest(packVersion = "managed-ready", hashCharacter = 'a')
+            installPack(root, managed, generation = 1L)
+            root.resolve("ready.json").writeText(pointer(managed, 1L).toString())
+            root.resolve("current.json").writeText(writer(managed.getString("manifestSha256")).toString())
+            val lifecycle = MainaModelPackLifecycle(root = root, directorySync = {})
+            val payloadSha = lifecycle.resultPayloadSha256(mapOf("runId" to "legacy-before-promotion", "state" to "complete"))
+
+            assertTrue(lifecycle.noteExactResult(
+                modelId = "qwen3-0.6b-int8",
+                modelVersion = "1",
+                runtimeVersion = "sherpa-onnx-1.13.6",
+                manifestSha256 = null,
+                activationGeneration = null,
+                resultId = lifecycle.resultIdForPayloadSha256(payloadSha)!!,
+                resultPayloadSha256 = payloadSha,
+            ))
+            val stillManaged = lifecycle.acquireReady()
+            assertEquals(managed.getString("manifestSha256"), stillManaged?.manifestSha256)
+            stillManaged?.release()
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
     private fun writer(manifestSha: String) = JSONObject()
         .put("manifestSha256", manifestSha)
         .put("platform", "android")
+
+    private fun installPack(root: java.io.File, manifest: JSONObject, generation: Long) {
+        val sha = manifest.getString("manifestSha256")
+        root.resolve("packs/$sha").apply {
+            mkdirs()
+            resolve("manifest.json").writeText(manifest.toString())
+        }
+        root.resolve("records/$sha.json").apply {
+            parentFile!!.mkdirs()
+            writeText(record(manifest, "ready", "NONE", generation).toString())
+        }
+    }
 
     private fun record(manifest: JSONObject, state: String, reason: String, generation: Long = 0L) = JSONObject()
         .put("schemaVersion", "maina.model-pack-lifecycle-record.v1")

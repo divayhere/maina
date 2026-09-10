@@ -6,6 +6,257 @@ import { existsSync, readFileSync, statSync } from 'node:fs';
 import path from 'node:path';
 import process from 'node:process';
 
+function maskKotlinNonCode(source) {
+  let output = '';
+  let index = 0;
+  let state = 'code';
+  let blockDepth = 0;
+  const mask = character => character === '\n' || character === '\r' ? character : ' ';
+  while (index < source.length) {
+    const nextTwo = source.slice(index, index + 2);
+    const nextThree = source.slice(index, index + 3);
+    const character = source[index];
+    if (state === 'code') {
+      if (nextTwo === '//') { state = 'line_comment'; output += '  '; index += 2; continue; }
+      if (nextTwo === '/*') { state = 'block_comment'; blockDepth = 1; output += '  '; index += 2; continue; }
+      if (nextThree === '\"\"\"') { state = 'raw_string'; output += '   '; index += 3; continue; }
+      if (character === '\"') { state = 'string'; output += ' '; index += 1; continue; }
+      if (character === "'") { state = 'character'; output += ' '; index += 1; continue; }
+      output += character;
+      index += 1;
+      continue;
+    }
+    if (state === 'line_comment') {
+      output += mask(character);
+      index += 1;
+      if (character === '\n') state = 'code';
+      continue;
+    }
+    if (state === 'block_comment') {
+      if (nextTwo === '/*') { blockDepth += 1; output += '  '; index += 2; continue; }
+      if (nextTwo === '*/') {
+        blockDepth -= 1;
+        output += '  ';
+        index += 2;
+        if (blockDepth === 0) state = 'code';
+        continue;
+      }
+      output += mask(character);
+      index += 1;
+      continue;
+    }
+    if (state === 'raw_string') {
+      if (nextThree === '\"\"\"') { state = 'code'; output += '   '; index += 3; continue; }
+      output += mask(character);
+      index += 1;
+      continue;
+    }
+    if (character === '\\') {
+      output += ' ';
+      index += 1;
+      if (index < source.length) { output += mask(source[index]); index += 1; }
+      continue;
+    }
+    output += mask(character);
+    index += 1;
+    if ((state === 'string' && character === '\"') || (state === 'character' && character === "'")) state = 'code';
+  }
+  if (state === 'block_comment' || state === 'raw_string' || state === 'string' || state === 'character') {
+    throw new Error('Malformed Kotlin source while checking native-recorder invariants.');
+  }
+  return output;
+}
+
+function kotlinFunctionBody(source, functionName) {
+  const code = maskKotlinNonCode(source);
+  const signature = new RegExp(`\\bfun\\s+${functionName}\\s*\\(`, 'g');
+  const matches = [...code.matchAll(signature)];
+  if (matches.length !== 1) throw new Error(`Expected exactly one Kotlin function named ${functionName}.`);
+  const open = code.indexOf('{', matches[0].index + matches[0][0].length);
+  if (open < 0) throw new Error(`Kotlin function ${functionName} must have a block body.`);
+  let depth = 1;
+  for (let index = open + 1; index < code.length; index += 1) {
+    if (code[index] === '{') depth += 1;
+    if (code[index] === '}') depth -= 1;
+    if (depth === 0) return code.slice(open + 1, index);
+  }
+  throw new Error(`Kotlin function ${functionName} has an unbalanced block body.`);
+}
+
+function balancedBlock(source, open) {
+  let depth = 1;
+  for (let index = open + 1; index < source.length; index += 1) {
+    if (source[index] === '{') depth += 1;
+    if (source[index] === '}') depth -= 1;
+    if (depth === 0) return source.slice(open + 1, index);
+  }
+  throw new Error('Unbalanced Kotlin block in retained-ready verifier.');
+}
+
+function topLevelAcquisition(body) {
+  const acceptedAcquisition = /\bval\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(?:runCatching\s*\{\s*)?modelPacks\s*\.\s*acquireReady\s*\(\s*\)/g;
+  for (const acquisition of body.matchAll(acceptedAcquisition)) {
+    let depth = 0;
+    for (const character of body.slice(0, acquisition.index)) {
+      if (character === '{') depth += 1;
+      if (character === '}') depth -= 1;
+      if (depth < 0) return null;
+    }
+    if (depth === 0) return { index: acquisition.index, name: acquisition[1] };
+  }
+  return null;
+}
+
+function guardedHandleBranch(body, acquisition) {
+  const guard = new RegExp(`\\bif\\s*\\(\\s*${acquisition.name}\\s*!=\\s*null\\s*\\)\\s*\\{`, 'g');
+  guard.lastIndex = acquisition.index;
+  const match = guard.exec(body);
+  if (match === null) return null;
+  let depth = 0;
+  for (const character of body.slice(0, match.index)) {
+    if (character === '{') depth += 1;
+    if (character === '}') depth -= 1;
+  }
+  if (depth !== 0) return null;
+  const open = body.indexOf('{', match.index);
+  return balancedBlock(body, open);
+}
+
+function firstRegexIndexAtDepth(source, expression, expectedDepth) {
+  const flags = expression.flags.includes('g') ? expression.flags : `${expression.flags}g`;
+  const matcher = new RegExp(expression.source, flags);
+  for (const match of source.matchAll(matcher)) {
+    let depth = 0;
+    for (const character of source.slice(0, match.index)) {
+      if (character === '{') depth += 1;
+      if (character === '}') depth -= 1;
+    }
+    if (depth === expectedDepth) return match.index;
+  }
+  return -1;
+}
+
+function regexMatchesAtDepth(source, expression, expectedDepth) {
+  return firstRegexIndexAtDepth(source, expression, expectedDepth) >= 0;
+}
+
+function functionAcquiresRetainedReady(source, functionName) {
+  const body = kotlinFunctionBody(source, functionName);
+  const acquisition = topLevelAcquisition(body);
+  if (acquisition === null) return false;
+  const telemetryRead = /\bmodelPacks\s*\.\s*status\s*\(\s*\)/g;
+  if ([...body.matchAll(telemetryRead)].some(match => match.index < acquisition.index)) return false;
+  const branch = guardedHandleBranch(body, acquisition);
+  if (branch === null) return false;
+  const escaped = acquisition.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  if (functionName === 'status') {
+    if (/\breturn\b/.test(body.slice(0, acquisition.index))) return false;
+    return /^\s*return\s+try\s*\{/.test(branch) &&
+      regexMatchesAtDepth(branch, new RegExp(`\\bModelStatus\\s*\\(\\s*true\\s*,\\s*${escaped}\\s*\\.\\s*root`), 1) &&
+      regexMatchesAtDepth(branch, /\bfinally\s*\{/, 0) &&
+      regexMatchesAtDepth(branch, new RegExp(`\\b${escaped}\\s*\\.\\s*release\\s*\\(\\s*\\)`), 1);
+  }
+  if (functionName === 'resolveModelForRecognizer') {
+    const ordered = [
+      firstRegexIndexAtDepth(branch, /\bval\s+selectedIdentity\s*=/, 0),
+      firstRegexIndexAtDepth(branch, /\bval\s+invalid\s*=/, 0),
+      firstRegexIndexAtDepth(branch, /\bif\s*\(\s*invalid\s*==\s*null\s*\)\s*\{/, 0),
+      firstRegexIndexAtDepth(branch, new RegExp(`\\brunCatching\\s*\\{\\s*modelPacks\\s*\\.\\s*rollbackAfterOpenFailure\\s*\\(\\s*${escaped}\\s*\\)`), 0),
+      firstRegexIndexAtDepth(branch, new RegExp(`\\brunCatching\\s*\\{\\s*${escaped}\\s*\\.\\s*release\\s*\\(\\s*\\)`), 0),
+      firstRegexIndexAtDepth(branch, /\berror\s*\(/, 0),
+    ];
+    const topLevelReturn = firstRegexIndexAtDepth(branch, /\breturn\b/, 0);
+    return ordered.every(index => index >= 0) && ordered.every((index, position) => position === 0 || index > ordered[position - 1]) &&
+      (topLevelReturn < 0 || topLevelReturn > ordered[5]) &&
+      regexMatchesAtDepth(branch, new RegExp(`\\bactivePack\\s*=\\s*${escaped}\\b`), 1) &&
+      regexMatchesAtDepth(branch, /\bpinnedModelIdentity\s*=/, 1) &&
+      regexMatchesAtDepth(branch, new RegExp(`\\breturn\\s+ModelStatus\\s*\\(\\s*true\\s*,\\s*${escaped}\\s*\\.\\s*root`), 1);
+  }
+  return false;
+}
+
+function verifyReadyAcquisitionFixture(source, expected) {
+  const observed = functionAcquiresRetainedReady(source, 'status') &&
+    functionAcquiresRetainedReady(source, 'resolveModelForRecognizer');
+  if (observed !== expected) throw new Error('Android retained-ready static verifier fixture failed.');
+}
+
+function functionHasOrderedTokens(source, functionName, tokens) {
+  const body = kotlinFunctionBody(source, functionName);
+  let cursor = 0;
+  for (const token of tokens) {
+    const index = body.indexOf(token, cursor);
+    if (index < 0) return false;
+    cursor = index + token.length;
+  }
+  return true;
+}
+
+verifyReadyAcquisitionFixture(`
+  fun status() { val handle = modelPacks.acquireReady(); if (handle != null) { return try { ModelStatus(true, handle.root.path) } finally { handle.release() } }; return legacy() }
+  fun resolveModelForRecognizer() { val handle = modelPacks.acquireReady(); if (handle != null) { val selectedIdentity = identity(handle); val invalid = invalid(handle.root); if (invalid == null) { activePack = handle; pinnedModelIdentity = selectedIdentity; return ModelStatus(true, handle.root.path) }; runCatching { modelPacks.rollbackAfterOpenFailure(handle) }; runCatching { handle.release() }; error("bad") }; return legacy() }
+`, true);
+verifyReadyAcquisitionFixture(`
+  fun status() { val handle = runCatching { modelPacks.acquireReady() }.getOrElse { error("bad") }; if (handle != null) { return try { ModelStatus(true, handle.root.path) } finally { handle.release() } }; return legacy() }
+  fun resolveModelForRecognizer() { val handle = modelPacks.acquireReady(); if (handle != null) { val selectedIdentity = identity(handle); val invalid = invalid(handle.root); if (invalid == null) { activePack = handle; pinnedModelIdentity = selectedIdentity; return ModelStatus(true, handle.root.path) }; runCatching { modelPacks.rollbackAfterOpenFailure(handle) }; runCatching { handle.release() }; error("bad") }; return legacy() }
+`, true);
+verifyReadyAcquisitionFixture(`
+  fun status() { val root = modelRoot() }
+  fun resolveModelForRecognizer() { val handle = modelPacks.acquireReady() }
+`, false);
+verifyReadyAcquisitionFixture(`
+  fun status() { /* val handle = modelPacks.acquireReady() */ val text = \"modelPacks.acquireReady()\" }
+  fun resolveModelForRecognizer() { val handle = modelPacks.acquireReady(); if (handle != null) { activePack = handle } }
+`, false);
+verifyReadyAcquisitionFixture(`
+  fun status() { val lifecycleStatus = modelPacks.status(); val handle = modelPacks.acquireReady() }
+  fun resolveModelForRecognizer() { val handle = modelPacks.acquireReady(); if (handle != null) { activePack = handle } }
+`, false);
+verifyReadyAcquisitionFixture(`
+  fun status() { val deferred = { modelPacks.acquireReady() } }
+  fun resolveModelForRecognizer() { val handle = modelPacks.acquireReady(); if (handle != null) { activePack = handle } }
+`, false);
+verifyReadyAcquisitionFixture(`
+  fun status() { if (false) { val handle = modelPacks.acquireReady() } }
+  fun resolveModelForRecognizer() { val handle = modelPacks.acquireReady(); if (handle != null) { activePack = handle } }
+`, false);
+verifyReadyAcquisitionFixture(`
+  fun status() { return legacy(); val handle = modelPacks.acquireReady(); if (handle != null) { return try { ok(handle.root) } finally { handle.release() } } }
+  fun resolveModelForRecognizer() { val handle = modelPacks.acquireReady(); if (handle != null) { val selectedIdentity = identity(handle); val invalid = invalid(handle.root); if (invalid == null) { activePack = handle; pinnedModelIdentity = selectedIdentity; return ok() }; runCatching { modelPacks.rollbackAfterOpenFailure(handle) }; runCatching { handle.release() }; error("bad") } }
+`, false);
+verifyReadyAcquisitionFixture(`
+  fun status() { val handle = modelPacks.acquireReady(); if (handle != null) { handle.release() }; return legacy() }
+  fun resolveModelForRecognizer() { val handle = modelPacks.acquireReady(); if (handle != null) { return legacy() }; return legacy() }
+`, false);
+verifyReadyAcquisitionFixture(`
+  fun status() { val handle = modelPacks.acquireReady(); if (handle != null) { if (false) { return try { ok(handle.root) } finally { handle.release() } }; return legacy() }; return legacy() }
+  fun resolveModelForRecognizer() { val handle = modelPacks.acquireReady(); if (handle != null) { if (false) { val selectedIdentity = identity(handle); val invalid = invalid(handle.root); if (invalid == null) { activePack = handle; pinnedModelIdentity = selectedIdentity; return ok() }; runCatching { modelPacks.rollbackAfterOpenFailure(handle) }; runCatching { handle.release() }; error("bad") }; return legacy() }; return legacy() }
+`, false);
+verifyReadyAcquisitionFixture(`
+  fun status() { val handle = modelPacks.acquireReady(); if (handle != null) { return try { if (false) { ModelStatus(true, handle.root.path) }; ModelStatus(false, legacy()) } finally { handle.release() } }; return legacy() }
+  fun resolveModelForRecognizer() { val handle = modelPacks.acquireReady(); if (handle != null) { val selectedIdentity = identity(handle); val invalid = invalid(handle.root); if (invalid == null) { activePack = handle; pinnedModelIdentity = selectedIdentity; return ModelStatus(true, handle.root.path) }; return legacy(); runCatching { modelPacks.rollbackAfterOpenFailure(handle) }; runCatching { handle.release() }; error("bad") }; return legacy() }
+`, false);
+try {
+  verifyReadyAcquisitionFixture(`
+    fun status() { val handle = modelPacks.acquireReady()
+    fun resolveModelForRecognizer() { val handle = modelPacks.acquireReady() }
+  `, true);
+  throw new Error('Malformed Kotlin verifier fixture was accepted.');
+} catch (error) {
+  if (error.message === 'Malformed Kotlin verifier fixture was accepted.') throw error;
+}
+
+if (!functionHasOrderedTokens(`
+  fun finish() { database.beginTransaction(); update(); bindExactResultBeforeCommit(result); database.setTransactionSuccessful(); database.endTransaction() }
+`, 'finish', ['beginTransaction()', 'bindExactResultBeforeCommit(result)', 'setTransactionSuccessful()', 'endTransaction()'])) {
+  throw new Error('Terminal model-result fence positive fixture failed.');
+}
+if (functionHasOrderedTokens(`
+  fun finish() { database.beginTransaction(); update(); database.setTransactionSuccessful(); bindExactResultBeforeCommit(result); database.endTransaction() }
+`, 'finish', ['beginTransaction()', 'bindExactResultBeforeCommit(result)', 'setTransactionSuccessful()', 'endTransaction()'])) {
+  throw new Error('Terminal model-result fence reorder fixture was accepted.');
+}
+
 const project = path.resolve(import.meta.dirname, '..');
 const moduleRoot = path.join(project, 'modules', 'maina-recorder');
 const androidRoot = path.join(moduleRoot, 'android');
@@ -73,15 +324,46 @@ for (const invariant of [
   if (!modelPackLifecycle.includes(invariant)) throw new Error(`Android model-pack lifecycle invariant missing: ${invariant}`);
 }
 const qwenAdapter = readFileSync(path.join(androidRoot, 'src/main/java/com/divay/maina/recorder/MainaQwenAsr.kt'), 'utf8');
+if (createHash('sha256').update(qwenAdapter).digest('hex') !== 'dd7836edc81f1c7434eb0abf790b07932f86e10055dac56269a6357043bbd3a7') {
+  throw new Error('Android Qwen serving control flow changed without updating its exact reviewed source invariant.');
+}
 for (const invariant of [
   'MainaModelPackLifecycle(context)',
   'modelPacks.acquireReady()',
   'rollbackAfterOpenFailure',
   'activePack?.let { runCatching { it.release() } }',
   'fun modelIdentity()',
+  'fun bindExactResultBeforeCommit(result: Map<String, Any?>)',
+  'fun commitExactResult(result: Map<String, Any?>)',
   'fun smoke(root: File, uriOrPath: String)',
 ]) {
   if (!qwenAdapter.includes(invariant)) throw new Error(`Android Qwen model-pack integration invariant missing: ${invariant}`);
+}
+const postProcessingOutboxSource = readFileSync(path.join(androidRoot, 'src/main/java/com/divay/maina/recorder/MainaPostProcessingOutbox.kt'), 'utf8');
+if (!functionHasOrderedTokens(postProcessingOutboxSource, 'finish', [
+  'beginTransaction()',
+  'bindExactResultBeforeCommit(result)',
+  'setTransactionSuccessful()',
+  'endTransaction()',
+])) {
+  throw new Error('Terminal native result must install its exact model fence before the Outbox commit.');
+}
+const postProcessingServiceSource = readFileSync(path.join(androidRoot, 'src/main/java/com/divay/maina/recorder/MainaPostProcessingService.kt'), 'utf8');
+if (!functionHasOrderedTokens(postProcessingServiceSource, 'runPostProcessing', [
+  'outbox.finish(',
+  'asr.bindExactResultBeforeCommit(result)',
+  'asr.commitExactResult(terminalResult)',
+  'return coverageComplete',
+  'asr.release()',
+])) {
+  throw new Error('Post-processing must bind the exact result before releasing its model reader.');
+}
+if (!functionAcquiresRetainedReady(qwenAdapter, 'status') ||
+    !functionAcquiresRetainedReady(qwenAdapter, 'resolveModelForRecognizer')) {
+  throw new Error('Android Qwen status and recognition must acquire retained ready before interpreting acquisition telemetry.');
+}
+for (const invariant of ['pinnedModelIdentity', 'MODEL_PACK_IDENTITY_CHANGED', 'MODEL_PACK_IDENTITY_UNAVAILABLE']) {
+  if (!qwenAdapter.includes(invariant)) throw new Error(`Android Qwen per-run model identity fence missing: ${invariant}`);
 }
 const recorderModule = readFileSync(path.join(androidRoot, 'src/main/java/com/divay/maina/recorder/MainaRecorderModule.kt'), 'utf8');
 for (const invariant of [
