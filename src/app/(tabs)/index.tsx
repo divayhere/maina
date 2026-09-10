@@ -26,7 +26,11 @@ function MeetingRow({ item }: { item: Meeting }) {
   const meta = `${formatDate(item.startedAt)} · ${formatTime(item.startedAt)} · ${formatDuration(item.durationMs)}${item.language ? ` · ${item.language}` : ''}`;
 
   return (
-    <Pressable onPress={() => router.push(item.status === 'interrupted' ? `/meeting/${item.id}/recover` : `/meeting/${item.id}`)}>
+    <Pressable
+      accessibilityRole="button"
+      testID="meeting-card"
+      onPress={() => router.push(item.status === 'interrupted' ? `/meeting/${item.id}/recover` : `/meeting/${item.id}`)}
+    >
       {({ pressed }) => (
         <Card style={{ gap: space.lg, opacity: pressed ? 0.96 : 1 }}>
           <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start', gap: space.md }}>
