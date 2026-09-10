@@ -80,7 +80,7 @@ writeFileSync(path.join(fakeBin, 'node'), `#!/usr/bin/env bash
 set -euo pipefail
 printf 'node %s\\n' "\${1:-}" >> "\${MAINA_M0_TOOL_LOG:?}"
 if [[ "\${1:-}" == *'/scripts/release-provenance-cli.mjs' && "\${2:-}" == 'replay-config' ]]; then
-  printf 'com.divay.maina\\t0.10.67\\t93\\tcom.divay.maina.staging\\t0.10.67\\t49\\n'
+  printf 'com.divay.maina\\t0.10.68\\t94\\tcom.divay.maina.staging\\t0.10.68\\t50\\n'
   exit 0
 fi
 exec '${process.execPath}' "$@"
@@ -110,7 +110,7 @@ case "\${1:-}:\${2:-}" in
     printf '[{"Identifier":"00008120-001E146611E2601E","ConnectionType":"USB","ProductType":"iPhone15,4"}]\\n'
     ;;
   apps:query)
-    printf '{"com.divay.maina.staging":{"CFBundleShortVersionString":"0.10.67","CFBundleVersion":"49"}}\\n'
+    printf '{"com.divay.maina.staging":{"CFBundleShortVersionString":"0.10.68","CFBundleVersion":"50"}}\\n'
     ;;
   *) exit 98 ;;
 esac

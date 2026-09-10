@@ -4,6 +4,8 @@ set -euo pipefail
 PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 # shellcheck source=maina-ios-env.sh
 source "$PROJECT_DIR/scripts/maina-ios-env.sh"
+NODE_EXECUTABLE="${MAINA_IOS_NODE_BIN:?Set MAINA_IOS_NODE_BIN to the verified Node directory}/node"
+NPM_CLI="${MAINA_NPM_CLI:-/opt/homebrew/lib/node_modules/npm/bin/npm-cli.js}"
 
 dependency_root="$MAINA_IOS_NODE_DEPENDENCY_ROOT"
 maina_storage_mkdir "$dependency_root"
@@ -36,7 +38,7 @@ ensure_metadata_link "$dependency_root/patches" "$PROJECT_DIR/patches"
 
 (
   cd "$dependency_root"
-  NODE_ENV=development npm ci
+  NODE_ENV=development "$NODE_EXECUTABLE" "$NPM_CLI" ci
 )
 
 "$PROJECT_DIR/scripts/restore-external-build-links.sh" dependencies

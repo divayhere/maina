@@ -48,7 +48,7 @@ export function collectIosPreflight({
   const pymobiledevice3 = env.MAINA_PMD ?? '/Users/divay/Developer/.tools/maina-pymobiledevice3/bin/pymobiledevice3';
 
   const nodeVersion = run(join(nodeBin, 'node'), ['--version']);
-  record('node', nodeVersion.ok && /^v24\./.test(nodeVersion.stdout.trim()), 'NODE_24_UNAVAILABLE');
+  record('node', nodeVersion.ok && nodeVersion.stdout.trim() === 'v24.19.0', 'NODE_24_19_0_UNAVAILABLE');
 
   let guardPass = false;
   try {
@@ -80,7 +80,7 @@ export function collectIosPreflight({
     'scripts/install-ios-preserving-data.sh',
     'scripts/release-provenance-cli.mjs',
     'scripts/lib/renewal-core.mjs',
-    'release/m3-m4-0.10.67-candidate-plan.json',
+    'release/m3-m4-0.10.68-candidate-plan.json',
   ];
   record('helper_runtime', helpers.every((path) => isReadable(join(projectDir, path))), 'HELPER_RUNTIME_UNAVAILABLE');
 
@@ -149,7 +149,7 @@ function loadContract() {
 }
 
 function loadReleasePlan() {
-  return JSON.parse(readFileSync(join(projectDir, 'release', 'm3-m4-0.10.67-candidate-plan.json'), 'utf8'));
+  return JSON.parse(readFileSync(join(projectDir, 'release', 'm3-m4-0.10.68-candidate-plan.json'), 'utf8'));
 }
 
 function runCommand(command, args, { input } = {}) {

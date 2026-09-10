@@ -129,7 +129,8 @@ function featureFlags(actual, planned) {
 
 function toolchains(actual, planned) {
   actual = exactKeys(actual, ['node', 'expo', 'reactNative', 'android', 'ios'], 'toolchains');
-  match(actual.node, /^v24\.[0-9]+\.[0-9]+$/, 'toolchains.node');
+  if (planned.node) exact(actual.node, `v${planned.node}`, 'toolchains.node');
+  else match(actual.node, /^v24\.[0-9]+\.[0-9]+$/, 'toolchains.node');
   exact(actual.expo, planned.expo.replace(/^~/, ''), 'toolchains.expo');
   exact(actual.reactNative, planned.reactNative, 'toolchains.reactNative');
   const android = exactKeys(actual.android, ['jdk', 'gradle', 'buildTools', 'compileSdk', 'targetSdk'], 'toolchains.android');

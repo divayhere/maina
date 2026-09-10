@@ -15,7 +15,6 @@ const temporaryParent = path.join(guarded.stdout.trim(), 'scratch/apps/tests/rel
 mkdirSync(temporaryParent, { recursive: true });
 const temporary = mkdtempSync(path.join(temporaryParent, 'attempt-'));
 const scripts = [
-  { platform: 'Android', path: path.join(root, 'scripts/build-android-release-candidate.sh') },
   { platform: 'iOS', path: path.join(root, 'scripts/build-ios-release-candidate.sh') },
 ].filter((entry) => existsSync(entry.path));
 
@@ -36,10 +35,80 @@ function invoke(script, outputDir, extraEnv = {}) {
 }
 
 try {
+  const manifest = JSON.parse(readFileSync(path.join(root, 'package.json'), 'utf8'));
+  for (const name of ['android', 'android:prepare', 'android:build-candidate', 'android:install-preserving']) {
+    assert.equal(Object.hasOwn(manifest.scripts, name), false, `iOS branch must not publish ${name}.`);
+  }
+  const wrongWorktreeAndroidScript = path.join(root, 'scripts/build-android-release-candidate.sh');
+  const wrongWorktreeAndroidSource = readFileSync(wrongWorktreeAndroidScript, 'utf8');
+  const rootGuardIndex = wrongWorktreeAndroidSource.indexOf('[[ "$(cd "$PROJECT_DIR" && pwd -P)" == "/Users/divay/Developer/MainaV2" ]]');
+  const environmentSourceIndex = wrongWorktreeAndroidSource.indexOf('source "$PROJECT_DIR/scripts/maina-build-env.sh"');
+  const restoreLinksIndex = wrongWorktreeAndroidSource.indexOf('restore-external-build-links.sh" dependencies');
+  assert.ok(rootGuardIndex >= 0 && rootGuardIndex < environmentSourceIndex && environmentSourceIndex < restoreLinksIndex,
+    'Wrong-worktree gate must precede mutable environment and dependency-link helpers.');
+  const wrongWorktreeOutput = path.join(temporary, 'wrong-worktree-android');
+  const wrongWorktreeBuildOutput = path.join(temporary, 'wrong-worktree-android-build-output');
+  const wrongWorktreeTempOutput = path.join(temporary, 'wrong-worktree-android-temp-output');
+  const wrongWorktreeAndroid = spawnSync('/bin/bash', [wrongWorktreeAndroidScript], {
+    cwd: root,
+    encoding: 'utf8',
+    env: {
+      ...process.env,
+      MAINA_RELEASE_OUTPUT_DIR: wrongWorktreeOutput,
+      MAINA_ANDROID_OUTPUT_ROOT: wrongWorktreeBuildOutput,
+      MAINA_ANDROID_TEMP_ROOT: wrongWorktreeTempOutput,
+    },
+  });
+  assert.equal(wrongWorktreeAndroid.status, 78);
+  assert.equal(wrongWorktreeAndroid.stderr, 'Android release builder is unavailable from this noncanonical worktree.\n');
+  assert.equal(wrongWorktreeAndroid.stdout, '');
+  assert.equal(existsSync(wrongWorktreeOutput), false, 'Wrong-worktree rejection must precede all output and helper writes.');
+  assert.equal(existsSync(wrongWorktreeBuildOutput), false, 'Wrong-worktree rejection must precede build-environment directories.');
+  assert.equal(existsSync(wrongWorktreeTempOutput), false, 'Wrong-worktree rejection must precede temporary build directories.');
+
   for (const script of scripts) {
     const scriptSource = readFileSync(script.path, 'utf8');
     assert.match(scriptSource, /\/usr\/bin\/grep -E -i -q/, `${script.platform} must use the host-stable post-build failure scanner.`);
     assert.doesNotMatch(scriptSource, /\brg -i -q/, `${script.platform} must not silently depend on ambient ripgrep after mutation.`);
+    assert.match(scriptSource, /scripts\/verify-release-toolchain\.mjs/);
+    assert.match(scriptSource, /NPM_CLI="\$\{MAINA_NPM_CLI:-\/opt\/homebrew\/lib\/node_modules\/npm\/bin\/npm-cli\.js\}"/);
+    assert.match(scriptSource, /scripts\/lib\/release-build-attempt-guard\.sh/);
+    assert.match(scriptSource, /artifacts\/apps\/release-build-attempts/);
+    assert.ok(scriptSource.indexOf('verify-release-toolchain.mjs') < scriptSource.indexOf('maina_build_attempt_acquire'));
+    assert.ok(scriptSource.indexOf('maina_build_attempt_acquire') < scriptSource.indexOf('maina_storage_mkdir "$OUTPUT_DIR"'));
+    assert.ok(scriptSource.indexOf('maina_build_attempt_acquire') < scriptSource.indexOf(': > "$OUTPUT_DIR/build-attempted"'));
+
+    const substitutedNpmOutput = path.join(temporary, script.platform.toLowerCase(), `substituted-npm-${randomUUID()}`);
+    const substitutedNpm = invoke(script, substitutedNpmOutput, {
+      MAINA_NPM_CLI: path.join(temporary, 'not-the-pinned-npm-cli.js'),
+    });
+    assert.equal(substitutedNpm.status, 2, `${script.platform} must reject a noncanonical selected npm CLI before a build attempt.`);
+    assert.match(substitutedNpm.stderr, /NPM_CLI_PATH_DRIFT/);
+    assert.equal(existsSync(substitutedNpmOutput), false, `${script.platform} npm substitution rejection must not create evidence.`);
+
+    if (script.platform === 'Android') {
+      const prebuildSource = readFileSync(path.join(root, 'scripts/prebuild-android.sh'), 'utf8');
+      assert.match(scriptSource, /EXPO_CLI="\$\{MAINA_EXPO_CLI:-\$PROJECT_DIR\/node_modules\/expo\/bin\/cli\}"/);
+      assert.match(scriptSource, /export PATH="\$NODE_BIN:/);
+      assert.match(prebuildSource, /"\$NODE_BIN\/node" "\$EXPO_CLI" prebuild --platform android --no-install --clean/);
+      assert.doesNotMatch(prebuildSource, /\bnpx\s+expo\b/);
+
+      const missingExpoOutput = path.join(temporary, 'android', `missing-expo-${randomUUID()}`);
+      const missingExpo = invoke(script, missingExpoOutput, {
+        MAINA_NODE_BIN: '/Users/divay/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin',
+        MAINA_EXPO_CLI: path.join(temporary, 'missing-expo-cli'),
+      });
+      assert.equal(missingExpo.status, 2, 'Android must reject an unavailable exact Expo CLI before a build attempt.');
+      assert.match(missingExpo.stderr, /EXPO_WRAPPER_PATH_DRIFT/);
+      assert.equal(existsSync(missingExpoOutput), false, 'Android missing-Expo rejection must not create its evidence root.');
+    }
+
+    if (script.platform === 'iOS') {
+      const prepareSource = readFileSync(path.join(root, 'scripts/prepare-ios-local.sh'), 'utf8');
+      assert.match(prepareSource, /"\$NODE_EXECUTABLE" "\$EXPO_CLI" prebuild --platform ios --no-install --clean/);
+      assert.match(prepareSource, /scripts\/verify-release-toolchain\.mjs/);
+      assert.doesNotMatch(prepareSource, /\bnpx\s+expo\b/);
+    }
 
     const internal = path.join('/Users/divay/.cache/maina-build-v2/outputs', `storage-contract-must-not-write-${randomUUID()}`);
     const internalResult = invoke(script, internal);

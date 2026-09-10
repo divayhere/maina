@@ -310,7 +310,7 @@ assert.match(linkRestorer, /\/Users\/divay\/Developer\/MainaV2\/scripts\/gradle-
 assertOrder(linkRestorer, ['local link_parent="${link_path%/*}"', 'maina_require_storage_path "$link_parent"', '[[ "$(/usr/bin/readlink "$link_path")" == "$source_path" ]]'], 'Gradle init link validation');
 assertOrder(linkRestorer, ['"$PROJECT_DIR/ios/build"', '"$MAINA_STORAGE_ROOT/builds/apps/$storage_slot/ios/native" yes'], 'iOS generated native link');
 const prebuild = read('scripts/prebuild-android.sh');
-assertOrder(prebuild, ['source "$PROJECT_DIR/scripts/maina-build-env.sh"', 'restore-external-build-links.sh" dependencies', 'expo prebuild --platform android --no-install --clean', 'restore-external-build-links.sh" android', 'verify-android-config.mjs'], 'Android prebuild');
+assertOrder(prebuild, ['source "$PROJECT_DIR/scripts/maina-build-env.sh"', 'restore-external-build-links.sh" dependencies', '"$NODE_BIN/node" "$EXPO_CLI" prebuild --platform android --no-install --clean', 'restore-external-build-links.sh" android', 'verify-android-config.mjs'], 'Android prebuild');
 const gradleRedirect = read('scripts/gradle-output-redirect.init.gradle');
 assert.match(gradleRedirect, /MAINA_ANDROID_OUTPUT_ROOT must be supplied by the guarded Maina environment/);
 assert.match(gradleRedirect, /new File\(configuredOutputRoot\)\.canonicalFile/);
@@ -325,7 +325,11 @@ assertOrder(releaseVerifier, ['expo export --platform android', 'restore-externa
 const packageJson = JSON.parse(read('package.json'));
 assert.equal(packageJson.scripts['verify:external-storage'], 'node scripts/verify-external-storage-contract.mjs');
 assert.match(packageJson.scripts['verify:release-build-scripts'], /^npm run verify:external-storage && /);
-assert.equal(packageJson.scripts.android, 'bash scripts/run-android-local.sh');
+if (kind === 'android-main') {
+  assert.equal(packageJson.scripts.android, 'bash scripts/run-android-local.sh');
+} else {
+  assert.equal(packageJson.scripts.android, undefined);
+}
 assert.equal(packageJson.scripts.ios, 'bash scripts/run-ios-local.sh');
 assert.equal(packageJson.scripts['ios:ui-tests:configure'], 'bash scripts/configure-ios-ui-tests-guarded.sh');
 const iosUiTestConfigurator = read('scripts/configure-ios-ui-tests-guarded.sh');
@@ -366,10 +370,11 @@ if (kind === 'android-main') {
 
   const dependencyInstaller = read('scripts/install-external-node-dependencies.sh');
   assert.equal(lstatSync(path.join(root, 'scripts/install-external-node-dependencies.sh')).mode & 0o777, 0o755);
-  assertOrder(dependencyInstaller, ['source "$PROJECT_DIR/scripts/maina-ios-env.sh"', 'maina_storage_mkdir "$dependency_root"', 'NODE_ENV=development npm ci', 'restore-external-build-links.sh" dependencies'], 'external npm install');
+  assertOrder(dependencyInstaller, ['source "$PROJECT_DIR/scripts/maina-ios-env.sh"', 'maina_storage_mkdir "$dependency_root"', 'NODE_ENV=development "$NODE_EXECUTABLE" "$NPM_CLI" ci', 'restore-external-build-links.sh" dependencies'], 'external npm install');
   const iosPrepare = read('scripts/prepare-ios-local.sh');
   const iosPodInstall = 'PROJECT_ROOT="$PROJECT_DIR" pod install';
-  assertOrder(iosPrepare, ['source "$PROJECT_DIR/scripts/maina-ios-env.sh"', 'install-external-node-dependencies.sh"', 'expo prebuild --platform ios --no-install --clean', 'restore-external-build-links.sh" ios', iosPodInstall], 'iOS prepare');
+  assertOrder(iosPrepare, ['source "$PROJECT_DIR/scripts/maina-ios-env.sh"', 'install-external-node-dependencies.sh"', 'verify-release-toolchain.mjs"', '"$NODE_EXECUTABLE" "$EXPO_CLI" prebuild --platform ios --no-install --clean', 'restore-external-build-links.sh" ios', iosPodInstall], 'iOS prepare');
+  assert.doesNotMatch(iosPrepare, /\bnpx\s+expo\b/);
   assertOrder(iosPrepare, [iosPodInstall, 'configure-ios-ui-tests-guarded.sh"'], 'iOS UI-test configuration');
   assert.match(iosPrepare, /\(cd ios && PROJECT_ROOT="\$PROJECT_DIR" pod install\)/, 'CocoaPods must capture the canonical app project root for Expo build phases.');
   assert.doesNotMatch(iosPrepare, /\(cd ios && pod install\)/, 'CocoaPods must not infer the app root from an externally stored Pods project.');

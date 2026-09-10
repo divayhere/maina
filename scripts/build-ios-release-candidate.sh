@@ -14,8 +14,8 @@ STORAGE_ROOT="$($STORAGE_GUARD)" || exit $?
 [[ "$STORAGE_ROOT" == "/Volumes/DivaySSD/MainaBuild" ]] || { echo "Canonical Maina storage root was rejected." >&2; exit 78; }
 MAINA_IOS_RELEASE_OUTPUT_ROOT="${MAINA_IOS_RELEASE_OUTPUT_ROOT:-$STORAGE_ROOT/artifacts/apps/ios-feasibility}"
 MAINA_IOS_DERIVED_DATA_ROOT="${MAINA_IOS_DERIVED_DATA_ROOT:-$STORAGE_ROOT/builds/apps/ios-feasibility/ios/DerivedData}"
-OUTPUT_DIR="${MAINA_RELEASE_OUTPUT_DIR:-$MAINA_IOS_RELEASE_OUTPUT_ROOT/ios/Maina-0.10.67-49-candidate}"
-BUILD_ROOT="${MAINA_IOS_CANDIDATE_DERIVED_DATA:-$MAINA_IOS_DERIVED_DATA_ROOT/Maina-0.10.67-49-candidate}"
+OUTPUT_DIR="${MAINA_RELEASE_OUTPUT_DIR:-$MAINA_IOS_RELEASE_OUTPUT_ROOT/ios/Maina-0.10.68-50-candidate}"
+BUILD_ROOT="${MAINA_IOS_CANDIDATE_DERIVED_DATA:-$MAINA_IOS_DERIVED_DATA_ROOT/Maina-0.10.68-50-candidate}"
 TEAM_ID="${MAINA_IOS_TEAM_ID:-9X4X3R4KCN}"
 
 [[ "$TEAM_ID" == "9X4X3R4KCN" ]] || { echo "iOS candidate team must remain 9X4X3R4KCN." >&2; exit 2; }
@@ -62,12 +62,33 @@ if [[ -d "$BUILD_ROOT" && -n "$(find "$BUILD_ROOT" -mindepth 1 -maxdepth 1 -prin
 fi
 
 NODE_BIN="${MAINA_IOS_NODE_BIN:-/Users/divay/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin}"
-[[ -x "$NODE_BIN/node" ]] || { echo "iOS qualification Node runtime is unavailable." >&2; exit 2; }
-MAINA_EXPECTED_FINAL_COMMIT="$EXPECTED_FINAL" "$NODE_BIN/node" \
+NODE_EXECUTABLE="$NODE_BIN/node"
+NPM_CLI="${MAINA_NPM_CLI:-/opt/homebrew/lib/node_modules/npm/bin/npm-cli.js}"
+EXPO_CLI="${MAINA_EXPO_CLI:-$PROJECT_DIR/node_modules/expo/bin/cli}"
+RELEASE_PLAN="$PROJECT_DIR/release/m3-m4-0.10.68-candidate-plan.json"
+[[ -x "$NODE_EXECUTABLE" ]] || { echo "iOS qualification Node runtime is unavailable." >&2; exit 2; }
+"$NODE_EXECUTABLE" "$PROJECT_DIR/scripts/verify-release-toolchain.mjs" \
+  "$PROJECT_DIR" "$NODE_EXECUTABLE" "$NPM_CLI" "$EXPO_CLI" "$RELEASE_PLAN" >/dev/null
+export MAINA_IOS_NODE_BIN="$NODE_BIN"
+export MAINA_NODE_BIN="$NODE_BIN"
+export MAINA_NPM_CLI="$NPM_CLI"
+export MAINA_EXPO_CLI="$EXPO_CLI"
+export PATH="$NODE_BIN:${PATH:-/usr/bin:/bin}"
+[[ "$(command -v node)" == "$NODE_EXECUTABLE" ]] || { echo "Pinned Node runtime is not first on PATH." >&2; exit 2; }
+MAINA_EXPECTED_FINAL_COMMIT="$EXPECTED_FINAL" "$NODE_EXECUTABLE" \
   "$PROJECT_DIR/scripts/qualification/ios-lane.mjs" preflight >/dev/null
 
 # Build/cache helpers may create external directories only after the complete
 # side-effect-free qualification preflight has passed.
+cd "$PROJECT_DIR"
+"$NODE_EXECUTABLE" scripts/verify-build-source-state.mjs ios "$EXPECTED_FINAL"
+# shellcheck source=lib/release-build-attempt-guard.sh
+source "$PROJECT_DIR/scripts/lib/release-build-attempt-guard.sh"
+BUILD_ATTEMPT_LEDGER_ROOT="$STORAGE_ROOT/artifacts/apps/release-build-attempts"
+PLAN_SHA256="$(shasum -a 256 "$RELEASE_PLAN" | awk '{print $1}')"
+maina_build_attempt_acquire \
+  "$BUILD_ATTEMPT_LEDGER_ROOT" "maina-m3-m4-0.10.68" ios "$EXPECTED_FINAL" "$PLAN_SHA256" || exit $?
+trap 'status=$?; maina_build_attempt_on_exit "$status" || true; exit "$status"' EXIT
 # shellcheck source=maina-ios-env.sh
 source "$PROJECT_DIR/scripts/maina-ios-env.sh"
 maina_require_storage_path "$OUTPUT_DIR" || exit $?
@@ -95,6 +116,7 @@ release_lock() {
 
 fail_terminal() {
   local reason="$1" status="${2:-1}"
+  maina_build_attempt_terminal terminal_failure "$reason" || exit 78
   release_lock "$reason"
   echo "$reason" >&2
   exit "$status"
@@ -106,6 +128,7 @@ on_exit() {
     write_lock_state "reconciliation_required"
     echo "iOS build outcome is ambiguous; the mutation lock was retained for explicit reconciliation." >&2
   fi
+  maina_build_attempt_on_exit "$status" || true
   return "$status"
 }
 trap on_exit EXIT
@@ -126,7 +149,6 @@ cd "$PROJECT_DIR"
 set +e
 (
   set -e
-  "$PROJECT_DIR/scripts/restore-external-build-links.sh" dependencies
   node scripts/verify-build-source-state.mjs ios "$EXPECTED_FINAL"
   scripts/prepare-ios-local.sh
   node scripts/verify-generated-native-release-metadata.mjs ios
@@ -147,13 +169,14 @@ fi
 APP="$BUILD_ROOT/Build/Products/Release-iphoneos/Maina.app"
 DSYM="$BUILD_ROOT/Build/Products/Release-iphoneos/Maina.app.dSYM"
 [[ -d "$APP" && -d "$DSYM" ]] || fail_terminal "IOS_BUILD_ARTIFACT_MISSING" 1
-APP_ZIP="$OUTPUT_DIR/Maina-0.10.67-49.app.zip"
-DSYM_ZIP="$OUTPUT_DIR/Maina-0.10.67-49.app.dSYM.zip"
+APP_ZIP="$OUTPUT_DIR/Maina-0.10.68-50.app.zip"
+DSYM_ZIP="$OUTPUT_DIR/Maina-0.10.68-50.app.dSYM.zip"
 /usr/bin/ditto -c -k --sequesterRsrc --keepParent "$APP" "$APP_ZIP"
 /usr/bin/ditto -c -k --sequesterRsrc --keepParent "$DSYM" "$DSYM_ZIP"
-node scripts/inspect-exact-artifact.mjs ios release/m3-m4-0.10.67-candidate-plan.json "$APP_ZIP" "$DSYM_ZIP" \
+node scripts/inspect-exact-artifact.mjs ios release/m3-m4-0.10.68-candidate-plan.json "$APP_ZIP" "$DSYM_ZIP" \
   > "$OUTPUT_DIR/ios-inspection.json"
 node scripts/verify-generated-native-release-metadata.mjs ios
 node scripts/verify-build-source-state.mjs ios "$EXPECTED_FINAL"
+maina_build_attempt_terminal terminal_success IOS_BUILD_SUCCEEDED || exit 78
 release_lock "built_and_reconciled"
 echo "One iOS candidate build completed. Admin audit is required before any install."
