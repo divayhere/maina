@@ -124,6 +124,7 @@ class MainaModelPackLifecycleTest {
                 assertEquals(expected, failure.message)
                 assertFalse(root.resolve("writer.json").exists())
                 assertFalse(root.resolve("current.json").exists())
+                assertTrue(root.resolve("staging").listFiles()?.isEmpty() == true)
             } finally {
                 root.deleteRecursively()
             }
@@ -139,7 +140,9 @@ class MainaModelPackLifecycleTest {
         )) assertRejected("PLATFORM_COMPATIBILITY_MISMATCH", platforms)
 
         assertRejected("MANIFEST_INVALID", JSONObject().put("0", android))
+        assertRejected("MANIFEST_INVALID", JSONArray().put(JSONObject.NULL))
         assertRejected("MANIFEST_INVALID", JSONArray().put(JSONObject.NULL).put(ios))
+        assertRejected("MANIFEST_INVALID", JSONArray().put(android).put(JSONObject.NULL).put(ios))
         assertRejected("MANIFEST_INVALID", JSONArray().put(JSONObject(android.toString()).put("osFamily", "windows")).put(ios))
         assertRejected("MANIFEST_INVALID", JSONArray().put(JSONObject(android.toString()).put("minOsVersion", 26)).put(ios))
         assertRejected("MANIFEST_INVALID", JSONArray().put(JSONObject(android.toString()).put("architectures", JSONArray().put("arm64-v8a").put(64))).put(ios))
