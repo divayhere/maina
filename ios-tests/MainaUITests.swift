@@ -52,12 +52,7 @@ final class MainaUITests: XCTestCase {
     attach("interrupted-recording-before-keep")
     keep.tap()
     XCTAssertFalse(keep.waitForExistence(timeout: 10), "The recovery choice did not close after keeping the recording.")
-    XCTAssertTrue(
-      app.staticTexts.matching(NSPredicate(
-        format: "label CONTAINS[c] 'Notes' OR label CONTAINS[c] 'Transcript' OR label CONTAINS[c] 'Recent'"
-      )).firstMatch.waitForExistence(timeout: 20),
-      "Maina did not return to a durable meeting or home state."
-    )
+    XCTAssertTrue(assertCurrentMeetingHasDurableAudio(timeout: 20), "The kept recording has no public durable-audio evidence.")
     attach("interrupted-recording-after-keep")
   }
 
@@ -102,8 +97,8 @@ final class MainaUITests: XCTestCase {
     XCTAssertTrue(app.buttons["Stop and save"].waitForExistence(timeout: 5))
     app.buttons["Stop and save"].tap()
     XCTAssertTrue(
-      waitForSettledPostRecordingState(timeout: 20),
-      "Maina did not finish the recording-to-destination transition."
+      waitForRecorderFinalizationSurface(timeout: 20),
+      "Maina did not leave the recorder after saving."
     )
     attach("recording-saved")
     assertSingleBackReturnsHomeIfNeeded()
@@ -163,6 +158,8 @@ final class MainaUITests: XCTestCase {
   }
 
   func testProcessDeathRecovery() throws {
+    tapTab(named: "Home", fallbackX: 0.18)
+    let previousMeetingCount = requireHomeRecordingCount(timeout: 8)
     startFreshRecording()
     sleep(8)
     attach("process-recovery-before-termination")
@@ -175,12 +172,19 @@ final class MainaUITests: XCTestCase {
       keep.tap()
       XCTAssertFalse(keep.waitForExistence(timeout: 15))
     }
+    tapTab(named: "Home", fallbackX: 0.18)
     XCTAssertTrue(
-      app.staticTexts.matching(NSPredicate(
-        format: "label CONTAINS[c] 'Notes' OR label CONTAINS[c] 'Transcript' OR label CONTAINS[c] 'Recent'"
-      )).firstMatch.waitForExistence(timeout: 25),
-      "Maina did not recover to a durable meeting or home surface after process death."
+      waitForHomeRecordingCount(previousMeetingCount + 1, timeout: 25),
+      "Process-death recovery did not create exactly one new public meeting."
     )
+    let newestMeeting = app.buttons.matching(identifier: "meeting-card").firstMatch
+    XCTAssertTrue(newestMeeting.waitForExistence(timeout: 8), "The recovered top meeting card is unavailable.")
+    newestMeeting.tap()
+    XCTAssertTrue(assertCurrentMeetingHasDurableAudio(timeout: 20), "The recovered meeting has no public durable-audio evidence.")
+    let recoveredDuration = requireCurrentMeetingDurationSeconds()
+    XCTAssertTrue((1...60).contains(recoveredDuration), "Recovered meeting duration is inconsistent with the bounded interrupted recording.")
+    XCTAssertFalse(app.buttons["Stop and save"].exists, "Recovered meeting still exposes recording controls.")
+    XCTAssertFalse(app.staticTexts["Recording"].exists, "Recovered meeting still claims an active recording.")
     attach("process-recovery-complete")
   }
 
@@ -256,8 +260,8 @@ final class MainaUITests: XCTestCase {
     XCTAssertTrue(stop.waitForExistence(timeout: 8))
     stop.tap()
     XCTAssertTrue(
-      waitForSettledPostRecordingState(timeout: 30),
-      "Maina did not finish the recording-to-destination transition."
+      waitForRecorderFinalizationSurface(timeout: 30),
+      "Maina did not leave the recorder after saving."
     )
   }
 
@@ -278,7 +282,7 @@ final class MainaUITests: XCTestCase {
     XCTAssertFalse(alert.waitForExistence(timeout: 5), "Microphone permission alert did not close.")
   }
 
-  private func waitForSettledPostRecordingState(timeout: TimeInterval) -> Bool {
+  private func waitForRecorderFinalizationSurface(timeout: TimeInterval) -> Bool {
     let home = app.staticTexts["RECENT"]
     let record = app.buttons["Record a meeting"]
     let detailBack = app.buttons["Back"].firstMatch
@@ -306,6 +310,68 @@ final class MainaUITests: XCTestCase {
       RunLoop.current.run(until: Date().addingTimeInterval(0.25))
     } while Date() < deadline
     return false
+  }
+
+  private func requireHomeRecordingCount(timeout: TimeInterval) -> Int {
+    let deadline = Date().addingTimeInterval(timeout)
+    repeat {
+      if let count = currentHomeRecordingCount() { return count }
+      RunLoop.current.run(until: Date().addingTimeInterval(0.25))
+    } while Date() < deadline
+    XCTFail("Home did not expose exactly one bounded recording count.")
+    return -1
+  }
+
+  private func waitForHomeRecordingCount(_ expected: Int, timeout: TimeInterval) -> Bool {
+    let deadline = Date().addingTimeInterval(timeout)
+    repeat {
+      if currentHomeRecordingCount() == expected { return true }
+      RunLoop.current.run(until: Date().addingTimeInterval(0.25))
+    } while Date() < deadline
+    return false
+  }
+
+  private func currentHomeRecordingCount() -> Int? {
+    let matches = app.staticTexts.matching(NSPredicate(format: "label MATCHES %@", "^[0-9]+ recordings?$"))
+    guard matches.count == 1,
+          let prefix = matches.firstMatch.label.split(separator: " ").first,
+          let count = Int(prefix) else { return nil }
+    return count
+  }
+
+  private func assertCurrentMeetingHasDurableAudio(timeout: TimeInterval) -> Bool {
+    let audioAvailable = app.staticTexts["Audio available: Yes"]
+    let positiveSegments = app.staticTexts.matching(NSPredicate(format: "label MATCHES %@", "^Saved audio segments: [1-9][0-9]*$"))
+    let reTranscribe = app.buttons["Re-transcribe from saved audio"]
+    let audioKept = app.staticTexts.matching(NSPredicate(format: "label CONTAINS[c] %@", "audio kept"))
+    let deadline = Date().addingTimeInterval(timeout)
+    var openedTranscript = false
+    repeat {
+      if audioAvailable.exists || positiveSegments.count == 1 || reTranscribe.exists || audioKept.count > 0 { return true }
+      let transcript = app.descendants(matching: .any).matching(NSPredicate(format: "label == %@", "Transcript")).firstMatch
+      if !openedTranscript && transcript.exists && transcript.isHittable {
+        transcript.tap()
+        openedTranscript = true
+      }
+      RunLoop.current.run(until: Date().addingTimeInterval(0.25))
+    } while Date() < deadline
+    return false
+  }
+
+  private func requireCurrentMeetingDurationSeconds() -> Int {
+    for element in app.staticTexts.allElementsBoundByIndex {
+      let fields = element.label.components(separatedBy: " · ")
+      guard fields.count >= 3 else { continue }
+      for candidate in fields.reversed() {
+        let rawParts = candidate.split(separator: ":")
+        let parts = rawParts.compactMap { Int($0) }
+        guard rawParts.count == parts.count, parts.count == 2 || parts.count == 3 else { continue }
+        if parts.count == 2, parts[1] < 60 { return parts[0] * 60 + parts[1] }
+        if parts.count == 3, parts[1] < 60, parts[2] < 60 { return parts[0] * 3600 + parts[1] * 60 + parts[2] }
+      }
+    }
+    XCTFail("Meeting detail did not expose a bounded public duration.")
+    return -1
   }
 
   private func assertSingleBackReturnsHomeIfNeeded() {

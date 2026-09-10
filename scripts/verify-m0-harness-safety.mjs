@@ -73,10 +73,13 @@ function verifyXcodeDiagnosticsAdversaries(source, label) {
 }
 
 const IOS_RECORDING_LIFECYCLE_BLOCKS = [
-  ['short recording test', '  func testShortRecordingLifecycle() throws {', '  func testRapidPauseResumeFirstTap() throws {', '4a588b98d7eeb9b7d54a3ffead26d8638a00675c170ed6d6c734e7b847bddf16'],
-  ['stop helper', '  private func stopCurrentRecording() {', '  private func authorizeMicrophoneIfPresented() {', '8e94a10d137cc14d85d192f34c13adca749b55efaca9ce339424685c06bf168f'],
-  ['permission helper', '  private func authorizeMicrophoneIfPresented() {', '  private func waitForSettledPostRecordingState(timeout: TimeInterval) -> Bool {', 'cc866500cecf01c53833bba269516ee6779b39d7fc7c10971348727aa1d560dd'],
-  ['settled-state helper', '  private func waitForSettledPostRecordingState(timeout: TimeInterval) -> Bool {', '  private func assertSingleBackReturnsHomeIfNeeded() {', '420f0b83f4d468f4b352d73418d32e287b29841557d945af5566e7f61d51d761'],
+  ['keep interrupted test', '  func testKeepInterruptedRecording() throws {', '  func testNavigationAudit() throws {', '90619bdb3210b911c455f2d2478d848fdf054ee69030caa1cdc00fa048e5212f'],
+  ['short recording test', '  func testShortRecordingLifecycle() throws {', '  func testRapidPauseResumeFirstTap() throws {', '9edda727c030605726a7dc078f0d6f02a54da95f879436d2c3ba737fe741a99e'],
+  ['process-death recovery test', '  func testProcessDeathRecovery() throws {', '  func testLongRecordingWithBackgroundAndPauses() throws {', '2eae4854c868ef298817f300adcdf4f63203fbbb585babf318dd1fa7db353f9c'],
+  ['stop helper', '  private func stopCurrentRecording() {', '  private func authorizeMicrophoneIfPresented() {', 'd091ddc73b9067eb4e58b2d3940eeee3aa4c6e35185c38d8e3023c334a69f8e6'],
+  ['permission helper', '  private func authorizeMicrophoneIfPresented() {', '  private func waitForRecorderFinalizationSurface(timeout: TimeInterval) -> Bool {', 'cc866500cecf01c53833bba269516ee6779b39d7fc7c10971348727aa1d560dd'],
+  ['finalization-surface helper', '  private func waitForRecorderFinalizationSurface(timeout: TimeInterval) -> Bool {', '  private func requireHomeRecordingCount(timeout: TimeInterval) -> Int {', 'cb62cc6978fdd618a0fd9cf43e7b3d8bf934756dce61c07051d7bdbf0f7fc175'],
+  ['recovery evidence helpers', '  private func requireHomeRecordingCount(timeout: TimeInterval) -> Int {', '  private func assertSingleBackReturnsHomeIfNeeded() {', '3228cbde035be6fb8bc8423be9996cb11293f972de42d71f7c38c421e5f39106'],
   ['Back-to-Home helper', '  private func assertSingleBackReturnsHomeIfNeeded() {', '  private func tapTab(named name: String, fallbackX: CGFloat) {', '9c0cd4483c927885a9f0d878f1607527f48a276fefa5dd6395e0b999028a5662'],
 ];
 
@@ -88,15 +91,33 @@ function verifyIosRecordingLifecycle(source) {
   }));
   assertSourceOrder(blocks['short recording test'], [
     'app.buttons["Stop and save"].tap()',
-    'waitForSettledPostRecordingState(timeout: 20)',
+    'waitForRecorderFinalizationSurface(timeout: 20)',
     'attach("recording-saved")',
     'assertSingleBackReturnsHomeIfNeeded()',
   ], 'short recording test');
   assertSourceOrder(blocks['stop helper'], [
     'stop.tap()',
-    'waitForSettledPostRecordingState(timeout: 30)',
+    'waitForRecorderFinalizationSurface(timeout: 30)',
   ], 'stop helper');
-  assertSourceOrder(blocks['settled-state helper'], [
+  assertSourceOrder(blocks['keep interrupted test'], [
+    'keep.tap()',
+    'XCTAssertFalse(keep.waitForExistence(timeout: 10)',
+    'assertCurrentMeetingHasDurableAudio(timeout: 20)',
+  ], 'keep interrupted test');
+  assertSourceOrder(blocks['process-death recovery test'], [
+    'let previousMeetingCount = requireHomeRecordingCount(timeout: 8)',
+    'startFreshRecording()',
+    'app.terminate()',
+    'app.launch()',
+    'waitForHomeRecordingCount(previousMeetingCount + 1, timeout: 25)',
+    'app.buttons.matching(identifier: "meeting-card").firstMatch',
+    'newestMeeting.tap()',
+    'assertCurrentMeetingHasDurableAudio(timeout: 20)',
+    'let recoveredDuration = requireCurrentMeetingDurationSeconds()',
+    'XCTAssertTrue((1...60).contains(recoveredDuration)',
+    'XCTAssertFalse(app.buttons["Stop and save"].exists',
+  ], 'process-death recovery test');
+  assertSourceOrder(blocks['finalization-surface helper'], [
     'let recordingSurfaceIsGone = !stop.exists && !pause.exists && !resume.exists && !recording.exists && !paused.exists',
     'let homeIsSettled = home.exists && record.exists && record.isHittable',
     'let detailIsSettled = detailBack.exists && detailBack.isHittable',
@@ -104,7 +125,16 @@ function verifyIosRecordingLifecycle(source) {
     'if recordingSurfaceIsGone && (homeIsSettled || detailIsSettled)',
     'consecutiveSettledSamples += 1',
     'if consecutiveSettledSamples == 2 { return true }',
-  ], 'settled-state helper');
+  ], 'finalization-surface helper');
+  assertSourceOrder(blocks['recovery evidence helpers'], [
+    'if let count = currentHomeRecordingCount() { return count }',
+    'if currentHomeRecordingCount() == expected { return true }',
+    'matches.count == 1',
+    '"^Saved audio segments: [1-9][0-9]*$"',
+    'audioAvailable.exists || positiveSegments.count == 1 || reTranscribe.exists || audioKept.count > 0',
+    'rawParts.count == parts.count',
+    'XCTFail("Meeting detail did not expose a bounded public duration.")',
+  ], 'recovery evidence helpers');
   assertSourceOrder(blocks['Back-to-Home helper'], [
     'let back = app.buttons["Back"].firstMatch',
     'back.exists && back.isHittable',
@@ -116,13 +146,17 @@ function verifyIosRecordingLifecycle(source) {
 
 function verifyIosRecordingLifecycleAdversaries(source) {
   const mutations = [
-    ['stale helper name', 'waitForSettledPostRecordingState', 'waitForDurablePostRecordingState'],
+    ['overstated helper name', 'waitForRecorderFinalizationSurface', 'waitForDurablePostRecordingState'],
     ['outgoing control omission', '!stop.exists && !pause.exists && !resume.exists && !recording.exists && !paused.exists', '!stop.exists && !pause.exists && !recording.exists && !paused.exists'],
     ['weakened conjunction', 'if recordingSurfaceIsGone && (homeIsSettled || detailIsSettled)', 'if recordingSurfaceIsGone || (homeIsSettled || detailIsSettled)'],
     ['removed destination hittability', 'detailTranscript.exists && detailTranscript.isHittable', 'detailTranscript.exists'],
     ['single unstable sample', 'if consecutiveSettledSamples == 2 { return true }', 'if consecutiveSettledSamples == 1 { return true }'],
-    ['omitted short-test call', 'waitForSettledPostRecordingState(timeout: 20)', 'true'],
-    ['omitted stop-helper call', 'waitForSettledPostRecordingState(timeout: 30)', 'true'],
+    ['omitted short-test call', 'waitForRecorderFinalizationSurface(timeout: 20)', 'true'],
+    ['omitted stop-helper call', 'waitForRecorderFinalizationSurface(timeout: 30)', 'true'],
+    ['unchanged meeting count', 'previousMeetingCount + 1', 'previousMeetingCount'],
+    ['generic recovery card', 'app.buttons.matching(identifier: "meeting-card").firstMatch', 'app.buttons.firstMatch'],
+    ['omitted durable audio proof', 'assertCurrentMeetingHasDurableAudio(timeout: 20)', 'true'],
+    ['unbounded recovered duration', 'XCTAssertTrue((1...60).contains(recoveredDuration)', 'XCTAssertTrue(recoveredDuration >= 0'],
     ['attach before assertion', '    attach("recording-saved")\n    assertSingleBackReturnsHomeIfNeeded()', '    assertSingleBackReturnsHomeIfNeeded()\n    attach("recording-saved")'],
     ['comment-only token', 'let recordingSurfaceIsGone = !stop.exists && !pause.exists && !resume.exists && !recording.exists && !paused.exists', 'let recordingSurfaceIsGone = true // !stop.exists && !pause.exists && !resume.exists && !recording.exists && !paused.exists'],
     ['dead-code token', 'let recordingSurfaceIsGone = !stop.exists && !pause.exists && !resume.exists && !recording.exists && !paused.exists', 'let recordingSurfaceIsGone = true; if false { _ = !stop.exists && !pause.exists && !resume.exists && !recording.exists && !paused.exists }'],
@@ -197,7 +231,7 @@ if (stop && ui) {
   }
   const permissionHelper = ui.slice(
     ui.indexOf('private func authorizeMicrophoneIfPresented()'),
-    ui.indexOf('private func waitForSettledPostRecordingState'),
+    ui.indexOf('private func waitForRecorderFinalizationSurface'),
   );
   if (permissionHelper.indexOf('“Maina” would like to access the Microphone.') > permissionHelper.indexOf('alert.buttons["Allow"]')) {
     throw new Error('iOS UI test can accept an Allow action before proving the exact microphone alert.');
