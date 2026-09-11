@@ -17,6 +17,7 @@ import { deriveStageTransition } from '../core/pipeline/stageState';
 import * as FileSystem from 'expo-file-system/legacy';
 import { resolveDocumentReference, toPortableDocumentReference } from '../core/recording/appFileReference';
 import { canCommitLocalAsrWindow } from '../core/transcription/asr/localAsrClaimPolicy';
+import { selectPurgeableStagingMeetingIds } from '../core/recording/stagingPurgePolicy';
 
 const documentDirectory = FileSystem.documentDirectory;
 const storeAudioUri = (value: string | null | undefined) => toPortableDocumentReference(value, documentDirectory);
@@ -2459,14 +2460,16 @@ export async function resetMeetingTranscript(meetingId: string): Promise<void> {
   });
 }
 
-export async function purgeStagingMeetings(): Promise<Meeting[]> {
+export async function purgeStagingMeetings(protectedMeetingIds: readonly string[]): Promise<Meeting[]> {
   const db = await getDb();
   const rows = await db.getAllAsync<Row>(
     `SELECT * FROM meetings
      WHERE status != 'recording'
      ORDER BY started_at ASC`,
   );
-  const meetings = rows.map(toMeeting);
+  const allMeetings = rows.map(toMeeting);
+  const purgeableIds = new Set(selectPurgeableStagingMeetingIds(allMeetings, protectedMeetingIds));
+  const meetings = allMeetings.filter((meeting) => purgeableIds.has(meeting.id));
   if (meetings.length === 0) return [];
   await db.withTransactionAsync(async () => {
     for (const meeting of meetings) {

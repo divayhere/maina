@@ -3,7 +3,7 @@ import {
   deriveNativeCaptureStartupFence,
 } from '@/core/recording/nativeCaptureStartupFence';
 import { getMeeting, updateMeeting } from '@/data/meetings';
-import { getNativeCaptureQuarantine } from '@/hardware/recording/foreground';
+import { getNativeCaptureQuarantine, getPendingNativeDiscard } from '@/hardware/recording/foreground';
 
 export type NativeCaptureAutomaticWorkFence = {
   protectedMeetingIds: readonly string[];
@@ -13,6 +13,17 @@ export function readNativeCaptureAutomaticWorkFence(): NativeCaptureAutomaticWor
   const fence = deriveNativeCaptureStartupFence(getNativeCaptureQuarantine());
   if (fence.state === 'blocked') throw new Error(NATIVE_CAPTURE_QUARANTINE_MESSAGE);
   return { protectedMeetingIds: fence.protectedMeetingIds };
+}
+
+export function readNativeCaptureDestructiveWorkFence(): NativeCaptureAutomaticWorkFence {
+  const automaticFence = readNativeCaptureAutomaticWorkFence();
+  const pendingDiscard = getPendingNativeDiscard();
+  if (pendingDiscard.state === 'blocked') throw new Error(NATIVE_CAPTURE_QUARANTINE_MESSAGE);
+  const protectedMeetingIds = new Set(automaticFence.protectedMeetingIds);
+  if (pendingDiscard.state === 'pending' || pendingDiscard.state === 'ready_for_ack') {
+    protectedMeetingIds.add(pendingDiscard.meetingId);
+  }
+  return { protectedMeetingIds: [...protectedMeetingIds] };
 }
 
 /**
