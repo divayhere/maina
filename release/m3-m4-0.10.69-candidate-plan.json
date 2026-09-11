@@ -69,6 +69,13 @@
         },
         {
           "type": "provider",
+          "name": "com.divay.maina.recorder.MainaCaptureAutomaticWorkAuthorityProvider",
+          "exported": "false",
+          "permission": null,
+          "process": null
+        },
+        {
+          "type": "provider",
           "name": "expo.modules.clipboard.ClipboardFileProvider",
           "exported": "false",
           "permission": null,

@@ -50,7 +50,16 @@ assert.equal(plan.sources.backendProductionDeployment, historicalPlan.sources.ba
 assert.equal(plan.identity.androidPackage, 'com.divay.maina');
 assert.equal(plan.identity.iosBundleIdentifier, 'com.divay.maina.staging');
 assert.equal(plan.identity.iosTeamId, '9X4X3R4KCN');
-assert.deepEqual(plan.artifactPolicy, historicalPlan.artifactPolicy);
+const expectedArtifactPolicy = structuredClone(historicalPlan.artifactPolicy);
+const automaticWorkAuthorityProvider = {
+  type: 'provider',
+  name: 'com.divay.maina.recorder.MainaCaptureAutomaticWorkAuthorityProvider',
+  exported: 'false',
+  permission: null,
+  process: null,
+};
+expectedArtifactPolicy.android.components.splice(3, 0, automaticWorkAuthorityProvider);
+assert.deepEqual(plan.artifactPolicy, expectedArtifactPolicy);
 const expectedToolchains = structuredClone(historicalPlan.toolchains);
 expectedToolchains.node = '24.19.0';
 expectedToolchains.nodeExecutablePath = '/Users/divay/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node';
