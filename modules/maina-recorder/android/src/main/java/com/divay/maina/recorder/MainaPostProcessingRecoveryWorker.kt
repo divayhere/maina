@@ -94,6 +94,14 @@ internal class MainaPostProcessingRecoveryWorker(
         val meetingId = inputData.getString(MainaPostProcessingRecoveryScheduler.EXTRA_MEETING_ID).orEmpty()
         val scheduledRecoveryRound = inputData.getInt(MainaPostProcessingRecoveryScheduler.EXTRA_RECOVERY_ROUND, 0)
         if (meetingId.isBlank()) return Result.failure()
+        when (MainaCaptureAutomaticWorkGate.classify(applicationContext, meetingId)) {
+            MainaAutomaticWorkAuthority.ALLOWED -> Unit
+            MainaAutomaticWorkAuthority.DEFERRED -> return Result.retry()
+            MainaAutomaticWorkAuthority.DISCARDED,
+            MainaAutomaticWorkAuthority.QUARANTINED,
+            MainaAutomaticWorkAuthority.INVALID,
+            -> return Result.success()
+        }
         // A fresh meeting always wins over deferred ASR. The recording service
         // checkpoints the old ASR at a window boundary; WorkManager will retry
         // this unique recovery request later instead of competing for CPU/RAM.
@@ -115,6 +123,14 @@ internal class MainaPostProcessingRecoveryWorker(
                 if (directory.isNullOrBlank() || !MainaPostProcessingRecoveryPolicy.shouldScheduleAnotherRound(recoveryRounds)) {
                     MainaPostProcessingRecoveryScheduler.notifyResume(applicationContext, meetingId)
                     return Result.success()
+                }
+                when (MainaCaptureAutomaticWorkGate.classify(applicationContext, meetingId, directory)) {
+                    MainaAutomaticWorkAuthority.ALLOWED -> Unit
+                    MainaAutomaticWorkAuthority.DEFERRED -> return Result.retry()
+                    MainaAutomaticWorkAuthority.DISCARDED,
+                    MainaAutomaticWorkAuthority.QUARANTINED,
+                    MainaAutomaticWorkAuthority.INVALID,
+                    -> return Result.success()
                 }
                 val intent = Intent(applicationContext, MainaPostProcessingService::class.java).apply {
                     action = MainaPostProcessingService.ACTION_START

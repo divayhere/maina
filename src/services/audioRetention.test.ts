@@ -11,6 +11,7 @@ const mocks = vi.hoisted(() => ({
   wavDurations: vi.fn(),
   getInfo: vi.fn(),
   deleteFile: vi.fn(),
+  getQuarantine: vi.fn(),
   notify: vi.fn(),
   log: { info: vi.fn(), warn: vi.fn() },
 }));
@@ -30,6 +31,7 @@ vi.mock('@/hardware/recording/foreground', () => ({
   deleteNativeCaptureDirectory: mocks.deleteNative,
   inspectNativeCaptureDirectory: mocks.inspectNative,
   getPcmWavDurationsMs: mocks.wavDurations,
+  getNativeCaptureQuarantine: mocks.getQuarantine,
 }));
 vi.mock('@/services/meetingPipelineSignals', () => ({ notifyMeetingPipelineChanged: mocks.notify }));
 vi.mock('@/services/logger', () => ({ log: mocks.log }));
@@ -64,6 +66,7 @@ describe('verified terminal audio cleanup', () => {
     mocks.deleteFile.mockResolvedValue(undefined);
     mocks.getInfo.mockResolvedValue({ exists: false });
     mocks.updateMeeting.mockResolvedValue(undefined);
+    mocks.getQuarantine.mockReturnValue({ state: 'none' });
   });
 
   it('measures durable WAV evidence before deletion and clears the pointer only after verification', async () => {
@@ -111,5 +114,18 @@ describe('verified terminal audio cleanup', () => {
     await vi.waitFor(() => expect(mocks.deleteNative).toHaveBeenCalledTimes(1));
     release();
     await expect(Promise.all([first, second])).resolves.toEqual([true, true]);
+  });
+
+  it('never inspects or deletes audio owned by legacy quarantine', async () => {
+    mocks.getQuarantine.mockReturnValue({
+      state: 'legacy_terminal',
+      meetingId: 'meeting-1',
+      reason: 'legacy_terminal_disposition_missing',
+    });
+    await expect(cleanupTerminalMeetingAudio('meeting-1')).resolves.toBe(false);
+    expect(mocks.getMeeting).not.toHaveBeenCalled();
+    expect(mocks.inspectNative).not.toHaveBeenCalled();
+    expect(mocks.deleteNative).not.toHaveBeenCalled();
+    expect(mocks.updateMeeting).not.toHaveBeenCalled();
   });
 });

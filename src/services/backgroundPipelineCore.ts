@@ -9,11 +9,16 @@ export type PipelineRecoveryResult = {
 export type PipelineRecoveryDependencies = {
   assertActive?(): Promise<void> | void;
   initDb(): Promise<void>;
-  repairStoredRecordingReferences(): Promise<number>;
+  reconcilePendingNativeDiscards(): Promise<number>;
+  establishNativeCaptureAutomaticWorkFence(): Promise<{ protectedMeetingIds: readonly string[] }>;
+  repairStoredRecordingReferences(protectedMeetingIds?: readonly string[]): Promise<number>;
   getMeetingsWithDeletedAudio(): Promise<string[]>;
   markMeetingsAudioDeleted(ids: string[]): Promise<void>;
-  reconcilePendingNativeMeetingWork(): Promise<number>;
-  enforceAudioRetentionPolicy(): Promise<unknown>;
+  reconcilePendingNativeMeetingWork(protectedMeetingIds?: readonly string[]): Promise<number>;
+  enforceAudioRetentionPolicy(
+    reason?: 'startup' | 'pipeline' | 'daily' | 'size_pressure' | 'diagnostics',
+    protectedMeetingIds?: readonly string[],
+  ): Promise<unknown>;
   reconcileAutoSummaryEligibility(): Promise<number>;
   reconcilePendingMeetingPackets(): Promise<number>;
   reconcilePendingMainaKnowledgeCloudSyncs(): Promise<unknown>;
@@ -33,14 +38,20 @@ export async function executePipelineRecovery(
   await checkpoint();
   await dependencies.initDb();
   await checkpoint();
-  const repairedReferences = await dependencies.repairStoredRecordingReferences();
+  await dependencies.reconcilePendingNativeDiscards();
   await checkpoint();
-  const deletedAudioMeetingIds = await dependencies.getMeetingsWithDeletedAudio().catch(() => []);
+  const nativeCaptureFence = await dependencies.establishNativeCaptureAutomaticWorkFence();
+  const protectedMeetingIds = new Set(nativeCaptureFence.protectedMeetingIds);
+  await checkpoint();
+  const repairedReferences = await dependencies.repairStoredRecordingReferences([...protectedMeetingIds]);
+  await checkpoint();
+  const deletedAudioMeetingIds = (await dependencies.getMeetingsWithDeletedAudio().catch(() => []))
+    .filter((meetingId) => !protectedMeetingIds.has(meetingId));
   await dependencies.markMeetingsAudioDeleted(deletedAudioMeetingIds);
   await checkpoint();
-  const nativeMeetings = await dependencies.reconcilePendingNativeMeetingWork();
+  const nativeMeetings = await dependencies.reconcilePendingNativeMeetingWork([...protectedMeetingIds]);
   await checkpoint();
-  await dependencies.enforceAudioRetentionPolicy();
+  await dependencies.enforceAudioRetentionPolicy('pipeline', [...protectedMeetingIds]);
   await checkpoint();
   const eligiblePackets = await dependencies.reconcileAutoSummaryEligibility();
   await checkpoint();

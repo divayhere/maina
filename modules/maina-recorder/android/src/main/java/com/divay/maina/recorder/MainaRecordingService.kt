@@ -21,6 +21,8 @@ import android.os.Looper
 import android.os.SystemClock
 import android.os.VibrationEffect
 import android.os.Vibrator
+import java.io.FileDescriptor
+import java.io.PrintWriter
 import java.util.UUID
 import java.util.concurrent.Executors
 import java.util.concurrent.RejectedExecutionException
@@ -45,6 +47,7 @@ class MainaRecordingService : Service() {
     @Volatile private var acceptingNativeWork = true
     @Volatile private var destroyed = false
     private var destroyStopQueued = false
+    private var terminalRecoveryRetryUsed = false
     private var activeCaptureOperation: MainaCaptureOperationToken? = null
     private lateinit var nativeCapture: MainaNativeAudioCapture
     private lateinit var captureControlStore: MainaCaptureControlStore
@@ -53,6 +56,8 @@ class MainaRecordingService : Service() {
     @Volatile private var lastCaptureDirectory: String? = null
     @Volatile private var lastCaptureStartedAt: Long = 0L
     @Volatile private var postProcessingHandledMeetingId: String? = null
+    @Volatile private var qualificationSessionActive = false
+    @Volatile private var qualificationEvidenceDigest: String? = null
     @Volatile private var clientSilenced = false
     @Volatile private var controlState = MainaCaptureControlState()
     @Volatile private var terminalPublication = MainaTerminalPublicationPolicy.initial()
@@ -129,12 +134,19 @@ class MainaRecordingService : Service() {
         const val ACTION_RESUME_NATIVE_CAPTURE = "com.divay.maina.recorder.RESUME_NATIVE_CAPTURE"
         const val ACTION_STOP_NATIVE_CAPTURE = "com.divay.maina.recorder.STOP_NATIVE_CAPTURE"
         const val ACTION_ABORT_NATIVE_CAPTURE = "com.divay.maina.recorder.ABORT_NATIVE_CAPTURE"
+        const val ACTION_ACKNOWLEDGE_NATIVE_DISCARD = "com.divay.maina.recorder.ACKNOWLEDGE_NATIVE_DISCARD"
+        const val ACTION_RECONCILE_QUARANTINED_CAPTURE = "com.divay.maina.recorder.RECONCILE_QUARANTINED_CAPTURE"
+        const val ACTION_RETRY_TERMINAL_NATIVE_CAPTURE = "com.divay.maina.recorder.RETRY_TERMINAL_NATIVE_CAPTURE"
         const val EXTRA_CAPTURE_STATE = "captureState"
         const val EXTRA_MEETING_ID = "meetingId"
         const val EXTRA_CAPTURE_DIRECTORY = "captureDirectory"
         const val EXTRA_SOURCE_MODE = "sourceMode"
         const val EXTRA_CHUNK_DURATION_MS = "chunkDurationMs"
         const val EXTRA_MEETING_STARTED_AT = "meetingStartedAt"
+        const val EXTRA_QUALIFICATION_SESSION = "qualificationSession"
+        const val EXTRA_QUALIFICATION_EVIDENCE_DIGEST = "qualificationEvidenceDigest"
+        const val EXTRA_DISCARD_ID = "discardId"
+        const val EXTRA_CAPTURE_GENERATION = "captureGeneration"
         private val COMMUNICATION_RESUME_TOKEN = Any()
         private const val COMMUNICATION_WATCH_INTERVAL_MS = 500L
 
@@ -149,6 +161,20 @@ class MainaRecordingService : Service() {
         @Volatile
         var nativeCaptureStatus: Map<String, Any?> = mapOf("state" to "idle")
             private set
+
+        @Volatile
+        private var activeInstance: MainaRecordingService? = null
+
+        /**
+         * Synchronous privacy bridge used by the Expo module while the durable
+         * control-store lock is held. A missing instance means no live
+         * AudioRecord owner exists in this process; teardown latches before
+         * clearing the active instance.
+         */
+        fun latchReadsOffForPreparedDiscardIfRunning(): Boolean {
+            val instance = activeInstance ?: return true
+            return instance.latchReadsOffForPreparedDiscard()
+        }
     }
 
     override fun onCreate() {
@@ -195,6 +221,7 @@ class MainaRecordingService : Service() {
         terminalPublication = MainaTerminalPublicationPolicy.initial(SystemClock.elapsedRealtime())
         nativeCaptureStatus = mapOf("state" to "idle") + terminalPublicationFields()
         restoreDurableCaptureControl()
+        activeInstance = this
         knownExternalInputIds += audioManager
             .getDevices(AudioManager.GET_DEVICES_INPUTS)
             .filter(MainaAudioRouteBridge::isExternalMicrophone)
@@ -258,12 +285,42 @@ class MainaRecordingService : Service() {
         heartbeatHandler.postDelayed(heartbeatRunnable, 60_000)
     }
 
+    override fun dump(fd: FileDescriptor, writer: PrintWriter, args: Array<out String>) {
+        if (MainaCaptureQualificationDump.requested(args)) {
+            val notificationManager = getSystemService(NotificationManager::class.java)
+            val notifications = runCatching {
+                notificationManager.activeNotifications.map { item ->
+                    MainaPublishedNotification(
+                        id = item.id,
+                        channelId = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) item.notification.channelId else CHANNEL_ID,
+                        title = item.notification.extras.getCharSequence(Notification.EXTRA_TITLE)?.toString(),
+                    )
+                }
+            }.getOrDefault(emptyList())
+            MainaCaptureQualificationDump.write(
+                writer,
+                nativeCaptureStatus,
+                captureState,
+                notifications,
+                qualificationSessionActive,
+                qualificationEvidenceDigest,
+            )
+        }
+    }
+
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (destroyed || !acceptingNativeWork) return START_NOT_STICKY
-        MainaHardwareTrigger.commandForAction(intent?.action)?.let { command ->
-            MainaHardwareTrigger.emit(this, command, "notification")
+        val commandInspection = captureControlStore.inspect()
+        val commandAuthority = when (commandInspection) {
+            is MainaCaptureControlInspection.Quarantined -> MainaDurableCommandAuthority.QUARANTINED
+            MainaCaptureControlInspection.Invalid -> MainaDurableCommandAuthority.INVALID
+            else -> MainaDurableCommandAuthority.AVAILABLE
         }
-        if (intent?.action == ACTION_SET_STATE) {
+        if (MainaDurableCommandAdmissionPolicy.allows(commandAuthority)) {
+            MainaHardwareTrigger.commandForAction(intent?.action)?.let { command ->
+                MainaHardwareTrigger.emit(this, command, "notification")
+            }
+            if (intent?.action == ACTION_SET_STATE) {
             val requestedState = intent.getStringExtra(EXTRA_CAPTURE_STATE)
             val presentationAllowed = requestedState != null &&
                 MainaExternalCapturePresentationPolicy.allowed(
@@ -302,15 +359,39 @@ class MainaRecordingService : Service() {
                 )
                 emitServiceHeartbeat()
             }
-        }
-        when (intent?.action) {
+            }
+            when (intent?.action) {
             ACTION_START_NATIVE_CAPTURE -> {
+                val requestedQualificationSession = MainaQualificationSessionPolicy.decodeQualificationExtra(
+                    intent.extras?.get(EXTRA_QUALIFICATION_SESSION),
+                )
+                val requestedQualificationDigest = MainaQualificationSessionPolicy.canonicalEvidenceDigest(
+                    intent.getStringExtra(EXTRA_QUALIFICATION_EVIDENCE_DIGEST),
+                )
+                val meetingId = intent.getStringExtra(EXTRA_MEETING_ID).orEmpty()
+                val directory = intent.getStringExtra(EXTRA_CAPTURE_DIRECTORY).orEmpty()
+                val diagnosticsStore = DiagnosticsStore.shared(this)
+                if (requestedQualificationSession != (requestedQualificationDigest != null)) {
+                    nativeCaptureStatus = mapOf(
+                        "state" to "error",
+                        "lastError" to "Qualification ownership evidence is invalid",
+                    )
+                    refreshForegroundUi()
+                    return START_STICKY
+                }
                 if (!MainaCaptureOperationPolicy.startAdmissionAllowed(
                         controlState,
                         captureState,
                         operationActive = activeCaptureOperation != null,
                     )
                 ) {
+                    if (requestedQualificationSession && requestedQualificationDigest != null &&
+                        diagnosticsStore.qualificationReservationMatches(meetingId, requestedQualificationDigest)
+                    ) {
+                        // This request cannot have created capture control because
+                        // admission failed first. Release only its exact reservation.
+                        diagnosticsStore.cancelQualificationReservation(meetingId, requestedQualificationDigest)
+                    }
                     recordNativeEvent(
                         level = "warn",
                         category = "native-capture",
@@ -320,6 +401,34 @@ class MainaRecordingService : Service() {
                             "phase" to controlState.phase.name.lowercase(),
                             "captureState" to captureState,
                         ),
+                    )
+                    refreshForegroundUi()
+                    return START_STICKY
+                }
+                if (captureControlStore.inspect() != MainaCaptureControlInspection.Absent) {
+                    nativeCaptureStatus = mapOf(
+                        "state" to "error",
+                        "lastError" to "Durable capture ownership is unresolved",
+                    )
+                    refreshForegroundUi()
+                    return START_STICKY
+                }
+                if (!requestedQualificationSession && diagnosticsStore.isQualificationSessionActive()) {
+                    nativeCaptureStatus = mapOf(
+                        "state" to "error",
+                        "lastError" to "Qualification diagnostics ownership is unresolved",
+                    )
+                    refreshForegroundUi()
+                    return START_STICKY
+                }
+                if (requestedQualificationSession && !diagnosticsStore.qualificationReservationMatches(
+                        meetingId,
+                        requireNotNull(requestedQualificationDigest),
+                    )
+                ) {
+                    nativeCaptureStatus = mapOf(
+                        "state" to "error",
+                        "lastError" to "Qualification diagnostics ownership is unavailable",
                     )
                     refreshForegroundUi()
                     return START_STICKY
@@ -340,8 +449,8 @@ class MainaRecordingService : Service() {
                         payload = mapOf("postProcessingStopped" to true),
                     )
                 }
-                val meetingId = intent.getStringExtra(EXTRA_MEETING_ID).orEmpty()
-                val directory = intent.getStringExtra(EXTRA_CAPTURE_DIRECTORY).orEmpty()
+                qualificationSessionActive = requestedQualificationSession
+                qualificationEvidenceDigest = requestedQualificationDigest
                 val sourceMode = intent.getStringExtra(EXTRA_SOURCE_MODE) ?: "voice_recognition"
                 val chunkDurationMs = intent.getStringExtra(EXTRA_CHUNK_DURATION_MS)?.toLongOrNull()
                     ?: intent.getLongExtra(EXTRA_CHUNK_DURATION_MS, 5 * 60_000L)
@@ -364,6 +473,8 @@ class MainaRecordingService : Service() {
                         sourceMode = sourceMode,
                         chunkDurationMs = chunkDurationMs,
                         meetingStartedAt = meetingStartedAt,
+                        qualificationSession = qualificationSessionActive,
+                        qualificationEvidenceDigest = qualificationEvidenceDigest,
                         state = startIntentState,
                     )
                 }.getOrDefault(false)
@@ -378,10 +489,58 @@ class MainaRecordingService : Service() {
                         "capture-start-intent",
                         IllegalStateException("Could not persist capture start intent"),
                     )
-                    setCaptureState("idle")
+                    val reservationReleased = if (qualificationSessionActive && qualificationEvidenceDigest != null) {
+                        captureControlStore.inspect() == MainaCaptureControlInspection.Absent &&
+                            diagnosticsStore.cancelQualificationReservation(
+                            meetingId,
+                            requireNotNull(qualificationEvidenceDigest),
+                        )
+                    } else {
+                        true
+                    }
+                    if (reservationReleased) {
+                        qualificationSessionActive = false
+                        qualificationEvidenceDigest = null
+                        setCaptureState("idle")
+                    } else {
+                        setCaptureState("finalizing")
+                    }
                 } else {
                     durableControl = captureControlStore.read()
+                    val qualificationActivated = !qualificationSessionActive || diagnosticsStore.activateQualificationSession(
+                        meetingId,
+                        requireNotNull(qualificationEvidenceDigest),
+                    )
+                    if (durableControl == null || !qualificationActivated) {
+                        val persistedControl = captureControlStore.readIncludingTerminal()
+                        val controlCleared = persistedControl != null && captureControlStore.clearIfMatches(persistedControl)
+                        val reservationReleased = if (qualificationSessionActive && qualificationEvidenceDigest != null) {
+                            controlCleared && captureControlStore.inspect() == MainaCaptureControlInspection.Absent &&
+                                diagnosticsStore.cancelQualificationReservation(
+                                meetingId,
+                                requireNotNull(qualificationEvidenceDigest),
+                            )
+                        } else {
+                            controlCleared
+                        }
+                        if (reservationReleased) {
+                            durableControl = null
+                            qualificationSessionActive = false
+                            qualificationEvidenceDigest = null
+                            controlState = MainaCaptureControlState()
+                            setCaptureState("idle")
+                        } else {
+                            setCaptureState("finalizing")
+                        }
+                        nativeCaptureStatus = mapOf(
+                            "state" to "error",
+                            "lastError" to "Could not activate durable capture ownership",
+                        )
+                        refreshForegroundUi()
+                        return START_STICKY
+                    }
                     applyControlState(startIntentState)
+                    terminalRecoveryRetryUsed = false
                     terminalPublication = MainaTerminalPublicationPolicy.initial(SystemClock.elapsedRealtime())
                     val operation = issueCaptureOperation(
                         kind = MainaCaptureOperationKind.START,
@@ -516,12 +675,69 @@ class MainaRecordingService : Service() {
                 )
             }
             ACTION_ABORT_NATIVE_CAPTURE -> {
-                requestTerminalNativeStop(
-                    MainaCaptureOperationKind.ABORT,
-                    "abort-requested",
-                    abort = true,
+                val discardId = intent.getStringExtra(EXTRA_DISCARD_ID)
+                val meetingId = intent.getStringExtra(EXTRA_MEETING_ID)
+                val inspection = captureControlStore.inspect()
+                val prepared = (inspection as? MainaCaptureControlInspection.Terminal)?.control
+                if (inspection == MainaCaptureControlInspection.Invalid) {
+                    publishTerminalRecoveryRequired(null, nativeCapture.snapshot().asMap())
+                } else if (prepared != null && prepared.meetingId == meetingId &&
+                    prepared.terminalDisposition == MainaCaptureTerminalDisposition.DISCARD &&
+                    prepared.terminalDiscardId == discardId
+                ) {
+                    durableControl = prepared
+                    controlState = prepared.reducerState()
+                    lastCaptureMeetingId = prepared.meetingId
+                    lastCaptureDirectory = prepared.directory
+                    lastCaptureStartedAt = prepared.meetingStartedAt
+                    if (prepared.terminalEffectReady) {
+                        publishDiscardReadyForAck(null, nativeCapture.snapshot().asMap())
+                    } else {
+                        requestTerminalNativeStop(
+                            MainaCaptureOperationKind.ABORT,
+                            "abort-requested",
+                            abort = true,
+                            // prepareDiscard already made this exact terminal
+                            // reducer generation durable. ABORT must operate on
+                            // that owner rather than manufacture a second
+                            // generation that cannot match the SQL tombstone.
+                            requestedTerminalState = prepared.reducerState(),
+                            discardId = discardId,
+                        )
+                    }
+                }
+            }
+            ACTION_ACKNOWLEDGE_NATIVE_DISCARD -> {
+                acknowledgeNativeDiscard(
+                    intent.getStringExtra(EXTRA_MEETING_ID),
+                    intent.getStringExtra(EXTRA_DISCARD_ID),
                 )
             }
+            ACTION_RECONCILE_QUARANTINED_CAPTURE -> {
+                val meetingId = intent.getStringExtra(EXTRA_MEETING_ID)
+                val generation = intent.getStringExtra(EXTRA_CAPTURE_GENERATION)?.toLongOrNull()
+                val terminal = (captureControlStore.inspect() as? MainaCaptureControlInspection.Terminal)?.control
+                if (terminal != null &&
+                    terminal.meetingId == meetingId &&
+                    terminal.generation == generation &&
+                    terminal.terminalDisposition == MainaCaptureTerminalDisposition.SAVE
+                ) {
+                    reconcileTerminalQualificationAfterProcessDeath(terminal)
+                }
+            }
+            ACTION_RETRY_TERMINAL_NATIVE_CAPTURE -> {
+                requestTerminalNativeStop(
+                    MainaCaptureOperationKind.STOP,
+                    "terminal-recovery-retried",
+                    abort = false,
+                    recoveryRetry = true,
+                )
+            }
+            }
+        } else if (commandInspection is MainaCaptureControlInspection.Quarantined) {
+            publishQuarantinedCapture(commandInspection.control)
+        } else {
+            publishInvalidDurableCapture()
         }
         val notification = buildNotification()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
@@ -548,6 +764,7 @@ class MainaRecordingService : Service() {
         }
         isRunning = false
         nativeCapture.latchReadsOffNow()
+        if (activeInstance === this) activeInstance = null
         invalidateCaptureControl("service-destroyed")
         acceptingNativeWork = false
         if (MainaCaptureLifecyclePolicy.shouldQueueDestroyStop(destroyStopQueued)) {
@@ -577,6 +794,12 @@ class MainaRecordingService : Service() {
     }
 
     override fun onBind(intent: Intent?): IBinder? = null
+
+    private fun latchReadsOffForPreparedDiscard(): Boolean = runCatching {
+        if (!::nativeCapture.isInitialized) return@runCatching false
+        nativeCapture.latchReadsOffNow()
+        true
+    }.getOrDefault(false)
 
     private fun createChannel() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
@@ -613,7 +836,12 @@ class MainaRecordingService : Service() {
     private fun terminalPublicationFields(nowElapsedMs: Long = SystemClock.elapsedRealtime()): Map<String, Any?> = mapOf(
         "terminalPublicationState" to terminalPublication.phase.wireValue,
         "terminalReasonCode" to terminalPublication.reasonCode.wireValue,
+        "terminalOperationId" to terminalPublication.ownerOperationId,
         "terminalElapsedMs" to terminalPublication.elapsedMs(nowElapsedMs),
+        "terminalDisposition" to durableControl?.terminalDisposition?.name?.lowercase(),
+        "discardId" to durableControl?.terminalDiscardId,
+        "discardReadyForAck" to (durableControl?.terminalDisposition == MainaCaptureTerminalDisposition.DISCARD &&
+            durableControl?.terminalEffectReady == true),
     )
 
     private fun publishTerminalStatus(
@@ -741,9 +969,36 @@ class MainaRecordingService : Service() {
         event: String,
         abort: Boolean,
         requestedTerminalState: MainaCaptureControlState? = null,
+        recoveryRetry: Boolean = false,
+        discardId: String? = null,
     ) {
         requireMainReducer()
-        if (MainaTerminalPublicationPolicy.shouldCoalesce(
+        val preparedDiscardMayRun = abort && MainaTerminalPublicationPolicy.preparedDiscardMayRun(
+            activeCaptureOperation,
+            controlState,
+            durableControl?.terminalDisposition,
+            durableControl?.terminalDiscardId,
+            durableControl?.terminalEffectReady == true,
+        )
+        if (recoveryRetry) {
+            val current = durableControl
+            val exactRecoveryOwner = current != null &&
+                current.meetingId == lastCaptureMeetingId &&
+                current.directory == lastCaptureDirectory
+            if (!exactRecoveryOwner || !MainaTerminalPublicationPolicy.terminalRecoveryRetryAllowed(
+                    activeCaptureOperation,
+                    controlState,
+                    terminalPublication,
+                    current?.terminalDisposition,
+                    terminalRecoveryRetryUsed,
+                )
+            ) {
+                nativeCaptureStatus = nativeCaptureStatus + terminalPublicationFields()
+                refreshForegroundUi()
+                return
+            }
+            terminalRecoveryRetryUsed = true
+        } else if (!preparedDiscardMayRun && MainaTerminalPublicationPolicy.shouldCoalesce(
                 activeCaptureOperation,
                 controlState,
                 terminalPublication,
@@ -774,6 +1029,12 @@ class MainaRecordingService : Service() {
                 persistControlStateOrThrow(
                     terminalState ?: error("Terminal reducer state was not applied"),
                     event,
+                    terminalDisposition = if (abort) {
+                        MainaCaptureTerminalDisposition.DISCARD
+                    } else {
+                        MainaCaptureTerminalDisposition.SAVE
+                    },
+                    terminalDiscardId = if (abort) discardId else null,
                 )
             },
             queue = {
@@ -905,10 +1166,30 @@ class MainaRecordingService : Service() {
                     )
                 ) {
                     invalidateActiveOperation()
-                    updateControlState(MainaCallInterruptionPolicy.terminal(controlState), failureEvent)
-                    captureControlStore.clear()
-                    durableControl = null
-                    setCaptureState("idle")
+                    val terminalPersisted = updateControlState(
+                        MainaCallInterruptionPolicy.terminal(controlState),
+                        failureEvent,
+                        MainaCaptureTerminalDisposition.SAVE,
+                    )
+                    val terminalCompleted = if (terminalPersisted && qualificationSessionActive) {
+                        val meetingId = lastCaptureMeetingId
+                        val digest = qualificationEvidenceDigest
+                        meetingId != null && digest != null && completeQualificationCaptureControl(meetingId, digest)
+                    } else if (terminalPersisted) {
+                        val current = durableControl
+                        current != null && captureControlStore.clearIfMatches(current).also { cleared ->
+                            if (cleared) durableControl = null
+                        }
+                    } else {
+                        false
+                    }
+                    if (terminalCompleted) {
+                        qualificationSessionActive = false
+                        qualificationEvidenceDigest = null
+                        setCaptureState("idle")
+                    } else {
+                        publishTerminalRecoveryRequired(outcome.operation, outcome.snapshot.asMap())
+                    }
                 }
             } else if (!accepts(outcome.operation)) {
                 nativeCapture.latchReadsOffNow()
@@ -1333,7 +1614,9 @@ class MainaRecordingService : Service() {
             ),
         )
         val enqueued = enqueueNativeWork {
-            val result = runCatching { nativeCapture.stop() }
+            val result = runCatching {
+                nativeCapture.stop()
+            }
             val outcome = NativeOutcome(
                 operation = operation,
                 snapshot = result.getOrElse { nativeCapture.snapshot() },
@@ -1390,9 +1673,48 @@ class MainaRecordingService : Service() {
             publishTerminalRecoveryRequired(outcome.operation, outcome.snapshot.asMap())
             return
         }
-        val durableCompletion = runCatching {
-            if (abort) handleAbortCompletion(outcome.snapshot) else handleStopCompletion(outcome.snapshot)
+        val verifiedTerminalOwner = MainaTerminalEffectAuthorityPolicy.verifiedOwner(
+            inspection = captureControlStore.inspect(),
+            expected = durableControl,
+            operation = outcome.operation,
+            disposition = if (abort) {
+                MainaCaptureTerminalDisposition.DISCARD
+            } else {
+                MainaCaptureTerminalDisposition.SAVE
+            },
+            nativeMeetingId = outcome.snapshot.meetingId,
+        ) ?: run {
+            publishTerminalRecoveryRequired(outcome.operation, outcome.snapshot.asMap())
+            return
+        }
+        durableControl = verifiedTerminalOwner
+        val qualificationMeetingId = verifiedTerminalOwner.meetingId
+        val completionEvidenceDigest = qualificationEvidenceDigest
+        val captureCompletion = runCatching {
+            if (abort) {
+                handleAbortCompletion(outcome.snapshot, verifiedTerminalOwner)
+            } else {
+                handleStopCompletion(
+                    outcome.snapshot,
+                    verifiedTerminalOwner,
+                    clearCaptureControl = !qualificationSessionActive,
+                )
+            }
         }.getOrDefault(false)
+        if (abort && captureCompletion) {
+            activeCaptureOperation = null
+            publishDiscardReadyForAck(outcome.operation.operationId, outcome.snapshot.asMap())
+            return
+        }
+        val diagnosticsCompletion = if (
+            captureCompletion && qualificationSessionActive && completionEvidenceDigest != null
+        ) {
+            runCatching { completeQualificationCaptureControl(qualificationMeetingId, completionEvidenceDigest) }
+                .getOrDefault(false)
+        } else {
+            !qualificationSessionActive
+        }
+        val durableCompletion = captureCompletion && diagnosticsCompletion
         if (MainaTerminalPublicationPolicy.completionPublication(
                 nativeStopped = true,
                 durableCompletion = durableCompletion,
@@ -1415,11 +1737,20 @@ class MainaRecordingService : Service() {
         )
         setCaptureState("idle")
         refreshForegroundUi()
+        qualificationSessionActive = false
+        qualificationEvidenceDigest = null
+        DiagnosticsScheduler.enqueueEvents(this)
+        DiagnosticsScheduler.enqueueArtifacts(this)
     }
 
-    private fun handleStopCompletion(snapshot: MainaNativeAudioCapture.Snapshot): Boolean {
-        val meetingId = snapshot.meetingId ?: lastCaptureMeetingId ?: return false
-        val directory = lastCaptureDirectory ?: return false
+    private fun handleStopCompletion(
+        snapshot: MainaNativeAudioCapture.Snapshot,
+        terminalOwner: MainaDurableCaptureControl,
+        clearCaptureControl: Boolean = true,
+    ): Boolean {
+        val meetingId = terminalOwner.meetingId
+        val directory = terminalOwner.directory
+        if (snapshot.meetingId != meetingId) return false
         // Stop can arrive more than once. Only the accepted terminal operation
         // may hand this meeting to post-processing.
         if (postProcessingHandledMeetingId == meetingId) return true
@@ -1432,7 +1763,7 @@ class MainaRecordingService : Service() {
             outbox.begin(
                 meetingId,
                 directory,
-                lastCaptureStartedAt,
+                terminalOwner.meetingStartedAt,
                 captureEndedAt,
                 0L,
                 0L,
@@ -1450,7 +1781,7 @@ class MainaRecordingService : Service() {
             putExtra(MainaPostProcessingService.EXTRA_MEETING_ID, meetingId)
             putExtra(MainaPostProcessingService.EXTRA_DIRECTORY, directory)
             putExtra(MainaPostProcessingService.EXTRA_CAPTURE_ENDED_AT, captureEndedAt)
-            putExtra(MainaPostProcessingService.EXTRA_MEETING_STARTED_AT, lastCaptureStartedAt)
+            putExtra(MainaPostProcessingService.EXTRA_MEETING_STARTED_AT, terminalOwner.meetingStartedAt)
             putExtra(MainaPostProcessingService.EXTRA_ROUTE_RESTART_COUNT, snapshot.routeRestartCount)
             putExtra(MainaPostProcessingService.EXTRA_CAPTURE_GAP_MS, snapshot.captureGapMs)
         }
@@ -1477,8 +1808,10 @@ class MainaRecordingService : Service() {
         }
         if (launch.isSuccess || recoveryScheduled) {
             return runCatching {
-                captureControlStore.clear()
-                durableControl = null
+                if (clearCaptureControl) {
+                    if (!captureControlStore.clearIfMatches(terminalOwner)) return@runCatching false
+                    durableControl = null
+                }
                 postProcessingHandledMeetingId = meetingId
                 true
             }.getOrDefault(false)
@@ -1486,15 +1819,112 @@ class MainaRecordingService : Service() {
         return false
     }
 
-    private fun handleAbortCompletion(snapshot: MainaNativeAudioCapture.Snapshot): Boolean {
-        // Discard is terminal and never enqueues post-processing.
-        postProcessingHandledMeetingId = snapshot.meetingId ?: lastCaptureMeetingId
+    private fun handleAbortCompletion(
+        snapshot: MainaNativeAudioCapture.Snapshot,
+        terminalOwner: MainaDurableCaptureControl,
+    ): Boolean {
+        // Audio deletion is only the first half of Discard. Retain the exact
+        // terminal control until Expo SQLite commits logical meeting deletion
+        // and sends the matching acknowledgement.
+        val current = terminalOwner
+        if (current.terminalDisposition != MainaCaptureTerminalDisposition.DISCARD ||
+            current.terminalDiscardId == null ||
+            (snapshot.meetingId ?: lastCaptureMeetingId) != current.meetingId
+        ) return false
+        if (!DiagnosticsStore.shared(applicationContext).purgeMeetingDiagnostics(current.meetingId)) return false
+        if (!MainaNativeAudioCapture.deleteCaptureDirectory(current.directory)) return false
+        if (!MainaPostProcessingOutbox.shared(applicationContext).discardMeeting(current.meetingId)) return false
+        val ready = captureControlStore.markTerminalEffectReady(current) ?: return false
+        durableControl = ready
+        postProcessingHandledMeetingId = ready.meetingId
+        return true
+    }
+
+    private fun publishDiscardReadyForAck(operationId: Long?, base: Map<String, Any?>) {
+        publishTerminalStatus(
+            MainaTerminalPublicationPolicy.discardReadyForAck(
+                terminalPublication,
+                operationId,
+                SystemClock.elapsedRealtime(),
+            ),
+            base + mapOf("state" to "finalizing"),
+        )
+        setCaptureState("finalizing")
+        refreshForegroundUi()
+    }
+
+    private fun acknowledgeNativeDiscard(meetingId: String?, discardId: String?) {
+        val current = when (val inspection = captureControlStore.inspect()) {
+            MainaCaptureControlInspection.Absent -> return
+            MainaCaptureControlInspection.Invalid -> {
+                publishTerminalRecoveryRequired(null, nativeCapture.snapshot().asMap())
+                return
+            }
+            is MainaCaptureControlInspection.Quarantined -> return
+            is MainaCaptureControlInspection.Active -> return
+            is MainaCaptureControlInspection.Terminal -> inspection.control
+        }
+        // A duplicate or stale acknowledgement is a safe no-op. It can never
+        // clear a newer owner; the matching caller will time out and retain its
+        // SQLite tombstone for exact recovery.
+        if (current.meetingId != meetingId || current.terminalDiscardId != discardId ||
+            current.terminalDisposition != MainaCaptureTerminalDisposition.DISCARD ||
+            !current.terminalEffectReady
+        ) return
+        if (!MainaPostProcessingOutbox.shared(applicationContext).discardMeeting(current.meetingId)) {
+            publishTerminalRecoveryRequired(null, nativeCapture.snapshot().asMap())
+            return
+        }
+        if (current.qualificationSession) {
+            val digest = current.qualificationEvidenceDigest
+                ?: return publishTerminalRecoveryRequired(null, nativeCapture.snapshot().asMap())
+            val diagnostics = DiagnosticsStore.shared(this)
+            if (!diagnostics.markQualificationTerminalReady(current.meetingId, digest)) {
+                publishTerminalRecoveryRequired(null, nativeCapture.snapshot().asMap())
+                return
+            }
+        }
+        if (!captureControlStore.clearIfMatches(current)) {
+            publishTerminalRecoveryRequired(null, nativeCapture.snapshot().asMap())
+            return
+        }
+        durableControl = null
+        if (current.qualificationSession) {
+            val digest = requireNotNull(current.qualificationEvidenceDigest)
+            if (!DiagnosticsStore.shared(this).completeQualificationTerminal(current.meetingId, digest)) {
+                publishTerminalRecoveryRequired(null, nativeCapture.snapshot().asMap())
+                return
+            }
+        }
+        qualificationSessionActive = false
+        qualificationEvidenceDigest = null
+        controlState = MainaCaptureControlState()
         lastCaptureMeetingId = null
         lastCaptureDirectory = null
         lastCaptureStartedAt = 0L
-        captureControlStore.clear()
+        terminalPublication = MainaTerminalPublicationPolicy.initial(SystemClock.elapsedRealtime())
+        nativeCaptureStatus = mapOf("state" to "idle") + terminalPublicationFields()
+        setCaptureState("idle")
+        refreshForegroundUi()
+    }
+
+    /**
+     * Finalize the cross-store qualification protocol only after capture has a
+     * durable terminal handoff. The exact terminal control is cleared before
+     * diagnostics return to ordinary delivery, so every crash boundary is
+     * restart-reconcilable and no unrelated control can be erased.
+     */
+    private fun completeQualificationCaptureControl(meetingId: String, evidenceDigest: String): Boolean {
+        val current = durableControl ?: return false
+        if (!current.qualificationSession || current.meetingId != meetingId ||
+            current.qualificationEvidenceDigest != evidenceDigest ||
+            current.phase != MainaCaptureControlPhase.TERMINAL
+        ) return false
+        val diagnostics = DiagnosticsStore.shared(this)
+        if (!diagnostics.markQualificationTerminalReady(meetingId, evidenceDigest)) return false
+        if (!captureControlStore.clearIfMatches(current)) return false
         durableControl = null
-        return true
+        return diagnostics.completeQualificationTerminal(meetingId, evidenceDigest)
     }
 
     private fun refreshForegroundUi() {
@@ -1852,20 +2282,27 @@ class MainaRecordingService : Service() {
         updateCommunicationWatch()
     }
 
-    private fun persistControlStateOrThrow(nextState: MainaCaptureControlState, event: String) {
+    private fun persistControlStateOrThrow(
+        nextState: MainaCaptureControlState,
+        event: String,
+        terminalDisposition: MainaCaptureTerminalDisposition? = durableControl?.terminalDisposition,
+        terminalDiscardId: String? = durableControl?.terminalDiscardId,
+    ) {
         requireMainReducer()
         val currentDurable = durableControl
         val snapshot = nativeCapture.snapshot()
         if (currentDurable != null) {
-            check(captureControlStore.update(currentDurable, nextState, nativeCapture.snapshot())) {
+            check(captureControlStore.update(
+                currentDurable,
+                nextState,
+                nativeCapture.snapshot(),
+                terminalDisposition,
+                terminalDiscardId,
+            )) {
                 "Could not persist native capture control state"
             }
-            durableControl = if (nextState.phase == MainaCaptureControlPhase.TERMINAL) {
-                null
-            } else {
-                captureControlStore.read()
-                    ?: error("Persisted capture control state could not be re-read")
-            }
+            durableControl = captureControlStore.readIncludingTerminal()
+                ?: error("Persisted capture control state could not be re-read")
         }
         if (::nativeCapture.isInitialized) {
             nativeCapture.persistControlTransition(
@@ -1883,6 +2320,7 @@ class MainaRecordingService : Service() {
     }
 
     private fun recordControlPersistenceFailure(event: String, cause: Throwable) {
+        if (adoptExternallyPreparedDiscard()) return
         val message = cause.message ?: cause.javaClass.simpleName
         nativeCaptureStatus = nativeCaptureStatus + mapOf(
             "lastError" to "Capture control durability failed: $message",
@@ -1898,9 +2336,35 @@ class MainaRecordingService : Service() {
         }
     }
 
-    private fun updateControlState(nextState: MainaCaptureControlState, event: String): Boolean {
+    private fun adoptExternallyPreparedDiscard(): Boolean {
+        requireMainReducer()
+        val prepared = (captureControlStore.inspect() as? MainaCaptureControlInspection.Terminal)?.control
+            ?: return false
+        if (prepared.terminalDisposition != MainaCaptureTerminalDisposition.DISCARD ||
+            prepared.terminalDiscardId == null
+        ) return false
+        cancelCommunicationRetryTimer()
+        invalidateActiveOperation()
+        nativeCapture.latchReadsOffNow()
+        durableControl = prepared
+        controlState = prepared.reducerState()
+        lastCaptureMeetingId = prepared.meetingId
+        lastCaptureDirectory = prepared.directory
+        lastCaptureStartedAt = prepared.meetingStartedAt
+        setCaptureState("finalizing")
+        nativeCaptureStatus = nativeCapture.snapshot().asMap() + terminalPublicationFields()
+        refreshForegroundUi()
+        return true
+    }
+
+    private fun updateControlState(
+        nextState: MainaCaptureControlState,
+        event: String,
+        terminalDisposition: MainaCaptureTerminalDisposition? = durableControl?.terminalDisposition,
+        terminalDiscardId: String? = durableControl?.terminalDiscardId,
+    ): Boolean {
         applyControlState(nextState)
-        return runCatching { persistControlStateOrThrow(nextState, event) }
+        return runCatching { persistControlStateOrThrow(nextState, event, terminalDisposition, terminalDiscardId) }
             .onFailure { recordControlPersistenceFailure(event, it) }
             .isSuccess
     }
@@ -1908,12 +2372,107 @@ class MainaRecordingService : Service() {
     private fun invalidateCaptureControl(event: String) {
         cancelCommunicationRetryTimer()
         invalidateActiveOperation()
-        updateControlState(MainaCallInterruptionPolicy.terminal(controlState), event)
+        if (controlState.phase == MainaCaptureControlPhase.TERMINAL &&
+            durableControl?.terminalDisposition != null
+        ) {
+            // The write-ahead terminal record already owns restart semantics.
+            // Teardown must not rewrite its disposition or durability clock.
+            return
+        }
+        val lifecycleDisposition = MainaCaptureTerminalRecoveryPolicy.dispositionForLifecycleInvalidation(
+            controlState.phase,
+            durableControl?.terminalDisposition,
+        )
+        if (controlState.phase == MainaCaptureControlPhase.TERMINAL && lifecycleDisposition == null) {
+            // An unclassified terminal owner must remain fail closed. Never
+            // manufacture SAVE during teardown because that could resurrect a
+            // previously persisted user Discard request.
+            return
+        }
+        updateControlState(
+            MainaCallInterruptionPolicy.terminal(controlState),
+            event,
+            lifecycleDisposition,
+        )
+    }
+
+    private fun publishInvalidDurableCapture() {
+        nativeCapture.latchReadsOffNow()
+        captureState = "finalizing"
+        nativeCaptureStatus = mapOf(
+            "state" to "error",
+            "lastError" to "Durable capture ownership is invalid",
+        ) + terminalPublicationFields()
+        refreshForegroundUi()
+    }
+
+    private fun publishQuarantinedCapture(quarantined: MainaDurableCaptureControl) {
+        durableControl = quarantined
+        controlState = quarantined.reducerState()
+        lastCaptureMeetingId = quarantined.meetingId
+        lastCaptureDirectory = quarantined.directory
+        lastCaptureStartedAt = quarantined.meetingStartedAt
+        nativeCapture.latchReadsOffNow()
+        captureState = "finalizing"
+        nativeCaptureStatus = mapOf(
+            "state" to "error",
+            "meetingId" to quarantined.meetingId,
+            "lastError" to "Legacy terminal capture needs an explicit recovery choice",
+            "quarantineReason" to "legacy_terminal_disposition_missing",
+        ) + terminalPublicationFields()
+        refreshForegroundUi()
     }
 
     private fun restoreDurableCaptureControl() {
-        val restored = captureControlStore.read() ?: return
+        val diagnostics = DiagnosticsStore.shared(this)
+        val inspection = captureControlStore.inspect()
+        if (inspection == MainaCaptureControlInspection.Absent) {
+            // RESERVED+ABSENT is a legitimate in-process handoff between the
+            // JS authorization bridge and ACTION_START_NATIVE_CAPTURE. Only the
+            // app-start reconciliation API may classify it as an abandoned
+            // pre-capture reservation.
+            return
+        }
+        if (inspection == MainaCaptureControlInspection.Invalid) {
+            publishInvalidDurableCapture()
+            return
+        }
+        if (inspection is MainaCaptureControlInspection.Quarantined) {
+            publishQuarantinedCapture(inspection.control)
+            return
+        }
+        if (inspection is MainaCaptureControlInspection.Terminal) {
+            reconcileTerminalQualificationAfterProcessDeath(inspection.control)
+            return
+        }
+        val restored = (inspection as MainaCaptureControlInspection.Active).control
+        if (restored.qualificationSession) {
+            val digest = restored.qualificationEvidenceDigest ?: return
+            val ownershipReady = when (diagnostics.qualificationRecoveryAction(inspection)) {
+                MainaQualificationRecoveryAction.ACTIVATE_CAPTURE ->
+                    diagnostics.activateQualificationSession(restored.meetingId, digest)
+                MainaQualificationRecoveryAction.RESTORE_CAPTURE -> true
+                else -> false
+            }
+            if (!ownershipReady) {
+                captureState = "finalizing"
+                nativeCaptureStatus = mapOf(
+                    "state" to "error",
+                    "lastError" to "Qualification capture ownership is inconsistent",
+                ) + terminalPublicationFields()
+                return
+            }
+        } else if (diagnostics.isQualificationSessionActive()) {
+            captureState = "finalizing"
+            nativeCaptureStatus = mapOf(
+                "state" to "error",
+                "lastError" to "Qualification diagnostics ownership is unresolved",
+            ) + terminalPublicationFields()
+            return
+        }
         if (!MainaCallInterruptionPolicy.shouldRestoreAfterProcessDeath(restored.reducerState())) return
+        qualificationSessionActive = restored.qualificationSession
+        qualificationEvidenceDigest = restored.qualificationEvidenceDigest
         val recoveryDisposition = MainaCallInterruptionPolicy.processDeathRecoveryDisposition(
             restored.reducerState(),
         )
@@ -1988,6 +2547,125 @@ class MainaRecordingService : Service() {
         }
     }
 
+    private fun reconcileTerminalQualificationAfterProcessDeath(restored: MainaDurableCaptureControl) {
+        durableControl = restored
+        controlState = restored.reducerState()
+        lastCaptureMeetingId = restored.meetingId
+        lastCaptureDirectory = restored.directory
+        lastCaptureStartedAt = restored.meetingStartedAt
+        captureState = "finalizing"
+        nativeCaptureStatus = mapOf(
+            "state" to "error",
+            "lastError" to "Terminal capture reconciliation is required",
+        ) + terminalPublicationFields()
+        if (restored.terminalDisposition == MainaCaptureTerminalDisposition.DISCARD) {
+            val terminalEffectComplete = restored.terminalEffectReady || (
+                DiagnosticsStore.shared(applicationContext).purgeMeetingDiagnostics(restored.meetingId) &&
+                    discardInterruptedCapture(restored) &&
+                    MainaPostProcessingOutbox.shared(applicationContext).discardMeeting(restored.meetingId)
+                )
+            val ready = when {
+                !terminalEffectComplete -> null
+                restored.terminalEffectReady -> restored
+                else -> captureControlStore.markTerminalEffectReady(restored)
+            }
+            if (ready != null) {
+                durableControl = ready
+                publishDiscardReadyForAck(null, nativeCaptureStatus)
+            }
+            return
+        }
+        if (!restored.qualificationSession) {
+            val terminalEffectComplete = when (MainaCaptureTerminalRecoveryPolicy.restartAction(
+                requireNotNull(restored.terminalDisposition),
+            )) {
+                MainaTerminalRestartAction.PRESERVE_FOR_POST_PROCESSING -> preserveInterruptedCapture(restored)
+                MainaTerminalRestartAction.DELETE_CAPTURE -> discardInterruptedCapture(restored)
+            }
+            if (terminalEffectComplete && captureControlStore.clearIfMatches(restored)) {
+                controlState = MainaCaptureControlState()
+                captureState = "idle"
+                nativeCaptureStatus = mapOf("state" to "idle") + terminalPublicationFields()
+            }
+            return
+        }
+        val digest = restored.qualificationEvidenceDigest ?: return
+        val diagnostics = DiagnosticsStore.shared(this)
+        val recoveryAction = diagnostics.qualificationRecoveryAction(
+            MainaCaptureControlInspection.Terminal(restored),
+        )
+        val terminalEffectComplete = when (MainaCaptureTerminalRecoveryPolicy.restartAction(
+            requireNotNull(restored.terminalDisposition),
+        )) {
+            MainaTerminalRestartAction.PRESERVE_FOR_POST_PROCESSING -> when (recoveryAction) {
+                MainaQualificationRecoveryAction.PRESERVE_TERMINAL -> preserveInterruptedCapture(restored)
+                MainaQualificationRecoveryAction.CLEAR_TERMINAL -> true
+                else -> false
+            }
+            MainaTerminalRestartAction.DELETE_CAPTURE -> when (recoveryAction) {
+                MainaQualificationRecoveryAction.PRESERVE_TERMINAL,
+                MainaQualificationRecoveryAction.CLEAR_TERMINAL,
+                -> discardInterruptedCapture(restored)
+                else -> false
+            }
+        }
+        val diagnosticsReady = when (recoveryAction) {
+            MainaQualificationRecoveryAction.PRESERVE_TERMINAL ->
+                terminalEffectComplete && diagnostics.markQualificationTerminalReady(restored.meetingId, digest)
+            MainaQualificationRecoveryAction.CLEAR_TERMINAL -> terminalEffectComplete
+            else -> false
+        }
+        if (!diagnosticsReady || !captureControlStore.clearIfMatches(restored)) return
+        durableControl = null
+        if (!diagnostics.completeQualificationTerminal(restored.meetingId, digest)) return
+        qualificationSessionActive = false
+        qualificationEvidenceDigest = null
+        controlState = MainaCaptureControlState()
+        captureState = "idle"
+        nativeCaptureStatus = mapOf("state" to "idle") + terminalPublicationFields()
+    }
+
+    private fun preserveInterruptedCapture(restored: MainaDurableCaptureControl): Boolean {
+        val captureEndedAt = System.currentTimeMillis()
+        val outbox = MainaPostProcessingOutbox.shared(applicationContext)
+        if (!runCatching {
+                outbox.begin(
+                    restored.meetingId,
+                    restored.directory,
+                    restored.meetingStartedAt,
+                    captureEndedAt,
+                    0L,
+                    0L,
+                    0,
+                    0,
+                    0,
+                    restored.captureGapMs,
+                )
+            }.isSuccess
+        ) return false
+        val intent = Intent(this, MainaPostProcessingService::class.java).apply {
+            action = MainaPostProcessingService.ACTION_START
+            putExtra(MainaPostProcessingService.EXTRA_MEETING_ID, restored.meetingId)
+            putExtra(MainaPostProcessingService.EXTRA_DIRECTORY, restored.directory)
+            putExtra(MainaPostProcessingService.EXTRA_CAPTURE_ENDED_AT, captureEndedAt)
+            putExtra(MainaPostProcessingService.EXTRA_MEETING_STARTED_AT, restored.meetingStartedAt)
+            putExtra(MainaPostProcessingService.EXTRA_ROUTE_RESTART_COUNT, 0)
+            putExtra(MainaPostProcessingService.EXTRA_CAPTURE_GAP_MS, restored.captureGapMs)
+        }
+        if (runCatching {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) startForegroundService(intent) else startService(intent)
+            }.isSuccess
+        ) return true
+        return runCatching {
+            outbox.defer(restored.meetingId, "Saved audio is waiting for local transcription")
+            MainaPostProcessingRecoveryScheduler.enqueue(applicationContext, restored.meetingId)
+        }.isSuccess
+    }
+
+    private fun discardInterruptedCapture(restored: MainaDurableCaptureControl): Boolean =
+        runCatching { MainaNativeAudioCapture.deleteCaptureDirectory(restored.directory) }
+            .getOrDefault(false)
+
     private fun emitServiceHeartbeat() {
         if (::nativeCapture.isInitialized && captureState != "idle") {
             nativeCaptureStatus = nativeCaptureStatus + nativeCapture.snapshot().asMap() + mapOf(
@@ -2023,6 +2701,7 @@ class MainaRecordingService : Service() {
         message: String,
         payload: Map<String, Any?>,
     ) {
+        if (!MainaQualificationSessionPolicy.diagnosticsAllowed(qualificationSessionActive)) return
         val store = DiagnosticsStore.shared(this)
         if (!store.config().enabled) return
         store.enqueueEvents(

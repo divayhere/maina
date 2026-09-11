@@ -218,6 +218,7 @@ export interface Meeting {
   audioCleanupState?: AudioCleanupState;
   audioCleanupRetryCount?: number;
   audioCleanupNextRetryAt?: number | null;
+  qualificationEvidenceDigest?: string | null;
 }
 
 interface Row {
@@ -277,6 +278,7 @@ interface Row {
   audio_cleanup_state: AudioCleanupState;
   audio_cleanup_retry_count: number;
   audio_cleanup_next_retry_at: number | null;
+  qualification_evidence_digest: string | null;
 }
 
 function parseJsonList(value: string | null | undefined): string[] {
@@ -358,6 +360,7 @@ const toMeeting = (r: Row): Meeting => ({
   audioCleanupState: r.audio_cleanup_state ?? 'not_due',
   audioCleanupRetryCount: Math.max(0, r.audio_cleanup_retry_count ?? 0),
   audioCleanupNextRetryAt: r.audio_cleanup_next_retry_at,
+  qualificationEvidenceDigest: r.qualification_evidence_digest,
 });
 
 export interface TodoItem {
@@ -529,11 +532,13 @@ export async function createMeeting(m: {
   audioUri?: string | null;
   segmentCount?: number;
   status?: MeetingStatus;
+  qualificationEvidenceDigest?: string | null;
 }): Promise<void> {
   const db = await getDb();
   await db.runAsync(
-    `INSERT INTO meetings (id, title, started_at, duration_ms, audio_uri, status, segment_count, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO meetings (
+       id, title, started_at, duration_ms, audio_uri, status, segment_count, updated_at, qualification_evidence_digest
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [
       m.id,
       m.title,
@@ -543,6 +548,7 @@ export async function createMeeting(m: {
       m.status ?? 'recorded',
       m.segmentCount ?? 0,
       Date.now(),
+      m.qualificationEvidenceDigest ?? null,
     ],
   );
   await updateMeetingPipelineStage({
@@ -587,8 +593,9 @@ export async function listMeetingsNeedingSummary(now = Date.now()): Promise<Meet
             (SELECT COUNT(*) FROM todo_items t WHERE t.meeting_id = m.id AND t.done = 0) AS open_todo_count,
             (SELECT COUNT(*) FROM todo_items t WHERE t.meeting_id = m.id) AS total_todo_count
      FROM meetings m
-     WHERE m.summary_status IN ('queued', 'running')
-        OR (m.summary_status = 'retryable' AND (m.cloud_notes_next_retry_at IS NULL OR m.cloud_notes_next_retry_at <= ?))
+     WHERE m.qualification_evidence_digest IS NULL
+       AND (m.summary_status IN ('queued', 'running')
+         OR (m.summary_status = 'retryable' AND (m.cloud_notes_next_retry_at IS NULL OR m.cloud_notes_next_retry_at <= ?)))
      ORDER BY m.started_at DESC`,
     [now],
   );
@@ -601,6 +608,7 @@ export async function getNextMeetingPacketRetryAt(): Promise<number | null> {
     SELECT MIN(cloud_notes_next_retry_at) AS next_retry_at
     FROM meetings
     WHERE summary_status = 'retryable'
+      AND qualification_evidence_digest IS NULL
       AND cloud_notes_next_retry_at IS NOT NULL
   `);
   return row?.next_retry_at ?? null;
@@ -619,6 +627,7 @@ export async function listMeetingsEligibleForSummaryQueue(options?: {
             (SELECT COUNT(*) FROM todo_items t WHERE t.meeting_id = m.id) AS total_todo_count
      FROM meetings m
      WHERE m.status IN ('transcribed', 'transcript_partial', 'summarizing', 'summarized')
+       AND m.qualification_evidence_digest IS NULL
        AND (
          m.summary_status IN ('idle', 'failed', 'queued', 'running')
          OR (
@@ -639,9 +648,12 @@ export async function listMeetingsNeedingKnowledgeCloudSync(now = Date.now()): P
             (SELECT COUNT(*) FROM todo_items t WHERE t.meeting_id = m.id AND t.done = 0) AS open_todo_count,
             (SELECT COUNT(*) FROM todo_items t WHERE t.meeting_id = m.id) AS total_todo_count
      FROM meetings m
-     WHERE m.knowledge_cloud_sync_status IN ('sync_queued', 'syncing')
-        OR (m.knowledge_cloud_sync_status IN ('sync_failed_retryable', 'sync_blocked_budget')
-            AND (m.knowledge_cloud_next_retry_at IS NULL OR m.knowledge_cloud_next_retry_at <= ?))
+     WHERE m.qualification_evidence_digest IS NULL
+       AND (
+         m.knowledge_cloud_sync_status IN ('sync_queued', 'syncing')
+         OR (m.knowledge_cloud_sync_status IN ('sync_failed_retryable', 'sync_blocked_budget')
+             AND (m.knowledge_cloud_next_retry_at IS NULL OR m.knowledge_cloud_next_retry_at <= ?))
+       )
      ORDER BY m.started_at DESC`,
     [now],
   );
@@ -668,6 +680,7 @@ export async function listMeetingsEligibleForKnowledgeCloudQueueWithOptions(opti
             (SELECT COUNT(*) FROM todo_items t WHERE t.meeting_id = m.id) AS total_todo_count
      FROM meetings m
      WHERE m.status IN ('transcribed', 'summarized')
+       AND m.qualification_evidence_digest IS NULL
        AND m.summary_status NOT IN ('queued', 'running')
        AND m.knowledge_cloud_sync_status IN (${eligibleStatuses})
        AND (
@@ -2501,8 +2514,11 @@ export async function deleteMeeting(id: string): Promise<void> {
   log.info('meetings', 'deleted', { id });
 }
 
-export async function repairStoredRecordingReferences(): Promise<number> {
+export async function repairStoredRecordingReferences(
+  protectedMeetingIds: readonly string[] = [],
+): Promise<number> {
   const db = await getDb();
+  const protectedIds = new Set(protectedMeetingIds);
   const meetings = await db.getAllAsync<{ id: string; audio_uri: string }>(
     `SELECT id, audio_uri FROM meetings WHERE audio_uri IS NOT NULL`,
   );
@@ -2512,12 +2528,14 @@ export async function repairStoredRecordingReferences(): Promise<number> {
   let changes = 0;
   await db.withTransactionAsync(async () => {
     for (const row of meetings) {
+      if (protectedIds.has(row.id)) continue;
       const portable = storeAudioUri(row.audio_uri);
       if (!portable || portable === row.audio_uri) continue;
       await db.runAsync(`UPDATE meetings SET audio_uri = ?, updated_at = ? WHERE id = ?`, [portable, Date.now(), row.id]);
       changes += 1;
     }
     for (const row of segments) {
+      if (protectedIds.has(row.meeting_id)) continue;
       const portable = storeAudioUri(row.audio_uri);
       if (!portable || portable === row.audio_uri) continue;
       await db.runAsync(

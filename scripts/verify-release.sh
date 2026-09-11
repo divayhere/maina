@@ -16,6 +16,8 @@ npm run verify:mkc-memory-contracts
 npm run verify:mkc-meeting-tags
 npm run verify:evidence-ledger
 npm run verify:native-recorder
+npm run verify:android-qualification-diagnostics
+npm run verify:android-lifecycle-qualification
 npm run typecheck
 npm test
 npm run lint

@@ -126,9 +126,44 @@ class MainaRecorderModule : Module() {
             Unit
         }
 
+        AsyncFunction("consumeAndroidQualificationSession") { runId: String ->
+            MainaQualificationSessionAuthority.consume(requireContext(), runId)
+        }
+
+        AsyncFunction("beginAndroidQualificationDiagnostics") { meetingId: String, evidenceDigest: String ->
+            DiagnosticsStore.shared(requireContext()).beginQualificationSession(meetingId, evidenceDigest)
+        }
+
+        AsyncFunction("cancelAndroidQualificationDiagnosticsBeforeCapture") { meetingId: String, evidenceDigest: String ->
+            val control = MainaCaptureControlStore(requireContext()).inspect()
+            control == MainaCaptureControlInspection.Absent &&
+                DiagnosticsStore.shared(requireContext()).cancelQualificationReservation(meetingId, evidenceDigest)
+        }
+
+        AsyncFunction("isAndroidQualificationSessionActive") {
+            val context = requireContext()
+            val controls = MainaCaptureControlStore(context).inspect()
+            val diagnostics = DiagnosticsStore.shared(context)
+            if (diagnostics.qualificationRecoveryAction(controls) in setOf(
+                    MainaQualificationRecoveryAction.CANCEL_RESERVATION,
+                    MainaQualificationRecoveryAction.COMPLETE_TERMINAL,
+                )
+            ) {
+                diagnostics.reconcileAbsentCaptureControl()
+            }
+            diagnostics.isQualificationSessionActive() || when (controls) {
+                is MainaCaptureControlInspection.Active -> controls.control.qualificationSession
+                is MainaCaptureControlInspection.Terminal -> controls.control.qualificationSession
+                is MainaCaptureControlInspection.Quarantined -> false
+                MainaCaptureControlInspection.Absent -> false
+                MainaCaptureControlInspection.Invalid ->
+                    throw IllegalStateException("Durable capture ownership is invalid")
+            }
+        }
+
         // These calls are deliberately separate from Expo SpeechRecognizer.
         // They are the staged bridge for the service-owned AudioRecord engine.
-        AsyncFunction("startNativeCapture") { meetingId: String, directory: String, sourceMode: String, chunkDurationMs: Long, meetingStartedAt: Long ->
+        AsyncFunction("startNativeCapture") { meetingId: String, directory: String, sourceMode: String, chunkDurationMs: Long, meetingStartedAt: Long, qualificationSession: Boolean, qualificationEvidenceDigest: String? ->
             require(meetingId.isNotBlank()) { "meetingId is required" }
             require(directory.isNotBlank()) { "directory is required" }
             startControlService(
@@ -141,6 +176,8 @@ class MainaRecorderModule : Module() {
                     MainaRecordingService.EXTRA_CHUNK_DURATION_MS to chunkDurationMs.toString(),
                     MainaRecordingService.EXTRA_MEETING_STARTED_AT to meetingStartedAt.toString(),
                 ),
+                qualificationSession = qualificationSession,
+                qualificationEvidenceDigest = qualificationEvidenceDigest,
             )
             mapOf("requested" to true)
         }
@@ -160,8 +197,107 @@ class MainaRecorderModule : Module() {
             mapOf("requested" to true)
         }
 
-        AsyncFunction("abortNativeCapture") {
-            startControlService(requireContext(), MainaRecordingService.ACTION_ABORT_NATIVE_CAPTURE)
+        Function("prepareNativeDiscard") { meetingId: String, discardId: String ->
+            val store = MainaCaptureControlStore(requireContext())
+            when (val result = store.prepareDiscard(
+                meetingId,
+                discardId,
+                MainaRecordingService::latchReadsOffForPreparedDiscardIfRunning,
+            )) {
+                is MainaDiscardPreparation.Prepared -> mapOf(
+                    "prepared" to true,
+                    "state" to if (result.control.terminalEffectReady) "ready_for_ack" else "pending",
+                    "meetingId" to result.control.meetingId,
+                    "discardId" to result.control.terminalDiscardId,
+                    "directory" to result.control.directory,
+                    "qualificationEvidenceDigest" to result.control.qualificationEvidenceDigest,
+                    "generation" to result.control.generation,
+                )
+                MainaDiscardPreparation.NoCapture -> mapOf("prepared" to false, "state" to "none")
+                MainaDiscardPreparation.Blocked -> mapOf("prepared" to false, "state" to "blocked")
+            }
+        }
+
+        Function("getPendingNativeDiscard") {
+            when (val inspection = MainaCaptureControlStore(requireContext()).inspect()) {
+                MainaCaptureControlInspection.Absent -> mapOf("state" to "none")
+                MainaCaptureControlInspection.Invalid -> mapOf("state" to "blocked")
+                is MainaCaptureControlInspection.Active -> mapOf("state" to "none")
+                is MainaCaptureControlInspection.Quarantined -> mapOf("state" to "none")
+                is MainaCaptureControlInspection.Terminal -> if (
+                    inspection.control.terminalDisposition == MainaCaptureTerminalDisposition.DISCARD &&
+                    inspection.control.terminalDiscardId != null
+                ) {
+                    mapOf(
+                        "state" to if (inspection.control.terminalEffectReady) "ready_for_ack" else "pending",
+                        "meetingId" to inspection.control.meetingId,
+                        "discardId" to inspection.control.terminalDiscardId,
+                        "directory" to inspection.control.directory,
+                        "qualificationEvidenceDigest" to inspection.control.qualificationEvidenceDigest,
+                        "generation" to inspection.control.generation,
+                    )
+                } else {
+                    mapOf("state" to "none")
+                }
+            }
+        }
+
+        Function("getNativeCaptureQuarantine") {
+            when (val inspection = MainaCaptureControlStore(requireContext()).inspect()) {
+                is MainaCaptureControlInspection.Quarantined -> mapOf(
+                    "state" to "legacy_terminal",
+                    "meetingId" to inspection.control.meetingId,
+                    "reason" to "legacy_terminal_disposition_missing",
+                )
+                MainaCaptureControlInspection.Invalid -> mapOf("state" to "blocked")
+                else -> mapOf("state" to "none")
+            }
+        }
+
+        AsyncFunction("recoverNativeCaptureQuarantine") { meetingId: String ->
+            val recovered = MainaCaptureControlStore(requireContext()).recoverQuarantinedAsSave(
+                meetingId,
+                MainaRecordingService::latchReadsOffForPreparedDiscardIfRunning,
+            )
+            if (recovered != null) {
+                startControlService(
+                    requireContext(),
+                    MainaRecordingService.ACTION_RECONCILE_QUARANTINED_CAPTURE,
+                    mapOf(
+                        MainaRecordingService.EXTRA_MEETING_ID to recovered.meetingId,
+                        MainaRecordingService.EXTRA_CAPTURE_GENERATION to recovered.generation.toString(),
+                    ),
+                )
+            }
+            mapOf("requested" to (recovered != null))
+        }
+
+        AsyncFunction("abortNativeCapture") { meetingId: String, discardId: String ->
+            startControlService(
+                requireContext(),
+                MainaRecordingService.ACTION_ABORT_NATIVE_CAPTURE,
+                mapOf(
+                    MainaRecordingService.EXTRA_MEETING_ID to meetingId,
+                    MainaRecordingService.EXTRA_DISCARD_ID to discardId,
+                ),
+            )
+            mapOf("requested" to true)
+        }
+
+        AsyncFunction("acknowledgeNativeDiscard") { meetingId: String, discardId: String ->
+            startControlService(
+                requireContext(),
+                MainaRecordingService.ACTION_ACKNOWLEDGE_NATIVE_DISCARD,
+                mapOf(
+                    MainaRecordingService.EXTRA_MEETING_ID to meetingId,
+                    MainaRecordingService.EXTRA_DISCARD_ID to discardId,
+                ),
+            )
+            mapOf("requested" to true)
+        }
+
+        AsyncFunction("retryNativeCaptureFinalization") {
+            startControlService(requireContext(), MainaRecordingService.ACTION_RETRY_TERMINAL_NATIVE_CAPTURE)
             mapOf("requested" to true)
         }
 
@@ -293,6 +429,12 @@ class MainaRecorderModule : Module() {
 
         AsyncFunction("deleteNativeCaptureDirectory") { directory: String ->
             MainaNativeAudioCapture.deleteCaptureDirectory(directory)
+        }
+
+        AsyncFunction("deleteNativeDiscardDirectory") { meetingId: String, directory: String ->
+            val store = MainaCaptureControlStore(requireContext())
+            store.captureDirectoryMatchesMeeting(meetingId, directory) &&
+                MainaNativeAudioCapture.deleteCaptureDirectory(directory)
         }
 
         AsyncFunction("getQwenAsrStatus") {
@@ -447,9 +589,19 @@ class MainaRecorderModule : Module() {
     private fun modelPacks(): MainaModelPackLifecycle =
         modelPackLifecycle ?: MainaModelPackLifecycle(requireContext()).also { modelPackLifecycle = it }
 
-    private fun startControlService(context: Context, action: String, extras: Map<String, String> = emptyMap()) {
+    private fun startControlService(
+        context: Context,
+        action: String,
+        extras: Map<String, String> = emptyMap(),
+        qualificationSession: Boolean? = null,
+        qualificationEvidenceDigest: String? = null,
+    ) {
         val intent = Intent(context, MainaRecordingService::class.java).setAction(action)
         extras.forEach { (key, value) -> intent.putExtra(key, value) }
+        qualificationSession?.let { intent.putExtra(MainaRecordingService.EXTRA_QUALIFICATION_SESSION, it) }
+        qualificationEvidenceDigest?.let {
+            intent.putExtra(MainaRecordingService.EXTRA_QUALIFICATION_EVIDENCE_DIGEST, it)
+        }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) context.startForegroundService(intent)
         else context.startService(intent)
     }

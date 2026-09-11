@@ -19,6 +19,7 @@ class MainaShellCommandPolicyTest {
 
     @Test
     fun exactCommandsAreStateBound() {
+        assertTrue(allowed("arm_qualification", "idle"))
         assertTrue(allowed("start", "idle"))
         assertTrue(allowed("pause", "recording"))
         assertTrue(allowed("resume", "paused"))
@@ -30,6 +31,7 @@ class MainaShellCommandPolicyTest {
         assertFalse(allowed("start", "recording"))
         assertFalse(allowed("resume", "idle"))
         assertFalse(allowed("stop", "idle"))
+        assertFalse(allowed("arm_qualification", "recording"))
         assertFalse(allowed("unknown", "idle"))
     }
 

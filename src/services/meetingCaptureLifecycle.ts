@@ -37,6 +37,7 @@ import { cleanupTerminalMeetingAudio } from '@/services/audioRetention';
 import { notifyMeetingPipelineChanged } from '@/services/meetingPipelineSignals';
 import { getNativeCaptureMetrics } from '@/services/nativeCaptureMetrics';
 import { runLocalAsrPipeline } from '@/services/localAsrPipeline';
+import { readNativeCaptureAutomaticWorkFence } from '@/services/nativeCaptureQuarantineFence';
 import { drainMeetingPacketUntilSettled, maybeQueueMeetingPacket } from '@/services/meetingPacket';
 import { reconcilePendingMainaKnowledgeCloudSyncs } from '@/services/mainaKnowledgeCloud';
 import {
@@ -386,7 +387,14 @@ async function launchNativePostProcessing(
   return true;
 }
 
-async function reconcilePendingNativeMeetingWorkInternal(): Promise<number> {
+async function reconcilePendingNativeMeetingWorkInternal(
+  explicitlyProtectedMeetingIds: readonly string[],
+): Promise<number> {
+  const nativeFence = readNativeCaptureAutomaticWorkFence();
+  const protectedMeetingIds = new Set([
+    ...explicitlyProtectedMeetingIds,
+    ...nativeFence.protectedMeetingIds,
+  ]);
   const nativeStatus = await getNativeCaptureStatusAsync().catch(() => null);
   // The native outbox heartbeat is durable, so it can still look active for
   // up to two minutes after Android kills the isolated ASR process. Trust that
@@ -397,6 +405,7 @@ async function reconcilePendingNativeMeetingWorkInternal(): Promise<number> {
   let resumed = 0;
 
   for (const meeting of meetings) {
+    if (protectedMeetingIds.has(meeting.id)) continue;
     const nativeResult = await readNativePostProcessingResult(meeting.id).catch((cause) => {
       log.warn('recovery', 'native post-processing outbox read failed', {
         meetingId: meeting.id,
@@ -583,10 +592,12 @@ async function reconcilePendingNativeMeetingWorkInternal(): Promise<number> {
   return resumed;
 }
 
-export function reconcilePendingNativeMeetingWork(): Promise<number> {
+export function reconcilePendingNativeMeetingWork(
+  protectedMeetingIds: readonly string[] = [],
+): Promise<number> {
   if (nativeReconciliationInFlight) return nativeReconciliationInFlight;
   let work: Promise<number>;
-  work = reconcilePendingNativeMeetingWorkInternal().finally(() => {
+  work = reconcilePendingNativeMeetingWorkInternal(protectedMeetingIds).finally(() => {
     if (nativeReconciliationInFlight === work) nativeReconciliationInFlight = null;
   });
   nativeReconciliationInFlight = work;

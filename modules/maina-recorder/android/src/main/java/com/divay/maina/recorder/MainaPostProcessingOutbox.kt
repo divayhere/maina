@@ -63,6 +63,7 @@ internal class MainaPostProcessingOutbox(context: Context) :
         require(modelIdentity == null || validModelIdentity(modelIdentity)) { "native_model_identity_invalid" }
         writableDatabase.beginTransaction()
         try {
+            check(!isDiscarded(writableDatabase, meetingId)) { "native_meeting_discarded" }
             var existingRunId: String? = null
             var existingState: String? = null
             var existingWindowCount = 0
@@ -457,6 +458,27 @@ internal class MainaPostProcessingOutbox(context: Context) :
         }
     }
 
+    /**
+     * A user Discard outranks every not-yet-imported native ASR result for the
+     * exact meeting. This is idempotent and keeps unrelated runs untouched.
+     */
+    fun discardMeeting(meetingId: String): Boolean {
+        writableDatabase.beginTransaction()
+        return try {
+            writableDatabase.execSQL(
+                "INSERT OR IGNORE INTO discarded_meetings(meeting_id, discarded_at) VALUES (?, ?)",
+                arrayOf<Any>(meetingId, System.currentTimeMillis()),
+            )
+            writableDatabase.delete("blocks", "meeting_id = ?", arrayOf(meetingId))
+            writableDatabase.delete("window_results", "meeting_id = ?", arrayOf(meetingId))
+            writableDatabase.delete("runs", "meeting_id = ?", arrayOf(meetingId))
+            writableDatabase.setTransactionSuccessful()
+            true
+        } finally {
+            writableDatabase.endTransaction()
+        }
+    }
+
     override fun onConfigure(db: SQLiteDatabase) {
         db.enableWriteAheadLogging()
     }
@@ -503,6 +525,7 @@ internal class MainaPostProcessingOutbox(context: Context) :
             )""",
         )
         createWindowResultsTable(db)
+        createDiscardedMeetingsTable(db)
     }
 
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
@@ -511,6 +534,23 @@ internal class MainaPostProcessingOutbox(context: Context) :
         if (oldVersion < 4) addVadEvidenceColumns(db)
         if (oldVersion < 5) addRunRecoveryColumns(db)
         if (oldVersion < 6) addRunModelIdentityColumns(db)
+        if (oldVersion < 7) createDiscardedMeetingsTable(db)
+    }
+
+    fun isDiscarded(meetingId: String): Boolean = isDiscarded(readableDatabase, meetingId)
+
+    private fun isDiscarded(db: SQLiteDatabase, meetingId: String): Boolean = db.rawQuery(
+        "SELECT 1 FROM discarded_meetings WHERE meeting_id = ? LIMIT 1",
+        arrayOf(meetingId),
+    ).use { cursor -> cursor.moveToFirst() }
+
+    private fun createDiscardedMeetingsTable(db: SQLiteDatabase) {
+        db.execSQL(
+            """CREATE TABLE IF NOT EXISTS discarded_meetings (
+                meeting_id TEXT PRIMARY KEY NOT NULL,
+                discarded_at INTEGER NOT NULL
+            )""",
+        )
     }
 
     private fun createWindowResultsTable(db: SQLiteDatabase) {
@@ -649,7 +689,7 @@ internal class MainaPostProcessingOutbox(context: Context) :
 
     companion object {
         private const val DB_NAME = "maina-native-postprocess.db"
-        private const val DB_VERSION = 6
+        private const val DB_VERSION = 7
         const val STATE_RUNNING = "running"
         const val STATE_COMPLETE = "complete"
         const val STATE_PARTIAL = "partial"

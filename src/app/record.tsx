@@ -1,6 +1,6 @@
 import { Ionicons } from '@expo/vector-icons';
 import * as FileSystem from 'expo-file-system/legacy';
-import { router, useFocusEffect } from 'expo-router';
+import { router, useFocusEffect, useLocalSearchParams } from 'expo-router';
 import { useSpeechRecognitionEvent } from 'expo-speech-recognition';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Alert, AppState, Platform, Pressable, StyleSheet, View } from 'react-native';
@@ -27,6 +27,17 @@ import {
 } from '@/core/recording/nativeCaptureReconciliation';
 import { nativeCapturePresentation } from '@/core/recording/nativeCapturePresentation';
 import { NativeResumeIntentLatch } from '@/core/recording/nativeResumeIntent';
+import {
+  classifyNativeSaveStatus,
+  NativeTerminalIntentLatch,
+  nativeSaveEntryAction,
+  nativeSavePresentationSurface,
+  recoveryModeForClassification,
+  type NativeTerminalIntent,
+  type NativeSaveRecoveryMode,
+  waitForNativeTerminalRecovery,
+} from '@/core/recording/nativeSaveRecovery';
+import { authorizeAndroidQualificationSession, canonicalAndroidQualificationRunId } from '@/core/recording/qualificationSession';
 import { openNewlySavedMeetingRoute } from '@/core/navigation/navigationPolicy';
 import {
   commitTranscriptFinalBlocks,
@@ -47,12 +58,16 @@ import { useAppTheme } from '@/design/theme';
 import { space } from '@/design/tokens';
 import {
   abortNativeCapture,
+  beginAndroidQualificationDiagnostics,
+  cancelAndroidQualificationDiagnosticsBeforeCapture,
+  consumeAndroidQualificationSession,
   getIOSAutomationScenario,
   getNativeCaptureStatusAsync,
   getQwenAsrStatus,
   listAudioInputs,
   pauseNativeCapture,
   requestNativeCapturePermission,
+  retryNativeCaptureFinalization,
   resumeNativeCapture,
   setNativeCaptureState,
   startNativeCapture,
@@ -70,13 +85,16 @@ import { registerActiveTriggerHandler } from '@/hardware/trigger/hardwareTrigger
 import { resolveRemoteAction } from '@/hardware/trigger/remoteControl';
 import { log } from '@/services/logger';
 import { reconcilePendingNativeMeetingWork } from '@/services/meetingCaptureLifecycle';
+import { discardNativeMeeting } from '@/services/nativeDiscard';
 import { getNativeCaptureMetrics } from '@/services/nativeCaptureMetrics';
 import {
   clearDiagnosticContext,
+  addQualificationDiagnosticMeetingId,
   flushDiagnostics,
   getDiagnosticsStatus,
   queueAudioArtifact,
   setDiagnosticContext,
+  setQualificationDiagnosticsSuppressed,
 } from '@/services/remoteLog';
 import { ensureStorageBudget } from '@/services/storageBudget';
 import { useMeetings } from '@/state/meetingsStore';
@@ -115,7 +133,36 @@ interface AsrQualityMetrics {
   detectedHindi: number;
 }
 
-function describeRecordingProblem(message?: string | null): { title: string; body: string } {
+function describeRecordingProblem(
+  message?: string | null,
+  nativeSaveRecoveryMode: NativeSaveRecoveryMode | null = null,
+): { title: string; body: string } {
+  if (nativeSaveRecoveryMode === 'restart_required') {
+    return {
+      title: 'Saved audio needs recovery',
+      body: 'Maina could not safely reconcile this save in the current session. On Android, open Maina App info, choose Force stop, then reopen Maina. Pressing Home or Back is not enough. Durable audio will be recovered without starting another recording.',
+    };
+  }
+  if (nativeSaveRecoveryMode === 'retry_terminal_once'
+    || nativeSaveRecoveryMode === 'retry_stop_submission_once'
+  ) {
+    return {
+      title: 'Finalization needs one retry',
+      body: 'Maina kept microphone reads off and retained the recording. Retry the same durable finalization once.',
+    };
+  }
+  if (nativeSaveRecoveryMode === 'resume_checkpoint') {
+    return {
+      title: 'Audio saved; checkpoint pending',
+      body: 'The native audio handoff completed. Retry the local meeting checkpoint without stopping the recorder again.',
+    };
+  }
+  if (nativeSaveRecoveryMode === 'check_terminal_status') {
+    return {
+      title: 'Still saving safely',
+      body: 'Maina has not yet confirmed the final audio handoff. Check the save status before leaving this screen.',
+    };
+  }
   const normalized = message?.trim() ?? '';
   if (!normalized) {
     return {
@@ -146,6 +193,10 @@ export default function RecordScreen() {
   const { theme } = useAppTheme();
   const { insets } = useMainaLayout();
   const { refresh } = useMeetings();
+  const { qualificationRunId: qualificationRunIdParam } = useLocalSearchParams<{ qualificationRunId?: string }>();
+  const requestedQualificationRunId = canonicalAndroidQualificationRunId(Platform.OS, qualificationRunIdParam);
+  const qualificationRunIdRef = useRef<string | null>(null);
+  const qualificationEvidenceDigestRef = useRef<string | null>(null);
 
   const idRef = useRef(newId());
   const dirRef = useRef('');
@@ -192,6 +243,14 @@ export default function RecordScreen() {
   const transcriptChainRef = useRef<Promise<void>>(Promise.resolve());
   const artifactQueueRef = useRef<Promise<void>>(Promise.resolve());
   const savingRef = useRef(false);
+  const nativeTerminalIntentRef = useRef(new NativeTerminalIntentLatch());
+  const nativeSaveRecoveryModeRef = useRef<NativeSaveRecoveryMode | null>(null);
+  const nativeSaveRetryAttemptedRef = useRef(false);
+  const nativeSaveSubmissionRetryAttemptedRef = useRef(false);
+  const nativeSaveStatusCheckBusyRef = useRef(false);
+  const recordScreenMountedRef = useRef(true);
+  const recordScreenFocusedRef = useRef(true);
+  const savedMeetingPendingNavigationRef = useRef<string | null>(null);
   const stopAndSaveRef = useRef<() => Promise<void>>(async () => {});
   const pauseRef = useRef<() => Promise<void>>(async () => {});
   const resumeRef = useRef<() => Promise<void>>(async () => {});
@@ -212,6 +271,9 @@ export default function RecordScreen() {
   const [elapsed, setElapsed] = useState(0);
   const [, setListening] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [nativeSaveRecoveryMode, setNativeSaveRecoveryMode] = useState<NativeSaveRecoveryMode | null>(null);
+  const [nativeSaveRecoveryBusy, setNativeSaveRecoveryBusy] = useState(false);
+  const [nativeTerminalIntent, setNativeTerminalIntent] = useState<NativeTerminalIntent | null>(null);
   const [meetingCreated, setMeetingCreated] = useState(false);
   const [paused, setPaused] = useState(false);
   const [captureNote, setCaptureNote] = useState<string | null>(null);
@@ -393,7 +455,7 @@ export default function RecordScreen() {
     sessionStartedAtRef.current = Date.now();
     sessionStartsRef.current[index] = sessionStartedAtRef.current;
     lastEventRef.current = sessionStartedAtRef.current;
-    setDiagnosticContext({ segmentIndex: index });
+    if (!qualificationRunIdRef.current) setDiagnosticContext({ segmentIndex: index });
     endingSessionRef.current = false;
     sessionErrorRef.current = undefined;
     await updateMeeting(idRef.current, {
@@ -581,6 +643,7 @@ export default function RecordScreen() {
     )
       .then(async () => {
         if (!event?.uri) return;
+        if (qualificationRunIdRef.current) return;
         await queueAudioArtifact({
           artifactId: `${idRef.current}-audio-${index}`,
           meetingId: idRef.current,
@@ -605,10 +668,26 @@ export default function RecordScreen() {
 
   useEffect(() => {
     const nativeResumeIntent = nativeResumeIntentRef.current;
+    recordScreenMountedRef.current = true;
     (async () => {
       if (startingRef.current) return;
       startingRef.current = true;
       try {
+        if (requestedQualificationRunId) {
+          const authorization = await authorizeAndroidQualificationSession(
+            requestedQualificationRunId,
+            consumeAndroidQualificationSession,
+          );
+          if (!authorization) {
+            throw new Error('Android qualification diagnostics could not be isolated durably.');
+          }
+          if (!await beginAndroidQualificationDiagnostics(idRef.current, authorization.evidenceDigest)) {
+            throw new Error('Android qualification diagnostics could not be isolated durably.');
+          }
+          qualificationRunIdRef.current = authorization.runId;
+          qualificationEvidenceDigestRef.current = authorization.evidenceDigest;
+          setQualificationDiagnosticsSuppressed(true);
+        }
         const storageDecision = await ensureStorageBudget('record');
         if (!storageDecision.ok) throw new Error(storageDecision.message);
         const granted = Platform.OS === 'ios'
@@ -646,6 +725,7 @@ export default function RecordScreen() {
         }
 
         startedAtRef.current = Date.now();
+        if (qualificationRunIdRef.current) addQualificationDiagnosticMeetingId(idRef.current);
         await createMeeting({
           id: idRef.current,
           title: `Meeting · ${formatTime(startedAtRef.current)}`,
@@ -654,14 +734,17 @@ export default function RecordScreen() {
           audioUri: dir,
           segmentCount: 0,
           status: 'recording',
+          qualificationEvidenceDigest: qualificationEvidenceDigestRef.current,
         });
         meetingCreatedRef.current = true;
         setMeetingCreated(true);
-        setDiagnosticContext({
-          meetingId: idRef.current,
-          recordingSessionId: recordingSessionIdRef.current,
-          segmentIndex: 0,
-        });
+        if (!qualificationRunIdRef.current) {
+          setDiagnosticContext({
+            meetingId: idRef.current,
+            recordingSessionId: recordingSessionIdRef.current,
+            segmentIndex: 0,
+          });
+        }
         await startRecordingForegroundService();
         const diagnostics = await getDiagnosticsStatus().catch(() => null);
         if (diagnostics) {
@@ -690,6 +773,8 @@ export default function RecordScreen() {
             sourceMode: 'voice_recognition',
             chunkDurationMs: MAX_FILE_MS,
             meetingStartedAt: startedAtRef.current,
+            qualificationSession: qualificationRunIdRef.current !== null,
+            qualificationEvidenceDigest: qualificationEvidenceDigestRef.current,
           });
           // The microphone is owned by the foreground service, not the React
           // runtime.  Do not make starting a recording depend on a JS polling
@@ -730,11 +815,26 @@ export default function RecordScreen() {
         if (CAPTURE_ENGINE !== 'native-qwen') {
           await stopRecordingForegroundService().catch(() => {});
         }
+        if (qualificationRunIdRef.current) {
+          const evidenceDigest = qualificationEvidenceDigestRef.current;
+          const released = evidenceDigest != null && await cancelAndroidQualificationDiagnosticsBeforeCapture(
+            idRef.current,
+            evidenceDigest,
+          ).catch(() => false);
+          if (released) {
+            qualificationRunIdRef.current = null;
+            qualificationEvidenceDigestRef.current = null;
+            setQualificationDiagnosticsSuppressed(false);
+          } else {
+            setError('Maina kept diagnostic delivery blocked because capture ownership could not be reconciled safely.');
+          }
+        }
         log.error('record', 'capture start failed', { err: message });
       }
     })();
 
     return () => {
+      recordScreenMountedRef.current = false;
       if (captureNoteTimerRef.current) clearTimeout(captureNoteTimerRef.current);
       activeRef.current = false;
       pausedRef.current = false;
@@ -745,7 +845,17 @@ export default function RecordScreen() {
       if (CAPTURE_ENGINE === 'native-qwen') {
         // STOP owns its own terminal lifecycle after this screen unmounts.
         // Never race it with a JS presentation-idle command.
-        void stopNativeCapture().catch(() => {});
+        void stopNativeCapture()
+          .catch(() => {})
+          .then(async () => {
+            await waitForNativeCaptureState(getNativeCaptureStatusAsync, 'idle', { timeoutMs: 20_000 });
+            if (qualificationRunIdRef.current) {
+              qualificationRunIdRef.current = null;
+              qualificationEvidenceDigestRef.current = null;
+              setQualificationDiagnosticsSuppressed(false);
+            }
+          })
+          .catch(() => {});
       } else {
         if (listeningRef.current || pausedRef.current) abortSession();
         void stopRecordingForegroundService().catch(() => {});
@@ -1109,36 +1219,207 @@ export default function RecordScreen() {
     }
   };
 
-  const stopAndSave = async () => {
-    if (savingRef.current || !meetingCreatedRef.current) return;
-    savingRef.current = true;
-    nativeResumeIntentRef.current.cancel();
-    // The native service publishes finalizing only after it has issued a real
-    // STOP token. Legacy capture keeps this presentation in savingRef instead
-    // of creating an orphaned native notification if JS is interrupted here.
-    const saveHandoff = recordingSaveHandoff(CAPTURE_ENGINE);
-    activeRef.current = false;
-    if (restartTimerRef.current) clearTimeout(restartTimerRef.current);
-    await finalizeTranscriptText(interimRef.current);
-    if (saveHandoff === 'native-terminal-owner') {
-      showCaptureNote('Saving audio and starting local transcription...', 60_000);
-      await stopNativeCapture().then(async () => {
-        const finalStatus = await waitForNativeCaptureState(getNativeCaptureStatusAsync, 'idle', {
+  const publishNativeSaveRecoveryMode = (mode: NativeSaveRecoveryMode) => {
+    nativeSaveRecoveryModeRef.current = mode;
+    if (recordScreenMountedRef.current) setNativeSaveRecoveryMode(mode);
+  };
+
+  const confirmNativeSaveCompletion = async (options: {
+    retryTerminal: boolean;
+    retrySubmission: boolean;
+    waitForCompletion: boolean;
+  }): Promise<boolean> => {
+    if (!recordScreenMountedRef.current) return false;
+    let status = null;
+    if (options.retryTerminal) {
+      const priorStatus = await getNativeCaptureStatusAsync().catch(() => null);
+      const priorClassification = classifyNativeSaveStatus({
+        status: priorStatus,
+        expectedMeetingId: idRef.current,
+        platform: Platform.OS === 'android' ? 'android' : 'ios',
+        retryAvailable: Platform.OS === 'android' && !nativeSaveRetryAttemptedRef.current,
+        submissionRetryAvailable: Platform.OS === 'android'
+          && !nativeSaveSubmissionRetryAttemptedRef.current,
+      });
+      if (priorClassification === 'complete') return true;
+      const priorTerminalOperationId = priorStatus?.terminalOperationId;
+      if (priorClassification !== 'retryable_once'
+        || priorTerminalOperationId == null
+        || !Number.isSafeInteger(priorTerminalOperationId)
+        || priorTerminalOperationId < 1
+      ) {
+        const mode = recoveryModeForClassification(priorClassification);
+        publishNativeSaveRecoveryMode(mode);
+        return false;
+      }
+      nativeSaveRetryAttemptedRef.current = true;
+      try {
+        await retryNativeCaptureFinalization();
+      } catch (cause) {
+        log.warn('record', 'native capture finalization retry request failed', {
+          causeName: cause instanceof Error ? cause.name : typeof cause,
+        });
+      }
+      status = await waitForNativeTerminalRecovery(
+        getNativeCaptureStatusAsync,
+        {
+          expectedMeetingId: idRef.current,
+          priorOperationId: priorTerminalOperationId,
+        },
+      );
+    } else if (options.retrySubmission) {
+      nativeSaveSubmissionRetryAttemptedRef.current = true;
+      try {
+        await stopNativeCapture();
+      } catch (cause) {
+        log.warn('record', 'native stop submission retry failed', {
+          causeName: cause instanceof Error ? cause.name : typeof cause,
+        });
+      }
+      try {
+        status = await waitForNativeCaptureState(getNativeCaptureStatusAsync, 'idle', {
           timeoutMs: 20_000,
         });
-        log.info('record', 'native capture finalization acknowledged', { nativeStatus: finalStatus });
-      }).catch((cause) => {
-        log.error('record', 'native capture stop failed', { err: String(cause) });
-      });
-      listeningRef.current = false;
-      setListening(false);
-    } else if (!pausedRef.current) {
-      const endPromise = waitForRecognizerEnd();
-      const audioEndPromise = waitForAudioEnd();
-      stopSession();
-      await Promise.all([endPromise, audioEndPromise]);
+      } catch {
+        // A fresh state below determines whether the terminal owner is now
+        // pending, recovery-required, or still absent.
+      }
+    } else if (options.waitForCompletion) {
+      try {
+        status = await waitForNativeCaptureState(getNativeCaptureStatusAsync, 'idle', {
+          timeoutMs: 20_000,
+        });
+      } catch {
+        // The bounded state below distinguishes pending, retryable, and
+        // restart-required outcomes without persisting a raw native exception.
+      }
+    }
+    status ??= await getNativeCaptureStatusAsync().catch(() => null);
+    const classification = classifyNativeSaveStatus({
+      status,
+      expectedMeetingId: idRef.current,
+      platform: Platform.OS === 'android' ? 'android' : 'ios',
+      retryAvailable: Platform.OS === 'android' && !nativeSaveRetryAttemptedRef.current,
+      submissionRetryAvailable: Platform.OS === 'android'
+        && !nativeSaveSubmissionRetryAttemptedRef.current,
+    });
+    if (!recordScreenMountedRef.current) return false;
+    log.info('record', 'native capture finalization classified', {
+      state: status?.state ?? 'unavailable',
+      terminalPublicationState: status?.terminalPublicationState ?? 'unavailable',
+      terminalReasonCode: status?.terminalReasonCode ?? 'unavailable',
+      classification,
+    });
+    if (classification === 'complete') return true;
+    const mode = recoveryModeForClassification(classification);
+    publishNativeSaveRecoveryMode(mode);
+    if (recordScreenMountedRef.current) {
+      setError(mode === 'restart_required'
+        ? 'Native capture recovery requires an app restart.'
+        : 'Maina is still safely finalizing this recording. Your audio remains on the phone.');
+    }
+    return false;
+  };
+
+  const stopAndSave = async () => {
+    const saveHandoff = recordingSaveHandoff(CAPTURE_ENGINE);
+    const entryAction = nativeSaveEntryAction({
+      saving: savingRef.current,
+      recoveryMode: nativeSaveRecoveryModeRef.current,
+      statusCheckBusy: nativeSaveStatusCheckBusyRef.current,
+    });
+    if (entryAction === 'ignore' || !meetingCreatedRef.current) return;
+    if (entryAction === 'restart_required') return;
+    if (nativeTerminalIntentRef.current.current() === 'discard') return;
+    if (entryAction === 'begin_stop') {
+      if (!nativeTerminalIntentRef.current.tryBegin('save')) return;
+      setNativeTerminalIntent('save');
+    } else if (!nativeTerminalIntentRef.current.acceptsContinuation('save')) {
+      return;
+    }
+    if (entryAction !== 'begin_stop') {
+      nativeSaveStatusCheckBusyRef.current = true;
+      setNativeSaveRecoveryBusy(true);
+      let completed = false;
+      try {
+        completed = await confirmNativeSaveCompletion({
+          retryTerminal: entryAction === 'retry_terminal_once',
+          retrySubmission: entryAction === 'retry_stop_submission_once',
+          waitForCompletion: entryAction !== 'resume_checkpoint',
+        });
+        if (!completed) return;
+      } finally {
+        if (!completed) {
+          nativeSaveStatusCheckBusyRef.current = false;
+          if (recordScreenMountedRef.current) setNativeSaveRecoveryBusy(false);
+        }
+      }
+    } else {
+      savingRef.current = true;
+      if (saveHandoff === 'native-terminal-owner') setNativeSaveRecoveryBusy(true);
+      nativeResumeIntentRef.current.cancel();
+      // The native service publishes finalizing only after it has issued a real
+      // STOP token. Legacy capture keeps this presentation in savingRef instead
+      // of creating an orphaned native notification if JS is interrupted here.
+      activeRef.current = false;
+      if (restartTimerRef.current) clearTimeout(restartTimerRef.current);
+      try {
+        await finalizeTranscriptText(interimRef.current);
+      } catch (cause) {
+        log.warn('record', 'live transcript checkpoint before stop failed', {
+          causeName: cause instanceof Error ? cause.name : typeof cause,
+        });
+        if (saveHandoff === 'legacy-js-presentation') {
+          savingRef.current = false;
+          setError('Maina could not checkpoint the live transcript. The recording remains on the phone.');
+          return;
+        }
+        // Native audio is the durable source of truth. Continue the exact STOP
+        // handoff and let post-processing reconstruct transcript state from WAV.
+      }
+      if (saveHandoff === 'native-terminal-owner') {
+        showCaptureNote('Saving audio and starting local transcription...', 60_000);
+        try {
+          await stopNativeCapture();
+          const completed = await confirmNativeSaveCompletion({
+            retryTerminal: false,
+            retrySubmission: false,
+            waitForCompletion: true,
+          });
+          if (!completed) {
+            listeningRef.current = false;
+            setListening(false);
+            setNativeSaveRecoveryBusy(false);
+            return;
+          }
+        } catch (cause) {
+          log.error('record', 'native capture stop request failed', {
+            causeName: cause instanceof Error ? cause.name : typeof cause,
+          });
+          await confirmNativeSaveCompletion({
+            retryTerminal: false,
+            retrySubmission: false,
+            waitForCompletion: false,
+          });
+          listeningRef.current = false;
+          setListening(false);
+          setNativeSaveRecoveryBusy(false);
+          return;
+        }
+        listeningRef.current = false;
+        setListening(false);
+      } else if (!pausedRef.current) {
+        const endPromise = waitForRecognizerEnd();
+        const audioEndPromise = waitForAudioEnd();
+        stopSession();
+        await Promise.all([endPromise, audioEndPromise]);
+      }
     }
 
+    // A route may blur while native terminalization is in flight. Finish the
+    // durable database/artifact tail while the component still owns it, but
+    // defer navigation until this exact screen is focused again.
+    if (!recordScreenMountedRef.current) return;
     const id = idRef.current;
     try {
       await transcriptChainRef.current.catch(() => {});
@@ -1184,13 +1465,24 @@ export default function RecordScreen() {
         restarts: restartCountRef.current,
       });
       clearDiagnosticContext();
+      if (qualificationRunIdRef.current) {
+        qualificationRunIdRef.current = null;
+        qualificationEvidenceDigestRef.current = null;
+        setQualificationDiagnosticsSuppressed(false);
+      }
       // Native Android publishes idle only after its STOP owner proves both
       // AudioRecord shutdown and durable post-processing handoff. JS must not
       // mask a native recovery-required result with a presentation update.
       if (saveHandoff === 'legacy-js-presentation') {
         await setNativeCaptureState('idle').catch(() => {});
       }
-      openNewlySavedMeeting(id);
+      if (!recordScreenMountedRef.current) return;
+      nativeSaveStatusCheckBusyRef.current = false;
+      if (recordScreenFocusedRef.current) {
+        openNewlySavedMeeting(id);
+      } else {
+        savedMeetingPendingNavigationRef.current = id;
+      }
       if (Platform.OS === 'ios' && CAPTURE_ENGINE === 'native-qwen') {
         // iOS has no Android foreground ASR service. Start the durable,
         // checkpointed JS owner while this foreground user action still has
@@ -1206,9 +1498,14 @@ export default function RecordScreen() {
       const message = cause instanceof Error ? cause.message : String(cause);
       setError('Maina could not finish the database checkpoint. Your WAV files remain on the phone.');
       log.error('record', 'meeting save failed', { err: message });
-      savingRef.current = false;
       if (saveHandoff === 'legacy-js-presentation') {
+        savingRef.current = false;
         await setNativeCaptureState('idle').catch(() => {});
+      } else {
+        savingRef.current = true;
+        publishNativeSaveRecoveryMode('resume_checkpoint');
+        nativeSaveStatusCheckBusyRef.current = false;
+        if (recordScreenMountedRef.current) setNativeSaveRecoveryBusy(false);
       }
     }
   };
@@ -1283,42 +1580,72 @@ export default function RecordScreen() {
   }, []);
 
   useFocusEffect(
-    useCallback(() => registerActiveTriggerHandler((event) => {
-      const state = savingRef.current
-        ? 'finalizing'
-        : pausedRef.current
-          ? 'paused'
-          : activeRef.current
-            ? 'recording'
-            : 'idle';
-      const action = resolveRemoteAction(state, event.command);
-      log.info('trigger', 'recorder remote action resolved', { state, command: event.command, action });
-      if (action === 'pause') return pauseRef.current();
-      if (action === 'resume') return resumeRef.current();
-      if (action === 'stop') return stopAndSaveRef.current();
-      return Promise.resolve();
-    }), []),
+    useCallback(() => {
+      recordScreenFocusedRef.current = true;
+      const pendingSavedMeetingId = savedMeetingPendingNavigationRef.current;
+      if (pendingSavedMeetingId) {
+        savedMeetingPendingNavigationRef.current = null;
+        openNewlySavedMeeting(pendingSavedMeetingId);
+      }
+      const unregister = registerActiveTriggerHandler((event) => {
+        const state = savingRef.current
+          ? 'finalizing'
+          : pausedRef.current
+            ? 'paused'
+            : activeRef.current
+              ? 'recording'
+              : 'idle';
+        const action = resolveRemoteAction(state, event.command);
+        log.info('trigger', 'recorder remote action resolved', { state, command: event.command, action });
+        if (action === 'pause') return pauseRef.current();
+        if (action === 'resume') return resumeRef.current();
+        if (action === 'stop') return stopAndSaveRef.current();
+        return Promise.resolve();
+      });
+      return () => {
+        recordScreenFocusedRef.current = false;
+        unregister();
+      };
+    }, []),
   );
 
   const cancel = async () => {
+    // Save and Discard share one synchronous, first-intent-wins owner. The ref
+    // closes the event-before-render window; state owns the visible surface.
+    if (savingRef.current || !nativeTerminalIntentRef.current.tryBegin('discard')) return;
+    setNativeTerminalIntent('discard');
+    savingRef.current = true;
+    setNativeSaveRecoveryBusy(true);
     activeRef.current = false;
     pausedRef.current = false;
     nativeResumeIntentRef.current.cancel();
     if (restartTimerRef.current) clearTimeout(restartTimerRef.current);
+    let logicalMeetingDeleted = false;
     if (CAPTURE_ENGINE === 'native-qwen') {
       try {
-        await abortNativeCapture();
-        await waitForNativeCaptureState(getNativeCaptureStatusAsync, 'idle', { timeoutMs: 20_000 });
+        if (Platform.OS === 'android') {
+          await discardNativeMeeting({
+            meetingId: idRef.current,
+            discardId: newId(),
+          });
+          logicalMeetingDeleted = true;
+        } else {
+          await abortNativeCapture();
+          await waitForNativeCaptureState(getNativeCaptureStatusAsync, 'idle', { timeoutMs: 20_000 });
+        }
       } catch (cause) {
         log.warn('record', 'native discard finalization was not acknowledged', { err: String(cause) });
-        setError('Maina could not confirm that native audio was discarded. Your data was left untouched.');
+        setError(Platform.OS === 'android'
+          ? 'Discard is safely retained and will finish before recovery when Maina restarts.'
+          : 'Maina could not confirm that native audio was discarded. The meeting record was left in place.');
+        setNativeSaveRecoveryBusy(false);
         return;
       }
-    } else if (!savingRef.current && !pausedRef.current && listeningRef.current) {
+    } else if (!pausedRef.current && listeningRef.current) {
       const audioEndPromise = waitForAudioEnd();
       abortSession();
       await audioEndPromise.catch(() => {});
-    } else if (!savingRef.current && (listeningRef.current || pausedRef.current)) {
+    } else if (listeningRef.current || pausedRef.current) {
       abortSession();
     }
     await artifactQueueRef.current.catch(() => {});
@@ -1327,14 +1654,44 @@ export default function RecordScreen() {
       await stopRecordingForegroundService().catch(() => {});
     }
     await flushDiagnostics().catch(() => {});
-    if (meetingCreatedRef.current) await deleteMeeting(idRef.current).catch(() => {});
-    if (dirRef.current) await FileSystem.deleteAsync(dirRef.current, { idempotent: true }).catch(() => {});
+    if (meetingCreatedRef.current && !logicalMeetingDeleted) await deleteMeeting(idRef.current);
+    if (dirRef.current && !(CAPTURE_ENGINE === 'native-qwen' && Platform.OS === 'android')) {
+      await FileSystem.deleteAsync(dirRef.current, { idempotent: true }).catch(() => {});
+    }
     await refresh();
+    if (qualificationRunIdRef.current) {
+      qualificationRunIdRef.current = null;
+      qualificationEvidenceDigestRef.current = null;
+      setQualificationDiagnosticsSuppressed(false);
+    }
     log.info('record', 'meeting discarded');
     router.back();
   };
 
+  const nativeSaveSurface = nativeSavePresentationSurface({
+    busy: nativeSaveRecoveryBusy,
+    error,
+  });
+
+  if (nativeSaveSurface === 'busy') {
+    const discarding = nativeTerminalIntent === 'discard';
+    return (
+      <View style={[styles.container, { backgroundColor: theme.bg }]}>
+        <AppText variant="heading" style={styles.center}>
+          {discarding ? 'Discarding safely' : 'Saving safely'}
+        </AppText>
+        <AppText variant="body" muted style={styles.center}>
+          {discarding
+            ? 'Maina is closing native capture before removing this local meeting.'
+            : 'Maina is finalizing audio and committing the local meeting. Keep the app open until this finishes.'}
+        </AppText>
+        <PrimaryButton label={discarding ? 'Discarding…' : 'Saving…'} disabled loading style={{ marginTop: space.lg }} />
+      </View>
+    );
+  }
+
   const confirmCancel = () => {
+    if (savingRef.current) return;
     if (!meetingCreatedRef.current || (!activeRef.current && !pausedRef.current && !listeningRef.current)) {
       void cancel();
       return;
@@ -1346,18 +1703,37 @@ export default function RecordScreen() {
     ]);
   };
 
-  if (error) {
-    const problem = describeRecordingProblem(error);
+  if (nativeSaveSurface === 'error' && error) {
+    const problem = nativeTerminalIntent === 'discard'
+      ? {
+          title: 'Discard was not confirmed',
+          body: 'Maina could not prove that native capture closed. The meeting record remains for recovery; fully restart Maina before recording again.',
+        }
+      : describeRecordingProblem(error, nativeSaveRecoveryMode);
+    const nativeRecoveryButtonLabel = nativeSaveRecoveryMode === 'retry_terminal_once'
+      ? 'Retry safe finalization'
+      : nativeSaveRecoveryMode === 'retry_stop_submission_once'
+        ? 'Retry stop and save'
+      : nativeSaveRecoveryMode === 'resume_checkpoint'
+        ? 'Retry save checkpoint'
+        : 'Check save status';
     return (
       <View style={[styles.container, { backgroundColor: theme.bg }]}>
         <AppText variant="heading" style={styles.center}>{problem.title}</AppText>
         <AppText variant="body" muted style={styles.center}>{problem.body}</AppText>
-        {meetingCreated ? (
-          <PrimaryButton label="Keep this recording" onPress={stopAndSave} style={{ marginTop: space.lg }} />
-        ) : (
+        {meetingCreated && nativeTerminalIntent !== 'discard' && nativeSaveRecoveryMode !== 'restart_required' ? (
+          <PrimaryButton
+            testID="recording-recovery-keep"
+            label={nativeSaveRecoveryMode ? nativeRecoveryButtonLabel : 'Keep this recording'}
+            onPress={stopAndSave}
+            disabled={nativeSaveRecoveryBusy}
+            loading={nativeSaveRecoveryBusy}
+            style={{ marginTop: space.lg }}
+          />
+        ) : !meetingCreated ? (
           <PrimaryButton label="Go back" onPress={() => router.back()} style={{ marginTop: space.lg }} />
-        )}
-        {meetingCreated ? (
+        ) : null}
+        {meetingCreated && nativeTerminalIntent === null && !nativeSaveRecoveryMode ? (
           <SecondaryButton label="Discard" onPress={cancel} style={{ marginTop: space.md }} />
         ) : null}
       </View>

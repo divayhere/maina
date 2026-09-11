@@ -103,8 +103,18 @@ internal class DiagnosticsWorker(
     params: WorkerParameters,
 ) : CoroutineWorker(appContext, params) {
     override suspend fun doWork(): Result = withContext(Dispatchers.IO) {
+        when (MainaCaptureAutomaticWorkGate.classify(applicationContext, null)) {
+            MainaAutomaticWorkAuthority.ALLOWED -> Unit
+            MainaAutomaticWorkAuthority.DEFERRED,
+            MainaAutomaticWorkAuthority.DISCARDED,
+            -> return@withContext Result.retry()
+            MainaAutomaticWorkAuthority.QUARANTINED,
+            MainaAutomaticWorkAuthority.INVALID,
+            -> return@withContext Result.success()
+        }
         val store = DiagnosticsStore.shared(applicationContext)
         try {
+            if (store.isQualificationSessionActive()) return@withContext Result.retry()
             val config = store.config()
             if (!config.enabled || config.supabaseUrl.isBlank() || config.publishableKey.isBlank()) {
                 return@withContext Result.success()
@@ -124,10 +134,18 @@ internal class DiagnosticsWorker(
                 }
                 "maintenance" -> {
                     deleteExpiredArtifacts(store, config)
-                    store.cleanupRetainedLocalSources()
+                    requireAutomaticWorkAuthority()
+                    store.cleanupRetainedLocalSources(assertAllowed = ::requireAutomaticWorkAuthority)
                     Result.success()
                 }
                 else -> Result.failure()
+            }
+        } catch (_: MainaAutomaticWorkBlockedException) {
+            when (MainaCaptureAutomaticWorkGate.classify(applicationContext, null)) {
+                MainaAutomaticWorkAuthority.DEFERRED,
+                MainaAutomaticWorkAuthority.DISCARDED,
+                -> Result.retry()
+                else -> Result.success()
             }
         } catch (cancelled: CancellationException) {
             throw cancelled
@@ -141,28 +159,45 @@ internal class DiagnosticsWorker(
         TABLES.forEach { table ->
             while (true) {
                 currentCoroutineContext().ensureActive()
-                val batch = store.nextOutbox(table, 50)
-                if (batch.isEmpty()) break
-                val payload = JSONArray().apply { batch.forEach { put(org.json.JSONObject(it.payload)) } }
-                val conflict = when (table) {
-                    "diagnostic_runs" -> "run_id"
-                    "diagnostic_artifacts" -> "artifact_id"
-                    else -> "event_id"
-                }
-                val response = request(
-                    method = "POST",
-                    url = "${config.supabaseUrl}/rest/v1/$table?on_conflict=$conflict",
-                    config = config,
-                    contentType = "application/json",
-                    bodyWriter = { output -> output.write(payload.toString().toByteArray(Charsets.UTF_8)) },
-                    extraHeaders = mapOf("Prefer" to "resolution=ignore-duplicates,return=minimal"),
-                )
-                if (response.code !in 200..299) {
-                    val message = "$table upload HTTP ${response.code}: ${response.body.take(500)}"
-                    store.markOutboxFailure(batch.map { it.recordId }, message)
-                    throw IllegalStateException(message)
-                }
-                store.acknowledgeOutbox(batch.map { it.recordId })
+                requireAutomaticWorkAuthority()
+                val delivered = store.withOrdinaryDelivery {
+                    val batch = store.nextOutbox(table, 50)
+                    if (batch.isEmpty()) return@withOrdinaryDelivery false
+                    val discarded = batch.filter { record ->
+                        record.meetingId?.let(store::isMeetingDiscarded) == true
+                    }
+                    if (discarded.isNotEmpty()) {
+                        store.acknowledgeOutbox(discarded.map { it.recordId })
+                    }
+                    val deliverable = batch.filterNot { it in discarded }
+                    if (deliverable.isEmpty()) return@withOrdinaryDelivery true
+                    deliverable.forEach { record -> requireAutomaticWorkAuthority(record.meetingId) }
+                    val payload = JSONArray().apply {
+                        deliverable.forEach { put(org.json.JSONObject(it.payload)) }
+                    }
+                    val conflict = when (table) {
+                        "diagnostic_runs" -> "run_id"
+                        "diagnostic_artifacts" -> "artifact_id"
+                        else -> "event_id"
+                    }
+                    requireAutomaticWorkAuthority()
+                    val response = request(
+                        method = "POST",
+                        url = "${config.supabaseUrl}/rest/v1/$table?on_conflict=$conflict",
+                        config = config,
+                        contentType = "application/json",
+                        bodyWriter = { output -> output.write(payload.toString().toByteArray(Charsets.UTF_8)) },
+                        extraHeaders = mapOf("Prefer" to "resolution=ignore-duplicates,return=minimal"),
+                    )
+                    if (response.code !in 200..299) {
+                        val message = "$table upload HTTP ${response.code}: ${response.body.take(500)}"
+                        store.markOutboxFailure(deliverable.map { it.recordId }, message)
+                        throw IllegalStateException(message)
+                    }
+                    store.acknowledgeOutbox(deliverable.map { it.recordId })
+                    true
+                } ?: return
+                if (!delivered) break
             }
         }
     }
@@ -173,54 +208,70 @@ internal class DiagnosticsWorker(
         var hadFailures = false
         while (true) {
             currentCoroutineContext().ensureActive()
-            val batch = store.pendingArtifacts(ARTIFACT_BATCH_SIZE).filterNot { it.artifactId in attempted }
-            if (batch.isEmpty()) break
-            for (artifact in batch) {
-                attempted += artifact.artifactId
-                currentCoroutineContext().ensureActive()
-                try {
-                    val prepared = DiagnosticAudioTranscoder.prepare(artifact, outputDir)
-                    val objectPath = store.markArtifactPrepared(artifact.artifactId, prepared)
-                    val response = request(
-                        method = "POST",
-                        url = storageObjectUrl(config, objectPath),
-                        config = config,
-                        contentType = prepared.contentType,
-                        bodyWriter = { output ->
-                            File(prepared.path).inputStream().buffered().use { input ->
-                                val buffer = ByteArray(64 * 1024)
-                                while (true) {
-                                    if (isStopped) throw CancellationException("Diagnostics worker stopped during upload")
-                                    val count = input.read(buffer)
-                                    if (count <= 0) break
-                                    output.write(buffer, 0, count)
+            requireAutomaticWorkAuthority()
+            val processed = store.withOrdinaryDelivery {
+                val batch = store.pendingArtifacts(ARTIFACT_BATCH_SIZE).filterNot { it.artifactId in attempted }
+                if (batch.isEmpty()) return@withOrdinaryDelivery false
+                for (artifact in batch) {
+                    attempted += artifact.artifactId
+                    if (store.isMeetingDiscarded(artifact.meetingId)) continue
+                    try {
+                        requireAutomaticWorkAuthority(artifact.meetingId)
+                        val prepared = DiagnosticAudioTranscoder.prepare(
+                            artifact,
+                            outputDir,
+                            { requireAutomaticWorkAuthority(artifact.meetingId) },
+                        )
+                        val objectPath = store.markArtifactPrepared(artifact.artifactId, prepared)
+                        requireAutomaticWorkAuthority(artifact.meetingId)
+                        val response = request(
+                            method = "POST",
+                            url = storageObjectUrl(config, objectPath),
+                            config = config,
+                            contentType = prepared.contentType,
+                            bodyWriter = { output ->
+                                requireAutomaticWorkAuthority(artifact.meetingId)
+                                File(prepared.path).inputStream().buffered().use { input ->
+                                    val buffer = ByteArray(64 * 1024)
+                                    while (true) {
+                                        if (isStopped) throw CancellationException("Diagnostics worker stopped during upload")
+                                        requireAutomaticWorkAuthority(artifact.meetingId)
+                                        val count = input.read(buffer)
+                                        if (count <= 0) break
+                                        output.write(buffer, 0, count)
+                                    }
                                 }
-                            }
-                        },
-                        extraHeaders = mapOf(
-                            "x-upsert" to "false",
-                            "cache-control" to "0",
-                        ),
-                    )
-                    // Storage normally returns 409 when a previous attempt
-                    // completed but its response was lost. Some gateway
-                    // versions wrap that same Storage conflict as HTTP 400
-                    // with code=KeyAlreadyExists, so treat both spellings as
-                    // an idempotent success. The metadata upsert below then
-                    // records the already-existing object exactly once.
-                    if (response.code !in 200..299 && !isAlreadyStored(response)) {
-                        error("artifact upload HTTP ${response.code}: ${response.body.take(500)}")
+                            },
+                            extraHeaders = mapOf(
+                                "x-upsert" to "false",
+                                "cache-control" to "0",
+                            ),
+                        )
+                        // Storage normally returns 409 when a previous attempt
+                        // completed but its response was lost. Some gateway
+                        // versions wrap that same Storage conflict as HTTP 400
+                        // with code=KeyAlreadyExists, so treat both spellings as
+                        // an idempotent success. The metadata upsert below then
+                        // records the already-existing object exactly once.
+                        if (response.code !in 200..299 && !isAlreadyStored(response)) {
+                            error("artifact upload HTTP ${response.code}: ${response.body.take(500)}")
+                        }
+                        store.markArtifactUploaded(artifact.copy(objectPath = objectPath), prepared)
+                    } catch (cancelled: CancellationException) {
+                        throw cancelled
+                    } catch (blocked: MainaAutomaticWorkBlockedException) {
+                        throw blocked
+                    } catch (error: Throwable) {
+                        requireAutomaticWorkAuthority(artifact.meetingId)
+                        val message = error.message ?: error.javaClass.simpleName
+                        store.markArtifactFailure(artifact.artifactId, message)
+                        enqueueArtifactFailure(store, artifact, message, error)
+                        hadFailures = true
                     }
-                    store.markArtifactUploaded(artifact.copy(objectPath = objectPath), prepared)
-                } catch (cancelled: CancellationException) {
-                    throw cancelled
-                } catch (error: Throwable) {
-                    val message = error.message ?: error.javaClass.simpleName
-                    store.markArtifactFailure(artifact.artifactId, message)
-                    enqueueArtifactFailure(store, artifact, message, error)
-                    hadFailures = true
                 }
-            }
+                true
+            } ?: return hadFailures
+            if (!processed) break
         }
         return hadFailures
     }
@@ -265,26 +316,32 @@ internal class DiagnosticsWorker(
     private suspend fun deleteExpiredArtifacts(store: DiagnosticsStore, config: DiagnosticConfig) {
         while (true) {
             currentCoroutineContext().ensureActive()
-            val batch = store.expiredArtifacts(System.currentTimeMillis(), RETENTION_BATCH_SIZE)
-            if (batch.isEmpty()) break
-            for (artifact in batch) {
-                currentCoroutineContext().ensureActive()
-                val path = requireNotNull(artifact.objectPath) {
-                    "Uploaded artifact ${artifact.artifactId} has no remote object path"
+            requireAutomaticWorkAuthority()
+            val processed = store.withOrdinaryDelivery {
+                val batch = store.expiredArtifacts(System.currentTimeMillis(), RETENTION_BATCH_SIZE)
+                if (batch.isEmpty()) return@withOrdinaryDelivery false
+                for (artifact in batch) {
+                    if (store.isMeetingDiscarded(artifact.meetingId)) continue
+                    requireAutomaticWorkAuthority(artifact.meetingId)
+                    val path = requireNotNull(artifact.objectPath) {
+                        "Uploaded artifact ${artifact.artifactId} has no remote object path"
+                    }
+                    val response = request(
+                        method = "DELETE",
+                        url = storageObjectUrl(config, path),
+                        config = config,
+                        contentType = null,
+                        bodyWriter = null,
+                    )
+                    if (response.code in 200..299 || response.code == 404) {
+                        store.markRemoteDeleted(artifact.artifactId)
+                    } else {
+                        error("artifact retention delete HTTP ${response.code}: ${response.body.take(500)}")
+                    }
                 }
-                val response = request(
-                    method = "DELETE",
-                    url = storageObjectUrl(config, path),
-                    config = config,
-                    contentType = null,
-                    bodyWriter = null,
-                )
-                if (response.code in 200..299 || response.code == 404) {
-                    store.markRemoteDeleted(artifact.artifactId)
-                } else {
-                    error("artifact retention delete HTTP ${response.code}: ${response.body.take(500)}")
-                }
-            }
+                true
+            } ?: return
+            if (!processed) break
         }
     }
 
@@ -293,6 +350,13 @@ internal class DiagnosticsWorker(
             .appendPath(config.bucket)
         objectPath.split('/').forEach { builder.appendPath(it) }
         return builder.build().toString()
+    }
+
+    private fun requireAutomaticWorkAuthority(meetingId: String? = null) {
+        if (meetingId != null && DiagnosticsStore.shared(applicationContext).isMeetingDiscarded(meetingId)) {
+            throw MainaAutomaticWorkBlockedException()
+        }
+        MainaCaptureAutomaticWorkGate.requireAllowed(applicationContext, meetingId)
     }
 
     private data class HttpResponse(val code: Int, val body: String)

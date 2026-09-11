@@ -1,5 +1,6 @@
 const MAX_HIERARCHY_BYTES = 8 * 1024 * 1024;
 const MAX_NODE_COUNT = 20_000;
+const MAINA_PACKAGE = 'com.divay.maina';
 
 function invariant(condition, message) {
   if (!condition) throw new Error(message);
@@ -68,6 +69,7 @@ export function parseUiAutomatorHierarchy(xml) {
       text: attributes.text ?? '',
       contentDescription: attributes['content-desc'] ?? '',
       resourceId: attributes['resource-id'] ?? '',
+      packageName: attributes.package ?? '',
       className: attributes.class ?? '',
       visible: visible !== 'false',
       enabled: enabled !== 'false',
@@ -95,8 +97,21 @@ function hasExactTestId(node, testId) {
     || node.resourceId.endsWith(`/id/${testId}`);
 }
 
+function testIdValue(node) {
+  const marker = node.resourceId.lastIndexOf(':id/');
+  if (marker >= 0) return node.resourceId.slice(marker + 4);
+  const slashMarker = node.resourceId.lastIndexOf('/id/');
+  if (slashMarker >= 0) return node.resourceId.slice(slashMarker + 4);
+  return node.resourceId;
+}
+
+function isMainaNode(node) {
+  return node.packageName === MAINA_PACKAGE;
+}
+
 function actionableMatches(nodes, { label, testId }) {
-  return nodes.filter((node) => node.visible
+  return nodes.filter((node) => isMainaNode(node)
+    && node.visible
     && node.enabled
     && node.clickable
     && node.bounds !== null
@@ -117,8 +132,28 @@ export function requireUniqueAction(nodes, { label, testId }) {
   });
 }
 
+export function optionalUniqueAction(nodes, { label, testId }) {
+  invariant(Array.isArray(nodes), 'UI nodes must be an array.');
+  const matches = actionableMatches(nodes, { label, testId });
+  invariant(matches.length <= 1, `Action ${testId} is ambiguous.`);
+  if (matches.length === 0) return null;
+  const { left, top, right, bottom } = matches[0].bounds;
+  return Object.freeze({
+    x: Math.floor((left + right) / 2),
+    y: Math.floor((top + bottom) / 2),
+  });
+}
+
+export function optionalUniqueMarker(nodes, testId) {
+  invariant(Array.isArray(nodes), 'UI nodes must be an array.');
+  invariant(typeof testId === 'string' && testId.length > 0, 'Marker test ID is invalid.');
+  const matches = nodes.filter((node) => isMainaNode(node) && node.visible && hasExactTestId(node, testId));
+  invariant(matches.length <= 1, `Marker ${testId} is ambiguous.`);
+  return matches.length === 1 ? true : null;
+}
+
 export function parseRecordingTimer(nodes) {
-  const candidates = nodes.filter((node) => node.visible
+  const candidates = nodes.filter((node) => isMainaNode(node) && node.visible
     && hasExactTestId(node, 'recording-timer'));
   invariant(candidates.length === 1, 'Recording timer is missing or ambiguous.');
   const labels = [...exactLabels(candidates[0])].filter((label) => /^(?:\d+:)?\d{1,2}:\d{2}$/.test(label));
@@ -139,6 +174,13 @@ export function requireTimerAdvance(beforeSeconds, afterSeconds, minimumAdvanceS
   return afterSeconds - beforeSeconds;
 }
 
+export function requireTimerHeld(beforeSeconds, afterSeconds) {
+  exactCount(beforeSeconds, 'Before paused timer');
+  exactCount(afterSeconds, 'After paused timer');
+  invariant(afterSeconds === beforeSeconds, 'Paused recording timer advanced.');
+  return afterSeconds;
+}
+
 export function classifyRecordingSurface(nodes) {
   const stop = actionableMatches(nodes, { label: 'Stop and save', testId: 'recording-stop-save' }).length;
   const pause = actionableMatches(nodes, { label: 'Pause', testId: 'recording-pause-resume' }).length;
@@ -146,7 +188,7 @@ export function classifyRecordingSurface(nodes) {
   const discard = actionableMatches(nodes, { label: 'Discard this recording', testId: 'recording-discard' }).length;
   invariant(stop === 1 && discard === 1 && pause + resume === 1, 'Recording controls are missing or ambiguous.');
   const timerSeconds = parseRecordingTimer(nodes);
-  const stateLabels = nodes.filter((node) => node.visible
+  const stateLabels = nodes.filter((node) => isMainaNode(node) && node.visible
     && hasExactTestId(node, 'recording-state')
     && (hasExactLabel(node, 'Recording') || hasExactLabel(node, 'Paused')));
   invariant(stateLabels.length === 1, 'Recording state is missing or ambiguous.');
@@ -155,10 +197,25 @@ export function classifyRecordingSurface(nodes) {
   return Object.freeze({ state, timerSeconds });
 }
 
+export function observeRecordingSurface(nodes) {
+  const testIds = [
+    'recording-timer',
+    'recording-state',
+    'recording-stop-save',
+    'recording-pause-resume',
+    'recording-discard',
+  ];
+  const counts = testIds.map((testId) => nodes.filter((node) => isMainaNode(node) && node.visible && hasExactTestId(node, testId)).length);
+  invariant(counts.every((count) => count <= 1), 'Recording surface contains an ambiguous stable node.');
+  if (counts.every((count) => count === 0)) return null;
+  if (counts.some((count) => count === 0)) return null;
+  return classifyRecordingSurface(nodes);
+}
+
 export function parsePublicRecordingCount(nodes) {
   const matches = [];
   for (const node of nodes) {
-    if (!node.visible || !hasExactTestId(node, 'recording-count')) continue;
+    if (!isMainaNode(node) || !node.visible || !hasExactTestId(node, 'recording-count')) continue;
     for (const label of exactLabels(node)) {
       const match = /^(\d+) recordings?$/.exec(label);
       if (match) matches.push(Number(match[1]));
@@ -175,18 +232,74 @@ export function requireOneNewRecording(beforeCount, afterCount) {
   return afterCount;
 }
 
-export function selectTopMeetingCard(nodes) {
-  const cards = nodes.filter((node) => node.visible
+function meetingCardActions(nodes) {
+  invariant(Array.isArray(nodes), 'UI nodes must be an array.');
+  return nodes.filter((node) => isMainaNode(node)
+    && node.visible
     && node.enabled
     && node.clickable
     && node.bounds !== null
     && hasExactTestId(node, 'meeting-card'));
+}
+
+function withinBounds(inner, outer) {
+  return inner.left >= outer.left
+    && inner.top >= outer.top
+    && inner.right <= outer.right
+    && inner.bottom <= outer.bottom;
+}
+
+export function readUniqueMarkerLabel(nodes, testId) {
+  invariant(Array.isArray(nodes), 'UI nodes must be an array.');
+  invariant(typeof testId === 'string' && testId.length > 0, 'Marker test ID is invalid.');
+  const matches = nodes.filter((node) => isMainaNode(node) && node.visible && hasExactTestId(node, testId));
+  invariant(matches.length === 1, `Marker ${testId} is missing or ambiguous.`);
+  const labels = [...exactLabels(matches[0])].filter((label) => label.length > 0 && label.length <= 512);
+  invariant(labels.length === 1, `Marker ${testId} label is missing or ambiguous.`);
+  return labels[0];
+}
+
+export function readUniqueMarkerToken(nodes, prefix) {
+  invariant(Array.isArray(nodes), 'UI nodes must be an array.');
+  invariant(typeof prefix === 'string' && /^[a-z][a-z0-9-]{2,63}-$/u.test(prefix), 'Marker token prefix is invalid.');
+  const matches = nodes.filter((node) => {
+    if (!isMainaNode(node) || !node.visible) return false;
+    const value = testIdValue(node);
+    return value.startsWith(prefix);
+  });
+  invariant(matches.length === 1, `Marker ${prefix} token is missing or ambiguous.`);
+  const value = testIdValue(matches[0]);
+  const token = value.slice(prefix.length);
+  invariant(/^[A-Za-z0-9._:-]{1,128}$/u.test(token), `Marker ${prefix} token is invalid.`);
+  return token;
+}
+
+export function selectTopMeetingCard(nodes) {
+  const cards = meetingCardActions(nodes);
   invariant(cards.length > 0, 'No stable meeting-card action is visible.');
   const sorted = [...cards].sort((left, right) => left.bounds.top - right.bounds.top || left.bounds.left - right.bounds.left);
   invariant(sorted.length === 1 || sorted[0].bounds.top !== sorted[1].bounds.top, 'Top meeting-card action is ambiguous.');
+  const metadataNodes = nodes.filter((node) => node !== sorted[0]
+    && isMainaNode(node)
+    && node.visible
+    && node.bounds !== null
+    && withinBounds(node.bounds, sorted[0].bounds)
+    && hasExactTestId(node, 'meeting-card-metadata'));
+  const correlationNodes = nodes.filter((node) => node !== sorted[0]
+    && isMainaNode(node)
+    && node.visible
+    && node.bounds !== null
+    && withinBounds(node.bounds, sorted[0].bounds)
+    && testIdValue(node).startsWith('meeting-card-correlation-'));
+  invariant(metadataNodes.length === 1, 'Top meeting-card metadata is missing or ambiguous.');
+  invariant(correlationNodes.length === 1, 'Top meeting-card correlation token is missing or ambiguous.');
+  const privateMetadata = readUniqueMarkerLabel(metadataNodes, 'meeting-card-metadata');
+  const privateCorrelationToken = readUniqueMarkerToken(correlationNodes, 'meeting-card-correlation-');
   const { left, top, right, bottom } = sorted[0].bounds;
   return Object.freeze({
     visibleCardCount: cards.length,
+    privateCorrelationToken,
+    privateMetadata,
     x: Math.floor((left + right) / 2),
     y: Math.floor((top + bottom) / 2),
   });
@@ -198,7 +311,7 @@ export function classifyDurableAudioEvidence(nodes) {
   let audioKept = 0;
   let retranscribe = 0;
   for (const node of nodes) {
-    if (!node.visible) continue;
+    if (!isMainaNode(node) || !node.visible) continue;
     for (const label of exactLabels(node)) {
       if (label === 'Audio available: Yes') audioAvailable += 1;
       if (/^Saved audio segments: [1-9]\d*$/.test(label)) positiveSegments += 1;
@@ -212,9 +325,35 @@ export function classifyDurableAudioEvidence(nodes) {
   return Object.freeze(counts);
 }
 
+export function classifyRecoveryDurability(nodes) {
+  invariant(optionalUniqueMarker(nodes, 'meeting-recovery-root') === true, 'Recovery surface is absent.');
+  const audioNodes = nodes.filter((node) => isMainaNode(node) && node.visible && hasExactTestId(node, 'meeting-recovery-audio'));
+  const segmentNodes = nodes.filter((node) => isMainaNode(node) && node.visible && hasExactTestId(node, 'meeting-recovery-segments'));
+  const retranscribe = actionableMatches(nodes, {
+    label: 'Re-transcribe from saved audio',
+    testId: 'meeting-recovery-retranscribe',
+  });
+  invariant(audioNodes.length === 1 && segmentNodes.length === 1 && retranscribe.length === 1, 'Recovery durability evidence is missing or ambiguous.');
+  invariant([...exactLabels(audioNodes[0])].filter((label) => label === 'Audio available: Yes').length === 1, 'Recovery audio availability is not positive.');
+  invariant([...exactLabels(segmentNodes[0])].filter((label) => /^Saved audio segments: [1-9]\d*$/.test(label)).length === 1, 'Recovery segment count is not positive.');
+  return Object.freeze({ audioAvailable: 1, positiveSegments: 1, retranscribe: 1 });
+}
+
+export function classifySavedDetailDurability(nodes) {
+  invariant(actionableMatches(nodes, { label: 'Delete meeting', testId: 'meeting-detail-delete' }).length === 1,
+    'Saved detail surface is absent or ambiguous.');
+  const audioNodes = nodes.filter((node) => isMainaNode(node) && node.visible && hasExactTestId(node, 'meeting-detail-audio-state'));
+  invariant(audioNodes.length === 1, 'Saved detail audio evidence is missing or ambiguous.');
+  const labels = [...exactLabels(audioNodes[0])];
+  invariant(labels.length === 1
+    && /^(?:[1-9]\d* transcript blocks|No transcript|Transcription in progress)(?: · [1-9]\d*% audio coverage)? · audio kept$/u.test(labels[0]),
+  'Saved detail durable audio evidence is not positive.');
+  return Object.freeze({ audioAvailable: 1, positiveSegments: 1, retranscribe: 0 });
+}
+
 export function requireNoActiveRecordingSurface(nodes) {
   const activeLabels = ['Stop and save', 'Pause', 'Resume', 'Discard this recording', 'Recording', 'Paused'];
-  invariant(!nodes.some((node) => node.visible && activeLabels.some((label) => hasExactLabel(node, label))), 'Recovered detail still exposes an active recording surface.');
+  invariant(!nodes.some((node) => isMainaNode(node) && node.visible && activeLabels.some((label) => hasExactLabel(node, label))), 'Recovered detail still exposes an active recording surface.');
   return true;
 }
 
@@ -228,6 +367,48 @@ export function classifyPowerState(output) {
   throw new Error('Power state is not an exact on/off condition.');
 }
 
+const RECORDING_NOTIFICATION_ID = 7001;
+const RECORDING_NOTIFICATION_CHANNEL = 'maina_recording';
+const NOTIFICATION_STATE_BY_TITLE = new Map([
+  ['Maina is ready', 'ready'],
+  ['Maina is recording', 'recording'],
+  ['Maina is paused', 'paused'],
+  ['Maina is saving', 'saving'],
+]);
+
+function escapeRegex(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function exactNotificationTitlePresent(record, title) {
+  for (const prefix of ['android.title=String (', 'android.title=']) {
+    let index = record.indexOf(prefix + title);
+    while (index >= 0) {
+      const end = index + prefix.length + title.length;
+      const following = record.slice(end, end + 1);
+      if (prefix.endsWith('(') ? following === ')' : /[\s,}]/.test(following)) return true;
+      index = record.indexOf(prefix + title, end);
+    }
+  }
+  return false;
+}
+
+export function classifyMainaRecordingNotification(notificationDump, packageName) {
+  if (typeof notificationDump !== 'string' || typeof packageName !== 'string' || packageName.length === 0) {
+    return 'unavailable/ambiguous';
+  }
+  const packagePattern = escapeRegex(packageName);
+  const records = notificationDump.split(/(?=NotificationRecord\()/);
+  const candidates = records.filter((record) => new RegExp(`pkg=${packagePattern}(?:[\\s,}\\]])`).test(record)
+    && new RegExp(`(?:^|[\\s,])id=${RECORDING_NOTIFICATION_ID}(?=[\\s,])`, 'm').test(record)
+    && new RegExp(`channel=${RECORDING_NOTIFICATION_CHANNEL}(?:[\\s,}\\]])`).test(record));
+  if (candidates.length !== 1) return 'unavailable/ambiguous';
+  const states = [...NOTIFICATION_STATE_BY_TITLE]
+    .filter(([title]) => exactNotificationTitlePresent(candidates[0], title))
+    .map(([, state]) => state);
+  return states.length === 1 ? states[0] : 'unavailable/ambiguous';
+}
+
 export const androidLifecyclePolicy = Object.freeze({
   schemaVersion: 'maina.android-lifecycle-qualification-core.v1',
   exactTestIds: Object.freeze([
@@ -236,9 +417,22 @@ export const androidLifecyclePolicy = Object.freeze({
     'recording-stop-save',
     'recording-pause-resume',
     'recording-discard',
+    'recording-recovery-keep',
+    'meeting-detail-delete',
+    'meeting-detail-metadata',
+    'meeting-detail-audio-state',
+    'meeting-tab-transcript',
+    'meeting-recovery-root',
+    'meeting-recovery-metadata',
+    'meeting-recovery-segments',
+    'meeting-recovery-audio',
+    'meeting-recovery-retranscribe',
+    'meeting-recovery-open-saved',
     'record-meeting',
+    'meeting-list-loaded',
     'recording-count',
     'meeting-card',
+    'meeting-card-metadata',
   ]),
   processRecoveryRecordingDelta: 1,
   rawHierarchyPersistenceAllowed: false,

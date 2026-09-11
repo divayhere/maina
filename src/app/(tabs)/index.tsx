@@ -16,6 +16,16 @@ import { subscribeMeetingPipelineChanges } from '@/services/meetingPipelineSigna
 import { formatDate, formatDuration, formatTime } from '@/utils/format';
 import { markdownToReadableText } from '@/utils/plainText';
 
+function formatMeetingLength(meeting: Pick<Meeting, 'durationMs' | 'audioDurationMs' | 'captureGapMs'>): string {
+  const elapsedMs = Math.max(0, meeting.durationMs);
+  const recordedMs = Math.max(0, meeting.audioDurationMs ?? 0);
+  const gapMs = Math.max(0, meeting.captureGapMs ?? 0);
+  if (recordedMs > 0 && gapMs >= 1_000) {
+    return `${formatDuration(recordedMs)} recorded · ${formatDuration(gapMs)} interrupted`;
+  }
+  return formatDuration(recordedMs || elapsedMs);
+}
+
 function MeetingRow({ item }: { item: Meeting }) {
   const { theme } = useAppTheme();
   const state = describeMeetingPresentation(item);
@@ -23,7 +33,7 @@ function MeetingRow({ item }: { item: Meeting }) {
     status: item.knowledgeCloudSyncStatus,
     error: item.knowledgeCloudError,
   });
-  const meta = `${formatDate(item.startedAt)} · ${formatTime(item.startedAt)} · ${formatDuration(item.durationMs)}${item.language ? ` · ${item.language}` : ''}`;
+  const meta = `${formatDate(item.startedAt)} · ${formatTime(item.startedAt)} · ${formatMeetingLength(item)}${item.language ? ` · ${item.language}` : ''}`;
 
   return (
     <Pressable
@@ -38,9 +48,10 @@ function MeetingRow({ item }: { item: Meeting }) {
               <AppText variant="title" numberOfLines={2}>
                 {item.title}
               </AppText>
-              <AppText variant="meta" muted>
+              <AppText testID="meeting-card-metadata" variant="meta" muted>
                 {meta}
               </AppText>
+              <View collapsable={false} testID={`meeting-card-correlation-${item.id}`} style={{ width: 1, height: 1 }} />
             </View>
             <Ionicons name="chevron-forward" size={26} color={theme.textSoft} />
           </View>
@@ -165,6 +176,7 @@ export default function MeetingsScreen() {
               />
             </View>
 
+            {loaded ? <View testID="meeting-list-loaded" /> : null}
             <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
               <SectionLabel>Recent</SectionLabel>
               <AppText testID="recording-count" variant="meta" muted>

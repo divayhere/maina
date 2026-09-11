@@ -6,6 +6,7 @@ import path from 'node:path';
 
 const root = path.resolve(import.meta.dirname, '..');
 const INTERPRETERS = new Set(['node', 'bash', 'ruby', 'python3']);
+const PINNED_NODE = '/Users/divay/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node';
 const PLAIN_TOKEN = /^[A-Za-z0-9_@+./:=,-]+$/u;
 const EXTERNAL_SEGMENTS = new Set([
   'expo lint', 'expo start', 'expo start --web',
@@ -46,7 +47,7 @@ export function collectLocalScriptTargets(scripts) {
       const tokens = segment.trim().split(/\s+/u);
       assert.ok(tokens.every((token) => PLAIN_TOKEN.test(token)), 'package script ' + name + ' has an unsupported token');
       const executable = tokens[0];
-      if (INTERPRETERS.has(executable)) {
+      if (INTERPRETERS.has(executable) || executable === PINNED_NODE) {
         const target = tokens[1];
         assert.ok(target && isLocalTarget(target), 'package script ' + name + ' interpreter target is unsupported');
         targets.push({ name, relative: canonicalLocalTarget(target, name) });
@@ -66,6 +67,7 @@ const fixtureTargets = collectLocalScriptTargets({
   three: 'ruby scripts/three.rb && node scripts/four.mjs',
   four: 'python3 coordination/scripts/four.py',
   five: 'scripts/five.sh --flag',
+  pinnedNode: `${PINNED_NODE} scripts/six.mjs`,
   external: 'expo start',
 });
 assert.deepEqual(fixtureTargets, [
@@ -75,12 +77,17 @@ assert.deepEqual(fixtureTargets, [
   { name: 'three', relative: 'scripts/four.mjs' },
   { name: 'four', relative: 'coordination/scripts/four.py' },
   { name: 'five', relative: 'scripts/five.sh' },
+  { name: 'pinnedNode', relative: 'scripts/six.mjs' },
 ]);
 for (const scripts of [
   { traversal: 'node scripts/../private.mjs' },
   { missingTarget: 'node' },
   { unknownInterpreter: 'perl scripts/missing.pl' },
   { interpreterOption: 'node --require scripts/existing-hook.mjs scripts/missing-main.mjs' },
+  { pinnedNodeMissingTarget: PINNED_NODE },
+  { pinnedNodeOption: `${PINNED_NODE} --require scripts/existing-hook.mjs scripts/missing-main.mjs` },
+  { mutatedPinnedNode: `${PINNED_NODE}x scripts/one.mjs` },
+  { arbitraryAbsoluteNode: '/bin/node scripts/one.mjs' },
   { externalLocalTarget: 'npx tsx scripts/missing.ts' },
   { normalizedExternalLocalTarget: 'npx tsx ././scripts/missing.ts' },
   { npmExecLocalTarget: 'npm exec tsx missing.ts' },

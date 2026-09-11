@@ -41,6 +41,7 @@ internal enum class MainaTerminalReasonCode(val wireValue: String) {
     STOP_QUEUED("stop_queued"),
     STOP_RUNNING("stop_running"),
     STOP_SUCCEEDED("stop_succeeded"),
+    DISCARD_READY_FOR_ACK("discard_ready_for_ack"),
     STOP_STALE_SUPERSEDED("stop_stale_superseded"),
     STOP_TIMEOUT_OR_ERROR("stop_timeout_or_error"),
 }
@@ -65,6 +66,14 @@ internal enum class MainaTerminalCompletionAuthority {
 }
 
 internal enum class MainaTerminalCompletionPublication { IDLE, RECOVERY_REQUIRED }
+
+internal enum class MainaDurableCommandAuthority { AVAILABLE, QUARANTINED, INVALID }
+
+/** Every service command is fail-closed while durable ownership is ambiguous. */
+internal object MainaDurableCommandAdmissionPolicy {
+    fun allows(authority: MainaDurableCommandAuthority): Boolean =
+        authority == MainaDurableCommandAuthority.AVAILABLE
+}
 
 /**
  * JS may mirror legacy recorder presentation only while no native capture
@@ -107,6 +116,30 @@ internal object MainaTerminalPublicationPolicy {
             MainaTerminalPublicationPhase.RECOVERY_REQUIRED,
         )
     )
+
+    fun preparedDiscardMayRun(
+        active: MainaCaptureOperationToken?,
+        state: MainaCaptureControlState,
+        disposition: MainaCaptureTerminalDisposition?,
+        discardId: String?,
+        terminalEffectReady: Boolean,
+    ): Boolean = active == null &&
+        state.phase == MainaCaptureControlPhase.TERMINAL &&
+        disposition == MainaCaptureTerminalDisposition.DISCARD &&
+        !discardId.isNullOrBlank() &&
+        !terminalEffectReady
+
+    fun terminalRecoveryRetryAllowed(
+        active: MainaCaptureOperationToken?,
+        state: MainaCaptureControlState,
+        publication: MainaTerminalPublicationStatus,
+        disposition: MainaCaptureTerminalDisposition?,
+        retryAlreadyUsed: Boolean,
+    ): Boolean = active == null &&
+        state.phase == MainaCaptureControlPhase.TERMINAL &&
+        publication.phase == MainaTerminalPublicationPhase.RECOVERY_REQUIRED &&
+        disposition == MainaCaptureTerminalDisposition.SAVE &&
+        !retryAlreadyUsed
 
     fun queued(operation: MainaCaptureOperationToken, nowElapsedMs: Long): MainaTerminalPublicationStatus {
         require(operation.isTerminal())
@@ -193,6 +226,18 @@ internal object MainaTerminalPublicationPolicy {
         )
     }
 
+    fun discardReadyForAck(
+        current: MainaTerminalPublicationStatus,
+        operationId: Long?,
+        nowElapsedMs: Long,
+    ): MainaTerminalPublicationStatus = current.copy(
+        phase = MainaTerminalPublicationPhase.SUCCEEDED,
+        reasonCode = MainaTerminalReasonCode.DISCARD_READY_FOR_ACK,
+        ownerOperationId = operationId,
+        startedElapsedMs = current.startedElapsedMs ?: nowElapsedMs,
+        updatedElapsedMs = nowElapsedMs.coerceAtLeast(current.updatedElapsedMs),
+    )
+
     fun recoveryRequired(
         current: MainaTerminalPublicationStatus,
         operation: MainaCaptureOperationToken?,
@@ -221,6 +266,33 @@ internal data class MainaCaptureOperationToken(
     val captureSessionId: String? = null,
     val expectedPrivacyLatchGeneration: Long? = null,
 )
+
+/**
+ * A native STOP/ABORT completion may close the microphone after a failed
+ * checkpoint, but it cannot delete audio or start post-processing unless the
+ * exact terminal owner is freshly readable from durable main-process state.
+ */
+internal object MainaTerminalEffectAuthorityPolicy {
+    fun verifiedOwner(
+        inspection: MainaCaptureControlInspection,
+        expected: MainaDurableCaptureControl?,
+        operation: MainaCaptureOperationToken,
+        disposition: MainaCaptureTerminalDisposition,
+        nativeMeetingId: String?,
+    ): MainaDurableCaptureControl? {
+        val observed = (inspection as? MainaCaptureControlInspection.Terminal)?.control ?: return null
+        if (expected == null || observed != expected) return null
+        if (observed.phase != MainaCaptureControlPhase.TERMINAL ||
+            observed.terminalDisposition != disposition ||
+            observed.meetingId != operation.captureSessionId ||
+            observed.meetingId != nativeMeetingId ||
+            observed.generation != operation.generation ||
+            (disposition == MainaCaptureTerminalDisposition.DISCARD) !=
+                !observed.terminalDiscardId.isNullOrBlank()
+        ) return null
+        return observed
+    }
+}
 
 internal object MainaCaptureOperationPolicy {
     fun nativePreparationAllowed(

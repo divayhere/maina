@@ -29,6 +29,7 @@ export type MainaKnowledgeCloudMeetingShape = {
   knowledgeCloudSyncStatus: MainaKnowledgeCloudSyncStatus;
   knowledgeCloudPayloadJson?: string | null;
   knowledgeCloudError?: string | null;
+  qualificationEvidenceDigest?: string | null;
 };
 
 export type MainaKnowledgeCloudTranscriptBlockShape = {
@@ -132,6 +133,7 @@ export function isMeetingEligibleForMainaKnowledgeCloudSync(
   meeting: MainaKnowledgeCloudMeetingShape,
   options?: { includeAuthFailures?: boolean },
 ) {
+  if (meeting.qualificationEvidenceDigest != null) return false;
   // Never freeze or retry a source from a transcript that Maina itself knows
   // has missing ASR coverage. Recovery/correction must happen first.
   if (meeting.status === 'transcript_partial' || meeting.status === 'audio_expired_incomplete') return false;

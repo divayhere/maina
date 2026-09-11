@@ -52,10 +52,10 @@ let executionTail: Promise<void> = Promise.resolve();
 const TRANSCRIPT_PAGE_SIZE = 100;
 
 function isMeetingPacketEligible(meeting: Meeting): boolean {
-  return meeting.status === 'transcribed'
+  return meeting.qualificationEvidenceDigest == null && (meeting.status === 'transcribed'
     || meeting.status === 'summarizing'
     || meeting.status === 'summarized'
-    || isTerminalPartialTranscript(meeting);
+    || isTerminalPartialTranscript(meeting));
 }
 
 type CloudPacketTodo = { text: string; source_quote?: string; source_timestamp?: string };

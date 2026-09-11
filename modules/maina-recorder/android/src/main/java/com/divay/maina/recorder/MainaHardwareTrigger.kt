@@ -325,6 +325,7 @@ internal object MainaShellCommandPolicy {
         if (action != ACTION || !ordered || extraKeys != exactExtraKeys || replayed) return false
         if (expectedState != currentState) return false
         return when (command) {
+            "arm_qualification" -> currentState == "idle"
             "start" -> currentState == "idle"
             "pause" -> currentState == "recording"
             "resume" -> currentState == "paused"
@@ -358,6 +359,12 @@ class MainaShellCommandReceiver : BroadcastReceiver() {
             )
         ) return
         val slot = prefs.getInt(NEXT_NONCE_SLOT, 0).coerceIn(0, NONCE_SLOTS - 1)
+        if (command == "arm_qualification") {
+            if (!MainaQualificationSessionAuthority.armIfFresh(context, nonce)) return
+            setResultCode(MainaShellCommandPolicy.RESULT_ACCEPTED)
+            setResultData(nonce)
+            return
+        }
         if (!prefs.edit()
                 .putString("nonce_$slot", nonce)
                 .putInt(NEXT_NONCE_SLOT, (slot + 1) % NONCE_SLOTS)

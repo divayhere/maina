@@ -7,6 +7,13 @@
   <uses-permission android:name="android.permission.VIBRATE" />
 
   <application>
+    <provider
+      android:name="com.divay.maina.recorder.MainaCaptureAutomaticWorkAuthorityProvider"
+      android:authorities="${applicationId}.maina.capture-authority"
+      android:enabled="true"
+      android:exported="false"
+      android:grantUriPermissions="false"
+      android:multiprocess="false" />
     <service
       android:name="com.divay.maina.recorder.MainaRecordingService"
       android:exported="false"

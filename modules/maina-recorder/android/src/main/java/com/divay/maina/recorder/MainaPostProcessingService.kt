@@ -131,9 +131,16 @@ internal class MainaPostProcessingService : Service() {
                         MainaPostProcessingRecoveryScheduler.notifyResume(applicationContext, meetingId)
                     }
                 }
+            } catch (_: MainaAutomaticWorkBlockedException) {
+                Log.w("MainaPostProcessing", "Local transcription is fenced by native capture authority")
+                if (MainaCaptureAutomaticWorkGate.classify(applicationContext, meetingId, directory) ==
+                    MainaAutomaticWorkAuthority.DEFERRED
+                ) {
+                    MainaPostProcessingRecoveryScheduler.enqueue(applicationContext, meetingId)
+                }
             } catch (error: Throwable) {
                 val message = error.message ?: error.javaClass.simpleName
-                Log.e("MainaPostProcessing", "Local transcription failed for meetingId=$meetingId", error)
+                Log.e("MainaPostProcessing", "Local transcription failed (${error.javaClass.simpleName})")
                 runCatching {
                     MainaPostProcessingOutbox.shared(applicationContext).defer(
                         meetingId, "Local transcription paused safely: $message",
@@ -185,9 +192,11 @@ internal class MainaPostProcessingService : Service() {
         meetingStartedAt: Long,
         forceRetry: Boolean,
     ): Boolean {
-        val inspection = waitForFinalizedChunks(directory)
+        requireAutomaticWorkAuthority(meetingId, directory)
+        val inspection = waitForFinalizedChunks(meetingId, directory)
         val chunkUris = inspection.finalizedUris
         if (chunkUris.isEmpty()) {
+            requireAutomaticWorkAuthority(meetingId, directory)
             MainaPostProcessingOutbox.shared(applicationContext).begin(
                 meetingId, directory, meetingStartedAt, captureEndedAt, 0L, 0L, 0, 0, routeRestartCount, captureGapMs,
                 MainaQwenAsr.ModelIdentity(
@@ -206,7 +215,11 @@ internal class MainaPostProcessingService : Service() {
             return false
         }
 
-        val durations = chunkUris.map(MainaPostProcessingSupport::durationMs)
+        requireAutomaticWorkAuthority(meetingId, directory)
+        val durations = chunkUris.map { uri ->
+            requireAutomaticWorkAuthority(meetingId, directory)
+            MainaPostProcessingSupport.durationMs(uri)
+        }
         val measuredAudioDurationMs = durations.sum()
         val effectiveAudioDurationMs = max(audioDurationMs, measuredAudioDurationMs)
         val effectiveWallDurationMs = when {
@@ -227,6 +240,7 @@ internal class MainaPostProcessingService : Service() {
         }.coerceAtLeast(1L)
         val asr = MainaQwenAsr(applicationContext)
         val start = try {
+            requireAutomaticWorkAuthority(meetingId, directory)
             outbox.begin(
                 meetingId = meetingId,
                 captureDirectory = directory,
@@ -247,13 +261,13 @@ internal class MainaPostProcessingService : Service() {
         }
         if (start.alreadyTerminal) {
             asr.release()
-            Log.i("MainaPostProcessing", "Terminal outbox run already exists for meetingId=$meetingId state=${start.terminalState}")
+            Log.i("MainaPostProcessing", "Terminal outbox run already exists state=${start.terminalState}")
             notifyResultChanged(meetingId, "terminal")
             return start.terminalState == MainaPostProcessingOutbox.STATE_COMPLETE
         }
         Log.i(
             "MainaPostProcessing",
-            "Starting local transcription meetingId=$meetingId chunks=${chunkUris.size} totalWindows=$totalWindows wallDurationMs=$effectiveWallDurationMs audioDurationMs=$effectiveAudioDurationMs routeRestarts=$routeRestartCount captureGapMs=$captureGapMs",
+            "Starting local transcription chunks=${chunkUris.size} totalWindows=$totalWindows wallDurationMs=$effectiveWallDurationMs audioDurationMs=$effectiveAudioDurationMs routeRestarts=$routeRestartCount captureGapMs=$captureGapMs",
         )
         val voiceActivity = MainaVoiceActivity(applicationContext)
         var previousText = ""
@@ -272,9 +286,10 @@ internal class MainaPostProcessingService : Service() {
                 val windows = windowPlans.getOrNull(chunkIndex).orEmpty()
                 Log.i(
                     "MainaPostProcessing",
-                    "Chunk start meetingId=$meetingId chunkIndex=$chunkIndex chunkDurationMs=$chunkDurationMs windows=${windows.size} uri=$uri",
+                    "Chunk start chunkIndex=$chunkIndex chunkDurationMs=$chunkDurationMs windows=${windows.size}",
                 )
                 windows.forEachIndexed { windowIndex, window ->
+                    requireAutomaticWorkAuthority(meetingId, directory)
                     val baseSequence = windowOrdinal * MAX_RECOVERY_PIECES
                     windowOrdinal += 1
                     val windowKey = MainaPostProcessingOutbox.windowKey(chunkIndex, windowIndex)
@@ -287,29 +302,38 @@ internal class MainaPostProcessingService : Service() {
                     }
                     Log.i(
                         "MainaPostProcessing",
-                        "Window start meetingId=$meetingId chunkIndex=$chunkIndex windowIndex=$windowIndex startMs=${window.startMs} endMs=${window.endMs}",
+                        "Window start chunkIndex=$chunkIndex windowIndex=$windowIndex startMs=${window.startMs} endMs=${window.endMs}",
                     )
+                    requireAutomaticWorkAuthority(meetingId, directory)
                     outbox.clearWindowBlocks(meetingId, start.runId, baseSequence, MAX_RECOVERY_PIECES)
                     if (previousText.isBlank() && start.resumed) {
                         previousText = outbox.lastBlockTextBefore(meetingId, start.runId, baseSequence)
                     }
                     try {
-                        val outcome = decodeWindowWithRecovery(asr, voiceActivity, uri, window)
+                        val outcome = decodeWindowWithRecovery(
+                            meetingId,
+                            directory,
+                            asr,
+                            voiceActivity,
+                            uri,
+                            window,
+                        )
                         if (Thread.currentThread().isInterrupted) {
                             throw InterruptedException("Capture preempted local transcription at a durable window boundary")
                         }
+                        requireAutomaticWorkAuthority(meetingId, directory)
                         if (!outcome.complete) {
                             failedWindows += 1
                             lastError = outcome.error ?: "Local transcription coverage is incomplete."
                             Log.w(
                                 "MainaPostProcessing",
-                                "Window remained incomplete after bounded recovery meetingId=$meetingId chunkIndex=$chunkIndex windowIndex=$windowIndex error=$lastError",
+                                "Window remained incomplete after bounded recovery chunkIndex=$chunkIndex windowIndex=$windowIndex",
                             )
                         } else {
                             completedWindows += 1
                             Log.i(
                                 "MainaPostProcessing",
-                                "Window done meetingId=$meetingId chunkIndex=$chunkIndex windowIndex=$windowIndex attempts=${outcome.pieces.size} processingMs=${outcome.pieces.sumOf { it.processingMs }}",
+                                "Window done chunkIndex=$chunkIndex windowIndex=$windowIndex attempts=${outcome.pieces.size} processingMs=${outcome.pieces.sumOf { it.processingMs }}",
                             )
                         }
                         outcome.pieces.take(MAX_RECOVERY_PIECES).forEachIndexed { pieceIndex, result ->
@@ -339,7 +363,7 @@ internal class MainaPostProcessingService : Service() {
                             windowEvidence(outcome, outcome.error),
                         )
                     } catch (error: Throwable) {
-                        if (error is InterruptedException) throw error
+                        if (error is InterruptedException || error is MainaAutomaticWorkBlockedException) throw error
                         failedWindows += 1
                         lastError = error.message ?: error.javaClass.simpleName
                         outbox.markWindow(
@@ -353,10 +377,10 @@ internal class MainaPostProcessingService : Service() {
                         )
                         Log.w(
                             "MainaPostProcessing",
-                            "Window failed meetingId=$meetingId chunkIndex=$chunkIndex windowIndex=$windowIndex message=${lastError}",
-                            error,
+                            "Window failed chunkIndex=$chunkIndex windowIndex=$windowIndex (${error.javaClass.simpleName})",
                         )
                     }
+                    requireAutomaticWorkAuthority(meetingId, directory)
                     outbox.updateProgress(
                         meetingId = meetingId,
                         processedSegments = processedSegments,
@@ -370,8 +394,9 @@ internal class MainaPostProcessingService : Service() {
                 processedSegments = chunkIndex + 1
                 Log.i(
                     "MainaPostProcessing",
-                    "Chunk finished meetingId=$meetingId chunkIndex=$chunkIndex processedSegments=$processedSegments completedWindows=$completedWindows failedWindows=$failedWindows",
+                    "Chunk finished chunkIndex=$chunkIndex processedSegments=$processedSegments completedWindows=$completedWindows failedWindows=$failedWindows",
                 )
+                requireAutomaticWorkAuthority(meetingId, directory)
                 outbox.updateProgress(
                     meetingId = meetingId,
                     processedSegments = processedSegments,
@@ -382,6 +407,7 @@ internal class MainaPostProcessingService : Service() {
                 chunkCursorAt += chunkDurationMs
             }
 
+            requireAutomaticWorkAuthority(meetingId, directory)
             val hasTranscript = outbox.lastBlockTextBefore(meetingId, start.runId, Int.MAX_VALUE).isNotBlank()
             val coverageComplete = MainaPostProcessingSupport.coverageComplete(
                 totalWindows,
@@ -389,15 +415,17 @@ internal class MainaPostProcessingService : Service() {
                 failedWindows,
             )
             val finalError = if (coverageComplete) null else (lastError ?: "Local transcription coverage is incomplete.")
+            requireAutomaticWorkAuthority(meetingId, directory)
             val terminalResult = outbox.finish(meetingId, processedSegments, completedWindows, failedWindows, finalError) { result ->
                 asr.bindExactResultBeforeCommit(result)
             }
+            requireAutomaticWorkAuthority(meetingId, directory)
             if (!asr.commitExactResult(terminalResult)) {
                 throw IllegalStateException("native_model_result_binding_failed")
             }
             Log.i(
                 "MainaPostProcessing",
-                "Finished local transcription meetingId=$meetingId hasTranscript=$hasTranscript processedSegments=$processedSegments completedWindows=$completedWindows failedWindows=$failedWindows finalError=${finalError ?: "none"}",
+                "Finished local transcription hasTranscript=$hasTranscript processedSegments=$processedSegments completedWindows=$completedWindows failedWindows=$failedWindows outcome=${if (finalError == null) "complete" else "partial"}",
             )
             notifyResultChanged(
                 meetingId,
@@ -419,6 +447,10 @@ internal class MainaPostProcessingService : Service() {
         }
     }
 
+    private fun requireAutomaticWorkAuthority(meetingId: String, directory: String) {
+        MainaCaptureAutomaticWorkGate.requireAllowed(applicationContext, meetingId, directory)
+    }
+
     private data class WindowDecodeOutcome(
         val pieces: List<MainaQwenAsr.Result>,
         val complete: Boolean,
@@ -428,6 +460,8 @@ internal class MainaPostProcessingService : Service() {
     )
 
     private fun decodeWindowWithRecovery(
+        meetingId: String,
+        directory: String,
         asr: MainaQwenAsr,
         voiceActivity: MainaVoiceActivity,
         uri: String,
@@ -435,6 +469,7 @@ internal class MainaPostProcessingService : Service() {
         depth: Int = 0,
         maxNewTokens: Int = MainaQwenAsrPolicy.maxNewTokens,
     ): WindowDecodeOutcome {
+        requireAutomaticWorkAuthority(meetingId, directory)
         val activity = asr.assessVoice(voiceActivity, uri, window)
         if (!activity.shouldTranscribe) {
             Log.i(
@@ -449,6 +484,7 @@ internal class MainaPostProcessingService : Service() {
                 activity = activity,
             )
         }
+        requireAutomaticWorkAuthority(meetingId, directory)
         val first = asr.transcribe(uri, window.startMs, window.endMs, maxNewTokens)
         if (!isSuspicious(first, activity)) {
             return WindowDecodeOutcome(
@@ -470,6 +506,7 @@ internal class MainaPostProcessingService : Service() {
                 "MainaPostProcessing",
                 "Retrying token-capped ASR window with bounded 256-token budget startMs=${window.startMs} endMs=${window.endMs}",
             )
+            requireAutomaticWorkAuthority(meetingId, directory)
             asr.transcribe(uri, window.startMs, window.endMs, MainaQwenAsrPolicy.recoveryMaxNewTokens)
         } else {
             null
@@ -494,6 +531,7 @@ internal class MainaPostProcessingService : Service() {
                 activity = activity,
             )
         }
+        requireAutomaticWorkAuthority(meetingId, directory)
         val retries = MainaPostProcessingSupport.splitForRetry(window, asr.lowestEnergySplit(uri, window))
         if (retries.isEmpty()) {
             return WindowDecodeOutcome(
@@ -514,6 +552,8 @@ internal class MainaPostProcessingService : Service() {
         retries.forEach { retry ->
             try {
                 val recovered = decodeWindowWithRecovery(
+                    meetingId,
+                    directory,
                     asr,
                     voiceActivity,
                     uri,
@@ -524,7 +564,7 @@ internal class MainaPostProcessingService : Service() {
                 pieces += recovered.pieces
                 if (!recovered.complete) error = recovered.error ?: "Local transcription coverage is incomplete."
             } catch (cause: Throwable) {
-                if (cause is InterruptedException) throw cause
+                if (cause is InterruptedException || cause is MainaAutomaticWorkBlockedException) throw cause
                 error = cause.message ?: cause.javaClass.simpleName
             }
         }
@@ -627,8 +667,12 @@ internal class MainaPostProcessingService : Service() {
         MainaPipelineWakeScheduler.enqueueNativeResult(applicationContext, meetingId, identity.first)
     }
 
-    private fun waitForFinalizedChunks(directory: String): MainaNativeAudioCapture.DirectoryInspection {
+    private fun waitForFinalizedChunks(
+        meetingId: String,
+        directory: String,
+    ): MainaNativeAudioCapture.DirectoryInspection {
         repeat(MainaPostProcessingStartPolicy.finalizedChunkAttempts()) { attempt ->
+            requireAutomaticWorkAuthority(meetingId, directory)
             val inspection = MainaNativeAudioCapture.inspectDirectory(directory, true)
             if (inspection.finalizedUris.isNotEmpty()) return inspection
             if (inspection.partialUris.isEmpty()) return inspection
@@ -637,6 +681,7 @@ internal class MainaPostProcessingService : Service() {
                 Thread.sleep(MainaPostProcessingStartPolicy.finalizedChunkDelayMs(attempt))
             }
         }
+        requireAutomaticWorkAuthority(meetingId, directory)
         return MainaNativeAudioCapture.inspectDirectory(directory, true)
     }
 
@@ -706,7 +751,7 @@ internal class MainaPostProcessingService : Service() {
         val affectedMeetings = queuedMeetingIds.toList()
         Log.w(
             "MainaPostProcessing",
-            "Android media processing time limit reached; Maina will resume on next foreground sync. meetingId=${activeMeetingId.get()}",
+            "Android media processing time limit reached; Maina will resume on next foreground sync.",
         )
         affectedMeetings.forEach { meetingId ->
             runCatching {

@@ -242,6 +242,15 @@ describe('meetingPacket cloud broker integration', () => {
     expect(mocks.cloudRequest).not.toHaveBeenCalled();
   });
 
+  it('never queues a local lifecycle-qualification meeting even when cloud notes are enabled', async () => {
+    meeting = { ...meeting, qualificationEvidenceDigest: 'a'.repeat(64) };
+    mocks.listMeetingsEligibleForSummaryQueue.mockResolvedValue([meeting]);
+
+    expect(await queueEligibleMeetingPackets()).toBe(0);
+    expect(mocks.setMeetingSummaryState).not.toHaveBeenCalled();
+    expect(mocks.cloudRequest).not.toHaveBeenCalled();
+  });
+
   it('owner force retries the same failed server job without a replacement POST', async () => {
     meeting = {
       ...meeting,

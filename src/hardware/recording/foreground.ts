@@ -17,6 +17,13 @@ import {
   type NativeModelPackLifecycleStatus,
   type RemoteControlStatus,
 } from '../../../modules/maina-recorder/src';
+import {
+  decodeNativeCaptureQuarantine,
+  type NativeCaptureQuarantine,
+} from '@/core/recording/nativeCaptureQuarantine';
+
+export { decodeNativeCaptureQuarantine } from '@/core/recording/nativeCaptureQuarantine';
+export type { NativeCaptureQuarantine } from '@/core/recording/nativeCaptureQuarantine';
 
 function requireRecorderModule() {
   if (!MainaRecorder) {
@@ -68,20 +75,61 @@ export async function setNativeCaptureState(state: CaptureState): Promise<void> 
   if (Platform.OS === 'android' && MainaRecorder) await MainaRecorder.setCaptureState(state);
 }
 
+export async function consumeAndroidQualificationSession(runId: string): Promise<string | null> {
+  if (Platform.OS !== 'android' || !MainaRecorder?.consumeAndroidQualificationSession) return null;
+  return MainaRecorder.consumeAndroidQualificationSession(runId);
+}
+
+export async function beginAndroidQualificationDiagnostics(
+  meetingId: string,
+  evidenceDigest: string,
+): Promise<boolean> {
+  if (Platform.OS !== 'android' || !MainaRecorder?.beginAndroidQualificationDiagnostics) return false;
+  return MainaRecorder.beginAndroidQualificationDiagnostics(meetingId, evidenceDigest);
+}
+
+export async function cancelAndroidQualificationDiagnosticsBeforeCapture(
+  meetingId: string,
+  evidenceDigest: string,
+): Promise<boolean> {
+  if (Platform.OS !== 'android' || !MainaRecorder?.cancelAndroidQualificationDiagnosticsBeforeCapture) return false;
+  return MainaRecorder.cancelAndroidQualificationDiagnosticsBeforeCapture(meetingId, evidenceDigest);
+}
+
+export async function isAndroidQualificationSessionActive(): Promise<boolean> {
+  if (Platform.OS !== 'android') return false;
+  if (!MainaRecorder?.isAndroidQualificationSessionActive) {
+    throw new Error('Android qualification-session authority is unavailable');
+  }
+  return MainaRecorder.isAndroidQualificationSessionActive();
+}
+
 export async function startNativeCapture(options: {
   meetingId: string;
   directory: string;
   sourceMode?: NativeCaptureSourceMode;
   chunkDurationMs?: number;
   meetingStartedAt: number;
+  qualificationSession?: boolean;
+  qualificationEvidenceDigest?: string | null;
 }): Promise<void> {
-  await requireRecorderModule().startNativeCapture(
+  const recorder = requireRecorderModule();
+  const args = [
     options.meetingId,
     options.directory,
     options.sourceMode ?? 'voice_recognition',
     options.chunkDurationMs ?? 5 * 60_000,
     options.meetingStartedAt,
-  );
+  ] as const;
+  if (Platform.OS === 'android') {
+    await recorder.startNativeCapture(
+      ...args,
+      options.qualificationSession ?? false,
+      options.qualificationEvidenceDigest ?? null,
+    );
+  } else {
+    await recorder.startNativeCapture(...args);
+  }
 }
 
 export async function pauseNativeCapture(): Promise<void> {
@@ -96,8 +144,105 @@ export async function stopNativeCapture(): Promise<void> {
   await requireRecorderModule().stopNativeCapture();
 }
 
-export async function abortNativeCapture(): Promise<void> {
-  await requireRecorderModule().abortNativeCapture();
+export type PendingNativeDiscard =
+  | { state: 'none' | 'blocked' }
+  | {
+    state: 'pending' | 'ready_for_ack';
+    meetingId: string;
+    discardId: string;
+    directory: string;
+    qualificationEvidenceDigest: string | null;
+    generation: number;
+  };
+
+const NATIVE_DISCARD_ID = /^[A-Za-z0-9._:-]{1,128}$/;
+const NATIVE_DISCARD_DIGEST = /^[a-f0-9]{64}$/;
+
+type RawPendingNativeDiscard = {
+  prepared?: boolean;
+  state: 'none' | 'pending' | 'ready_for_ack' | 'blocked';
+  meetingId?: string;
+  discardId?: string;
+  directory?: string;
+  qualificationEvidenceDigest?: string | null;
+  generation?: number;
+} | undefined;
+
+function decodePendingNativeDiscard(raw: RawPendingNativeDiscard): PendingNativeDiscard {
+  if (!raw || raw.state === 'blocked') return { state: 'blocked' };
+  if (raw.state === 'none') return { state: 'none' };
+  if ((raw.state === 'pending' || raw.state === 'ready_for_ack')
+    && typeof raw.meetingId === 'string' && NATIVE_DISCARD_ID.test(raw.meetingId)
+    && typeof raw.discardId === 'string' && NATIVE_DISCARD_ID.test(raw.discardId)
+    && typeof raw.directory === 'string' && raw.directory.length > 0 && raw.directory.length <= 4096
+    && (raw.qualificationEvidenceDigest == null || NATIVE_DISCARD_DIGEST.test(raw.qualificationEvidenceDigest))
+    && Number.isSafeInteger(raw.generation) && (raw.generation ?? -1) >= 0) {
+    return {
+      state: raw.state,
+      meetingId: raw.meetingId,
+      discardId: raw.discardId,
+      directory: raw.directory,
+      qualificationEvidenceDigest: raw.qualificationEvidenceDigest ?? null,
+      generation: raw.generation!,
+    };
+  }
+  return { state: 'blocked' };
+}
+
+export function prepareNativeDiscard(meetingId: string, discardId: string): PendingNativeDiscard {
+  if (Platform.OS !== 'android') return { state: 'none' };
+  const recorder = requireRecorderModule();
+  if (!recorder.prepareNativeDiscard) return { state: 'blocked' };
+  return decodePendingNativeDiscard(recorder.prepareNativeDiscard(meetingId, discardId));
+}
+
+export function getPendingNativeDiscard(): PendingNativeDiscard {
+  if (Platform.OS !== 'android') return { state: 'none' };
+  const recorder = requireRecorderModule();
+  return decodePendingNativeDiscard(recorder.getPendingNativeDiscard?.());
+}
+
+export function getNativeCaptureQuarantine(): NativeCaptureQuarantine {
+  if (Platform.OS !== 'android') return { state: 'none' };
+  return decodeNativeCaptureQuarantine(requireRecorderModule().getNativeCaptureQuarantine?.());
+}
+
+export async function recoverNativeCaptureQuarantine(meetingId: string): Promise<void> {
+  if (Platform.OS !== 'android' || !NATIVE_DISCARD_ID.test(meetingId)) {
+    throw new Error('Native capture quarantine identity is invalid');
+  }
+  const recorder = requireRecorderModule();
+  if (!recorder.recoverNativeCaptureQuarantine) {
+    throw new Error('Native capture quarantine recovery is unavailable');
+  }
+  const result = await recorder.recoverNativeCaptureQuarantine(meetingId);
+  if (!result.requested) throw new Error('Native capture quarantine recovery was rejected');
+}
+
+export async function abortNativeCapture(meetingId?: string, discardId?: string): Promise<void> {
+  const recorder = requireRecorderModule();
+  if (Platform.OS === 'android') {
+    if (!meetingId || !discardId) throw new Error('Exact native discard identity is required');
+    await recorder.abortNativeCapture(meetingId, discardId);
+    return;
+  }
+  await recorder.abortNativeCapture();
+}
+
+export async function acknowledgeNativeDiscard(meetingId: string, discardId: string): Promise<void> {
+  if (Platform.OS !== 'android') return;
+  const recorder = requireRecorderModule();
+  if (!recorder.acknowledgeNativeDiscard) throw new Error('Native discard acknowledgement is unavailable');
+  const result = await recorder.acknowledgeNativeDiscard(meetingId, discardId);
+  if (!result.requested) throw new Error('Native discard acknowledgement was rejected');
+}
+
+export async function retryNativeCaptureFinalization(): Promise<void> {
+  if (Platform.OS !== 'android' || !MainaRecorder?.retryNativeCaptureFinalization) {
+    throw new Error('Native capture finalization retry is unavailable');
+  }
+  const result = await MainaRecorder.retryNativeCaptureFinalization();
+  if (!result.requested) throw new Error('Native capture finalization retry was rejected');
 }
 
 export async function startNativePostProcessing(request: NativePostProcessingRequest): Promise<void> {
@@ -143,6 +288,11 @@ export async function inspectNativeCaptureDirectory(
 export async function deleteNativeCaptureDirectory(directory: string): Promise<boolean> {
   if (!MainaRecorder || !directory) return false;
   return MainaRecorder.deleteNativeCaptureDirectory(directory);
+}
+
+export async function deleteNativeDiscardDirectory(meetingId: string, directory: string): Promise<boolean> {
+  if (Platform.OS !== 'android' || !MainaRecorder?.deleteNativeDiscardDirectory) return false;
+  return MainaRecorder.deleteNativeDiscardDirectory(meetingId, directory);
 }
 
 export async function getQwenAsrStatus(): Promise<QwenAsrStatus | null> {

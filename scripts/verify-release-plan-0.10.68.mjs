@@ -30,6 +30,7 @@ const schema = json('release/provenance-0.10.68.schema.json');
 const app = json('app.json').expo;
 const manifest = json('package.json');
 const lock = json('package-lock.json');
+const releaseVerifier = source('scripts/verify-release.sh');
 
 assert.equal(sha256('release/m3-m4-0.10.67-candidate-plan.json'), '0e7be4cdb085286b3a89a71bc09d43934d7184ac557a8a8c7dbf3c79c4c26009');
 assert.equal(sha256('release/provenance-0.10.67.schema.json'), '728b37d2a678a513bf2cb7b965cc1c22e719212916da2ea650e90feee777f43d');
@@ -88,6 +89,11 @@ assert.equal(app.android.versionCode, plan.release.androidVersionCode);
 assert.equal(manifest.version, plan.release.version);
 assert.equal(lock.version, plan.release.version);
 assert.equal(lock.packages[''].version, plan.release.version);
+assert.match(manifest.scripts['verify:android-lifecycle-qualification'], new RegExp(plan.toolchains.nodeExecutablePath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+assert.equal(manifest.scripts['verify:android-qualification-diagnostics'], `${plan.toolchains.nodeExecutablePath} scripts/verify-android-qualification-diagnostics.mjs`);
+assert.equal(manifest.scripts['qualify:android-lifecycle'], `${plan.toolchains.nodeExecutablePath} scripts/run-android-lifecycle-qualification.mjs`);
+assert.equal(manifest.scripts['qualify:android-lifecycle:verify'], `${plan.toolchains.nodeExecutablePath} scripts/verify-android-lifecycle-evidence.mjs`);
+assert.match(releaseVerifier, /npm run verify:android-lifecycle-qualification/);
 assert.match(source('android/app/build.gradle'), /versionCode 94/);
 assert.match(source('android/app/build.gradle'), /versionName "0\.10\.68"/);
 

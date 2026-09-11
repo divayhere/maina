@@ -6,6 +6,7 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.io.File
+import java.nio.file.Files
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
@@ -22,15 +23,668 @@ class MainaCallInterruptionPolicyTest {
     }
 
     @Test
+    fun `discard store CAS and capture directory ownership are exact`() {
+        val filesDirectory = Files.createTempDirectory("maina-discard-root").toFile()
+        try {
+            val exact = File(filesDirectory, "rec-meeting-1")
+            val other = File(filesDirectory, "rec-meeting-2")
+            assertTrue(MainaCaptureDirectoryPolicy.matches(filesDirectory, "meeting-1", exact.path))
+            assertTrue(MainaCaptureDirectoryPolicy.matches(filesDirectory, "meeting-1", exact.toURI().toString()))
+            assertFalse(MainaCaptureDirectoryPolicy.matches(filesDirectory, "meeting-1", other.path))
+            assertFalse(MainaCaptureDirectoryPolicy.matches(filesDirectory, "../meeting-1", exact.path))
+            assertFalse(
+                MainaCaptureDirectoryPolicy.matches(
+                    filesDirectory,
+                    "meeting-1",
+                    requireNotNull(filesDirectory.parentFile).path,
+                ),
+            )
+
+            val expected = MainaDurableCaptureControl(
+                meetingId = "meeting-1",
+                directory = exact.path,
+                sourceMode = "voice_recognition",
+                chunkDurationMs = 300_000L,
+                meetingStartedAt = 1L,
+                qualificationSession = false,
+                qualificationEvidenceDigest = null,
+                phase = MainaCaptureControlPhase.RECORDING,
+                terminalDisposition = null,
+                terminalDiscardId = null,
+                terminalEffectReady = false,
+                pauseOwner = MainaCapturePauseOwner.NONE,
+                generation = 4L,
+                communicationActive = false,
+                chunkSequence = 0,
+                captureGapMs = 0L,
+                updatedAtEpochMs = 1L,
+            )
+            val prepared = expected.copy(
+                phase = MainaCaptureControlPhase.TERMINAL,
+                terminalDisposition = MainaCaptureTerminalDisposition.DISCARD,
+                terminalDiscardId = "discard-1",
+                generation = 5L,
+            )
+            assertTrue(MainaCaptureControlCasPolicy.allows(expected, expected))
+            assertFalse(MainaCaptureControlCasPolicy.allows(prepared, expected))
+        } finally {
+            filesDirectory.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `legacy terminal ownership is quarantined without inferring save or discard`() {
+        assertEquals(
+            MainaCaptureQuarantineReason.LEGACY_TERMINAL_DISPOSITION_MISSING,
+            MainaLegacyTerminalMigrationPolicy.quarantineReason(
+                MainaCaptureControlStorageFormat.LEGACY_V1,
+                MainaCaptureControlPhase.TERMINAL,
+            ),
+        )
+        assertEquals(
+            null,
+            MainaLegacyTerminalMigrationPolicy.quarantineReason(
+                MainaCaptureControlStorageFormat.LEGACY_V1,
+                MainaCaptureControlPhase.RECORDING,
+            ),
+        )
+        assertTrue(
+            MainaCaptureTerminalAuthorityPolicy.allows(
+                MainaCaptureControlPhase.TERMINAL,
+                MainaCaptureTerminalDisposition.SAVE,
+                null,
+            ),
+        )
+        assertTrue(
+            MainaCaptureTerminalAuthorityPolicy.allows(
+                MainaCaptureControlPhase.TERMINAL,
+                null,
+                MainaCaptureQuarantineReason.LEGACY_TERMINAL_DISPOSITION_MISSING,
+            ),
+        )
+        assertFalse(
+            MainaCaptureTerminalAuthorityPolicy.allows(
+                MainaCaptureControlPhase.TERMINAL,
+                null,
+                null,
+            ),
+        )
+        assertFalse(
+            MainaCaptureTerminalAuthorityPolicy.allows(
+                MainaCaptureControlPhase.TERMINAL,
+                MainaCaptureTerminalDisposition.DISCARD,
+                MainaCaptureQuarantineReason.LEGACY_TERMINAL_DISPOSITION_MISSING,
+            ),
+        )
+        assertTrue(
+            MainaCaptureTerminalAuthorityPolicy.allows(
+                MainaCaptureControlPhase.RECORDING,
+                null,
+                null,
+            ),
+        )
+        assertFalse(
+            MainaCaptureTerminalAuthorityPolicy.allows(
+                MainaCaptureControlPhase.RECORDING,
+                MainaCaptureTerminalDisposition.SAVE,
+                null,
+            ),
+        )
+        assertEquals(
+            null,
+            MainaLegacyTerminalMigrationPolicy.quarantineReason(
+                MainaCaptureControlStorageFormat.CURRENT,
+                MainaCaptureControlPhase.TERMINAL,
+            ),
+        )
+    }
+
+    @Test
+    fun `failed capture control write poisons every same process retry`() {
+        val authority = MainaCaptureWriteAuthority()
+        var attempts = 0
+
+        assertTrue(authority.permitsAccess())
+        assertFalse(authority.commit {
+            attempts += 1
+            false
+        })
+        assertFalse(authority.permitsAccess())
+        assertFalse(authority.commit {
+            attempts += 1
+            true
+        })
+        assertEquals(1, attempts)
+
+        val thrown = MainaCaptureWriteAuthority()
+        assertFalse(thrown.commit { error("disk result unavailable") })
+        assertFalse(thrown.permitsAccess())
+    }
+
+    @Test
+    fun `durable quarantine and uncertain writes reject every service command`() {
+        assertTrue(
+            MainaDurableCommandAdmissionPolicy.allows(MainaDurableCommandAuthority.AVAILABLE),
+        )
+        assertFalse(
+            MainaDurableCommandAdmissionPolicy.allows(MainaDurableCommandAuthority.QUARANTINED),
+        )
+        assertFalse(
+            MainaDurableCommandAdmissionPolicy.allows(MainaDurableCommandAuthority.INVALID),
+        )
+
+        val service = source(
+            "modules/maina-recorder/android/src/main/java/com/divay/maina/recorder/MainaRecordingService.kt",
+        )
+        val admission = service.substring(
+            service.indexOf("val commandInspection = captureControlStore.inspect()"),
+            service.indexOf("val notification = buildNotification()"),
+        )
+        assertTrue(admission.contains("MainaDurableCommandAdmissionPolicy.allows(commandAuthority)"))
+        assertTrue(admission.contains("publishQuarantinedCapture(commandInspection.control)"))
+        assertTrue(admission.contains("publishInvalidDurableCapture()"))
+        assertTrue(admission.indexOf("when (intent?.action)") > admission.indexOf("MainaDurableCommandAdmissionPolicy.allows"))
+    }
+
+    @Test
+    fun `automatic native work is fenced by invalid or quarantined main process authority`() {
+        val control = MainaDurableCaptureControl(
+            meetingId = "meeting-1",
+            directory = "/data/user/0/com.divay.maina/files/rec-meeting-1",
+            sourceMode = "voice_recognition",
+            chunkDurationMs = 300_000L,
+            meetingStartedAt = 1L,
+            qualificationSession = false,
+            qualificationEvidenceDigest = null,
+            phase = MainaCaptureControlPhase.TERMINAL,
+            terminalDisposition = null,
+            terminalDiscardId = null,
+            terminalEffectReady = false,
+            pauseOwner = MainaCapturePauseOwner.NONE,
+            generation = 4L,
+            communicationActive = false,
+            chunkSequence = 0,
+            captureGapMs = 0L,
+            updatedAtEpochMs = 1L,
+            sourceFormatVersion = 1,
+            quarantineReason = MainaCaptureQuarantineReason.LEGACY_TERMINAL_DISPOSITION_MISSING,
+        )
+        assertEquals(
+            MainaAutomaticWorkAuthority.ALLOWED,
+            MainaAutomaticWorkAdmissionPolicy.classify(MainaCaptureControlInspection.Absent, "meeting-1"),
+        )
+        assertEquals(
+            MainaAutomaticWorkAuthority.INVALID,
+            MainaAutomaticWorkAdmissionPolicy.classify(MainaCaptureControlInspection.Invalid, "meeting-1"),
+        )
+        assertEquals(
+            MainaAutomaticWorkAuthority.INVALID,
+            MainaAutomaticWorkAdmissionPolicy.classify(MainaCaptureControlInspection.Absent, "../meeting-1"),
+        )
+        assertEquals(
+            MainaAutomaticWorkAuthority.QUARANTINED,
+            MainaAutomaticWorkAdmissionPolicy.classify(
+                MainaCaptureControlInspection.Quarantined(control),
+                "unrelated-meeting",
+            ),
+        )
+        assertEquals(
+            MainaAutomaticWorkAuthority.QUARANTINED,
+            MainaAutomaticWorkAdmissionPolicy.classify(
+                MainaCaptureControlInspection.Quarantined(control),
+                null,
+            ),
+        )
+        val active = control.copy(
+            phase = MainaCaptureControlPhase.RECORDING,
+            terminalDisposition = null,
+            quarantineReason = null,
+        )
+        assertEquals(
+            MainaAutomaticWorkAuthority.DEFERRED,
+            MainaAutomaticWorkAdmissionPolicy.classify(
+                MainaCaptureControlInspection.Active(active),
+                "meeting-1",
+            ),
+        )
+        val terminalSave = control.copy(
+            terminalDisposition = MainaCaptureTerminalDisposition.SAVE,
+            quarantineReason = null,
+        )
+        assertEquals(
+            MainaAutomaticWorkAuthority.ALLOWED,
+            MainaAutomaticWorkAdmissionPolicy.classify(
+                MainaCaptureControlInspection.Terminal(terminalSave),
+                "meeting-1",
+            ),
+        )
+        assertEquals(
+            MainaAutomaticWorkAuthority.DEFERRED,
+            MainaAutomaticWorkAdmissionPolicy.classify(
+                MainaCaptureControlInspection.Terminal(terminalSave),
+                null,
+            ),
+        )
+        val terminalDiscard = control.copy(
+            terminalDisposition = MainaCaptureTerminalDisposition.DISCARD,
+            terminalDiscardId = "discard-1",
+            quarantineReason = null,
+        )
+        assertEquals(
+            MainaAutomaticWorkAuthority.DISCARDED,
+            MainaAutomaticWorkAdmissionPolicy.classify(
+                MainaCaptureControlInspection.Terminal(terminalDiscard),
+                "meeting-1",
+            ),
+        )
+        assertEquals(
+            MainaAutomaticWorkAuthority.DISCARDED,
+            MainaAutomaticWorkAdmissionPolicy.classify(
+                MainaCaptureControlInspection.Terminal(terminalDiscard),
+                null,
+            ),
+        )
+        assertEquals(
+            MainaAutomaticWorkAuthority.DEFERRED,
+            MainaAutomaticWorkAdmissionPolicy.classify(
+                MainaCaptureControlInspection.Terminal(terminalDiscard),
+                "unrelated-meeting",
+            ),
+        )
+
+        val authoritySource = source(
+            "modules/maina-recorder/android/src/main/java/com/divay/maina/recorder/MainaCaptureAutomaticWorkAuthority.kt",
+        )
+        val manifest = source("modules/maina-recorder/android/src/main/AndroidManifest.xml")
+        val recoveryWorker = source(
+            "modules/maina-recorder/android/src/main/java/com/divay/maina/recorder/MainaPostProcessingRecoveryWorker.kt",
+        )
+        val postProcessing = source(
+            "modules/maina-recorder/android/src/main/java/com/divay/maina/recorder/MainaPostProcessingService.kt",
+        )
+        val diagnostics = source(
+            "modules/maina-recorder/android/src/main/java/com/divay/maina/recorder/DiagnosticsWorker.kt",
+        )
+        val diagnosticsStore = source(
+            "modules/maina-recorder/android/src/main/java/com/divay/maina/recorder/DiagnosticsStore.kt",
+        )
+        val postProcessingOutbox = source(
+            "modules/maina-recorder/android/src/main/java/com/divay/maina/recorder/MainaPostProcessingOutbox.kt",
+        )
+        assertTrue(authoritySource.contains("Binder.getCallingUid() != appContext.applicationInfo.uid"))
+        assertTrue(authoritySource.contains("MainaCaptureControlStore(appContext).inspect()"))
+        assertTrue(authoritySource.contains("context.applicationContext.contentResolver.call"))
+        assertTrue(manifest.contains("android:exported=\"false\""))
+        assertTrue(manifest.contains("android:grantUriPermissions=\"false\""))
+        val recoveryRun = recoveryWorker.substring(recoveryWorker.indexOf("override suspend fun doWork"))
+        assertTrue(
+            recoveryRun.indexOf("MainaCaptureAutomaticWorkGate.classify") <
+                recoveryRun.indexOf("MainaPostProcessingOutbox.shared"),
+        )
+        val runPostProcessing = postProcessing.substring(
+            postProcessing.indexOf("private fun runPostProcessing"),
+            postProcessing.indexOf("private data class WindowDecodeOutcome"),
+        )
+        assertTrue(
+            runPostProcessing.indexOf("requireAutomaticWorkAuthority(meetingId, directory)") <
+                runPostProcessing.indexOf("waitForFinalizedChunks(meetingId, directory)"),
+        )
+        assertTrue(
+            diagnostics.indexOf("MainaCaptureAutomaticWorkGate.classify") <
+                diagnostics.indexOf("DiagnosticsStore.shared"),
+        )
+        assertTrue(diagnostics.contains("MainaAutomaticWorkAuthority.DEFERRED"))
+        assertTrue(recoveryRun.contains("MainaAutomaticWorkAuthority.DEFERRED -> return Result.retry()"))
+        assertTrue(postProcessingOutbox.contains("DB_VERSION = 7"))
+        assertTrue(postProcessingOutbox.contains("check(!isDiscarded(writableDatabase, meetingId))"))
+        assertTrue(postProcessingOutbox.contains("INSERT OR IGNORE INTO discarded_meetings"))
+        assertTrue(diagnosticsStore.contains("DB_VERSION = 6"))
+        assertTrue(diagnosticsStore.contains("ordinaryIngressAllowed(writableDatabase) && !isMeetingDiscarded"))
+        assertTrue(diagnostics.contains("record.meetingId?.let(store::isMeetingDiscarded)"))
+        assertTrue(diagnostics.contains("requireAutomaticWorkAuthority(artifact.meetingId)"))
+    }
+
+    @Test
+    fun `terminal effects require a fresh exact durable owner after native stop`() {
+        val operation = MainaCaptureOperationToken(
+            operationId = 77L,
+            generation = 9L,
+            owner = MainaCapturePauseOwner.NONE,
+            kind = MainaCaptureOperationKind.STOP,
+            expectedPhase = MainaCaptureControlPhase.TERMINAL,
+            captureSessionId = "meeting-1",
+        )
+        val owner = MainaDurableCaptureControl(
+            meetingId = "meeting-1",
+            directory = "/data/user/0/com.divay.maina/files/rec-meeting-1",
+            sourceMode = "voice_recognition",
+            chunkDurationMs = 300_000L,
+            meetingStartedAt = 1L,
+            qualificationSession = false,
+            qualificationEvidenceDigest = null,
+            phase = MainaCaptureControlPhase.TERMINAL,
+            terminalDisposition = MainaCaptureTerminalDisposition.SAVE,
+            terminalDiscardId = null,
+            terminalEffectReady = false,
+            pauseOwner = MainaCapturePauseOwner.NONE,
+            generation = 9L,
+            communicationActive = false,
+            chunkSequence = 1,
+            captureGapMs = 0L,
+            updatedAtEpochMs = 2L,
+        )
+        assertEquals(
+            owner,
+            MainaTerminalEffectAuthorityPolicy.verifiedOwner(
+                MainaCaptureControlInspection.Terminal(owner),
+                owner,
+                operation,
+                MainaCaptureTerminalDisposition.SAVE,
+                "meeting-1",
+            ),
+        )
+        assertEquals(
+            null,
+            MainaTerminalEffectAuthorityPolicy.verifiedOwner(
+                MainaCaptureControlInspection.Invalid,
+                owner,
+                operation,
+                MainaCaptureTerminalDisposition.SAVE,
+                "meeting-1",
+            ),
+        )
+        assertEquals(
+            null,
+            MainaTerminalEffectAuthorityPolicy.verifiedOwner(
+                MainaCaptureControlInspection.Terminal(owner.copy(generation = 10L)),
+                owner,
+                operation,
+                MainaCaptureTerminalDisposition.SAVE,
+                "meeting-1",
+            ),
+        )
+        assertEquals(
+            null,
+            MainaTerminalEffectAuthorityPolicy.verifiedOwner(
+                MainaCaptureControlInspection.Terminal(owner),
+                owner,
+                operation,
+                MainaCaptureTerminalDisposition.SAVE,
+                "meeting-2",
+            ),
+        )
+        val service = source(
+            "modules/maina-recorder/android/src/main/java/com/divay/maina/recorder/MainaRecordingService.kt",
+        )
+        val dispatch = service.substring(
+            service.indexOf("private fun dispatchNativeStop"),
+            service.indexOf("private fun handleStopOutcome"),
+        )
+        val completion = service.substring(
+            service.indexOf("private fun handleStopOutcome"),
+            service.indexOf("private fun publishDiscardReadyForAck"),
+        )
+        assertFalse(dispatch.contains("deleteCaptureDirectory"))
+        assertTrue(completion.contains("MainaTerminalEffectAuthorityPolicy.verifiedOwner"))
+        assertTrue(
+            completion.indexOf("MainaTerminalEffectAuthorityPolicy.verifiedOwner") <
+                completion.indexOf("handleStopCompletion("),
+        )
+        assertTrue(
+            completion.indexOf("MainaTerminalEffectAuthorityPolicy.verifiedOwner") <
+                completion.indexOf("deleteCaptureDirectory"),
+        )
+        assertTrue(
+            completion.indexOf("purgeMeetingDiagnostics(current.meetingId)") <
+                completion.indexOf("deleteCaptureDirectory(current.directory)"),
+        )
+    }
+
+    @Test
     fun `terminal store and publication handoff source contracts stay fail closed`() {
         val store = source(
             "modules/maina-recorder/android/src/main/java/com/divay/maina/recorder/MainaCaptureControlStore.kt",
         )
         assertTrue(
             store.contains(
-                "if (phase in setOf(MainaCaptureControlPhase.IDLE, MainaCaptureControlPhase.TERMINAL)) return null",
+                "data class Terminal(val control: MainaDurableCaptureControl)",
             ),
         )
+        assertTrue(store.contains("data class Quarantined(val control: MainaDurableCaptureControl)"))
+        assertTrue(store.contains("MainaCaptureControlInspection.Terminal(value)"))
+        assertTrue(store.contains("data object Absent"))
+        assertTrue(store.contains("data object Invalid"))
+        assertTrue(store.contains("val terminalDisposition: MainaCaptureTerminalDisposition?"))
+        assertTrue(store.contains("MainaCaptureTerminalAuthorityPolicy.allows"))
+        val activeRead = store.substring(
+            store.indexOf("fun read():"),
+            store.indexOf("fun readIncludingTerminal():"),
+        )
+        val recoveryRead = store.substring(
+            store.indexOf("fun readIncludingTerminal():"),
+            store.indexOf("fun begin("),
+        )
+        assertFalse(activeRead.contains("MainaCaptureControlInspection.Terminal"))
+        assertTrue(recoveryRead.contains("MainaCaptureControlInspection.Terminal"))
+        assertTrue(recoveryRead.contains("MainaCaptureControlInspection.Quarantined"))
+
+        val legacyStored = mapOf<String, Any>(
+            "meeting_id" to "meeting-1",
+            "directory" to "/private/capture",
+            "source_mode" to "voice_recognition",
+            "chunk_duration_ms" to 300_000L,
+            "meeting_started_at" to 1L,
+            "phase" to "RECORDING",
+            "pause_owner" to "NONE",
+            "generation" to 1L,
+            "communication_active" to false,
+            "chunk_sequence" to 0,
+            "capture_gap_ms" to 0L,
+            "updated_at" to 1L,
+        )
+        assertEquals(
+            MainaCaptureControlStorageFormat.LEGACY_V1,
+            MainaCaptureControlStoragePolicy.classify(legacyStored),
+        )
+        val currentStored = legacyStored + ("qualification_session" to false)
+        assertEquals(
+            MainaCaptureControlStorageFormat.CURRENT,
+            MainaCaptureControlStoragePolicy.classify(currentStored),
+        )
+        assertEquals(
+            MainaCaptureControlStorageFormat.CURRENT,
+            MainaCaptureControlStoragePolicy.classify(
+                currentStored + mapOf(
+                    "qualification_evidence_digest" to "a".repeat(64),
+                    "terminal_disposition" to "SAVE",
+                    "terminal_effect_ready" to true,
+                ),
+            ),
+        )
+        assertEquals(
+            MainaCaptureControlStorageFormat.CURRENT,
+            MainaCaptureControlStoragePolicy.classify(
+                currentStored + mapOf(
+                    "phase" to "TERMINAL",
+                    "source_format_version" to 1,
+                    "quarantine_reason" to "LEGACY_TERMINAL_DISPOSITION_MISSING",
+                ),
+            ),
+        )
+        assertEquals(
+            MainaCaptureControlStorageFormat.CURRENT,
+            MainaCaptureControlStoragePolicy.classify(
+                currentStored + mapOf(
+                    "phase" to "TERMINAL",
+                    "terminal_disposition" to "DISCARD",
+                    "terminal_discard_id" to "discard-1",
+                    "terminal_effect_ready" to false,
+                ),
+            ),
+        )
+        assertEquals(
+            MainaCaptureControlStorageFormat.INVALID,
+            MainaCaptureControlStoragePolicy.classify(legacyStored + ("unexpected" to true)),
+        )
+        assertEquals(
+            MainaCaptureControlStorageFormat.INVALID,
+            MainaCaptureControlStoragePolicy.classify(legacyStored + ("chunk_sequence" to 0L)),
+        )
+        assertEquals(
+            MainaCaptureControlStorageFormat.INVALID,
+            MainaCaptureControlStoragePolicy.classify(currentStored + ("qualification_session" to "false")),
+        )
+        assertEquals(
+            MainaCaptureControlStorageFormat.INVALID,
+            MainaCaptureControlStoragePolicy.classify(currentStored + ("terminal_effect_ready" to "true")),
+        )
+        assertTrue(store.contains("storageFormat == MainaCaptureControlStorageFormat.LEGACY_V1"))
+        assertTrue(store.contains("if (!persist(value))"))
+        assertTrue(store.contains("if (!WRITE_AUTHORITY.permitsAccess())"))
+        assertTrue(store.contains("WRITE_AUTHORITY.commit { editor.commit() }"))
+        assertTrue(store.contains("WRITE_AUTHORITY.commit { prefs.edit().clear().commit() }"))
+        assertFalse(store.contains("prefs.getString(KEY_MEETING_ID"))
+        assertTrue(store.contains("stored[KEY_MEETING_ID] as? String"))
+        assertTrue(store.contains("stored[KEY_CHUNK_SEQUENCE] as? Int"))
+        val discardPrepare = store.substring(
+            store.indexOf("fun prepareDiscard("),
+            store.indexOf("fun captureDirectoryMatchesMeeting"),
+        )
+        assertTrue(discardPrepare.indexOf("latchReadsOff()") < discardPrepare.indexOf("persist(prepared)"))
+        assertTrue(discardPrepare.contains("captureDirectoryMatchesMeeting"))
+        assertTrue(discardPrepare.contains("MainaCaptureControlInspection.Quarantined"))
+        assertTrue(store.contains("fun recoverQuarantinedAsSave"))
+        assertTrue(store.contains("if (persist(resolved)) resolved else null"))
+        val storeUpdate = store.substring(store.indexOf("fun update("), store.indexOf("fun clear():"))
+        assertTrue(storeUpdate.contains("MainaCaptureControlCasPolicy.allows(observed, current)"))
+        val storeBegin = store.substring(store.indexOf("fun begin("), store.indexOf("fun update("))
+        assertTrue(storeBegin.contains("inspectUnlocked() != MainaCaptureControlInspection.Absent"))
+
+        val terminalService = source(
+            "modules/maina-recorder/android/src/main/java/com/divay/maina/recorder/MainaRecordingService.kt",
+        )
+        val recorderModule = source(
+            "modules/maina-recorder/android/src/main/java/com/divay/maina/recorder/MainaRecorderModule.kt",
+        )
+        assertTrue(recorderModule.contains("EXTRA_CAPTURE_GENERATION to recovered.generation.toString()"))
+        val terminalRequest = terminalService.substring(
+            terminalService.indexOf("private fun requestTerminalNativeStop"),
+            terminalService.indexOf("private fun accepts("),
+        )
+        assertTrue(terminalRequest.contains("MainaCaptureTerminalDisposition.DISCARD"))
+        assertTrue(terminalRequest.contains("MainaCaptureTerminalDisposition.SAVE"))
+        assertTrue(terminalService.contains("requestedTerminalState = prepared.reducerState()"))
+        assertTrue(terminalRequest.contains("preparedDiscardMayRun"))
+        val terminalRecovery = terminalService.substring(
+            terminalService.indexOf("private fun reconcileTerminalQualificationAfterProcessDeath"),
+            terminalService.indexOf("private fun emitServiceHeartbeat"),
+        )
+        assertTrue(terminalRecovery.contains("MainaTerminalRestartAction.PRESERVE_FOR_POST_PROCESSING"))
+        assertTrue(terminalRecovery.contains("MainaTerminalRestartAction.DELETE_CAPTURE"))
+        assertTrue(terminalRecovery.contains("discardInterruptedCapture(restored)"))
+        assertTrue(terminalService.contains("latchReadsOffForPreparedDiscardIfRunning"))
+        val quarantineRestore = terminalService.substring(
+            terminalService.indexOf("if (inspection is MainaCaptureControlInspection.Quarantined)"),
+            terminalService.indexOf("if (inspection is MainaCaptureControlInspection.Terminal)"),
+        )
+        assertTrue(quarantineRestore.contains("publishQuarantinedCapture(inspection.control)"))
+        val quarantinePublication = terminalService.substring(
+            terminalService.indexOf("private fun publishQuarantinedCapture"),
+            terminalService.indexOf("private fun restoreDurableCaptureControl"),
+        )
+        assertTrue(quarantinePublication.contains("legacy_terminal_disposition_missing"))
+        assertFalse(quarantinePublication.contains("preserveInterruptedCapture"))
+        assertFalse(quarantinePublication.contains("discardInterruptedCapture"))
+        val quarantineAction = terminalService.substring(
+            terminalService.indexOf("ACTION_RECONCILE_QUARANTINED_CAPTURE ->"),
+            terminalService.indexOf("ACTION_RETRY_TERMINAL_NATIVE_CAPTURE ->"),
+        )
+        assertTrue(quarantineAction.contains("terminal != null"))
+        assertTrue(quarantineAction.contains("terminal.meetingId == meetingId"))
+        assertTrue(quarantineAction.contains("terminal.generation == generation"))
+        assertTrue(quarantineAction.contains("terminal.terminalDisposition == MainaCaptureTerminalDisposition.SAVE"))
+        val discardAck = terminalService.substring(
+            terminalService.indexOf("private fun acknowledgeNativeDiscard"),
+            terminalService.indexOf("private fun completeQualificationCaptureControl"),
+        )
+        val absentAcknowledgement = discardAck.substring(
+            discardAck.indexOf("MainaCaptureControlInspection.Absent"),
+            discardAck.indexOf("MainaCaptureControlInspection.Invalid"),
+        )
+        assertFalse(absentAcknowledgement.contains("publishTerminalRecoveryRequired"))
+
+        assertEquals(
+            MainaCaptureTerminalDisposition.DISCARD,
+            MainaCaptureTerminalRecoveryPolicy.dispositionForLifecycleInvalidation(
+                MainaCaptureControlPhase.TERMINAL,
+                MainaCaptureTerminalDisposition.DISCARD,
+            ),
+        )
+        assertEquals(
+            MainaCaptureTerminalDisposition.SAVE,
+            MainaCaptureTerminalRecoveryPolicy.dispositionForLifecycleInvalidation(
+                MainaCaptureControlPhase.TERMINAL,
+                MainaCaptureTerminalDisposition.SAVE,
+            ),
+        )
+        assertEquals(
+            MainaCaptureTerminalDisposition.SAVE,
+            MainaCaptureTerminalRecoveryPolicy.dispositionForLifecycleInvalidation(
+                MainaCaptureControlPhase.RECORDING,
+                null,
+            ),
+        )
+        assertEquals(
+            MainaCaptureTerminalDisposition.DISCARD,
+            MainaCaptureTerminalRecoveryPolicy.dispositionForLifecycleInvalidation(
+                MainaCaptureControlPhase.RECORDING,
+                MainaCaptureTerminalDisposition.DISCARD,
+            ),
+        )
+        assertEquals(
+            null,
+            MainaCaptureTerminalRecoveryPolicy.dispositionForLifecycleInvalidation(
+                MainaCaptureControlPhase.TERMINAL,
+                null,
+            ),
+        )
+        val destroy = terminalService.substring(
+            terminalService.indexOf("override fun onDestroy()"),
+            terminalService.indexOf("override fun onBind"),
+        )
+        val invalidation = terminalService.substring(
+            terminalService.indexOf("private fun invalidateCaptureControl"),
+            terminalService.indexOf("private fun restoreDurableCaptureControl"),
+        )
+        assertTrue(destroy.contains("invalidateCaptureControl(\"service-destroyed\")"))
+        assertTrue(invalidation.contains("dispositionForLifecycleInvalidation"))
+        assertTrue(invalidation.contains("durableControl?.terminalDisposition != null"))
+        assertFalse(invalidation.contains("event,\n            MainaCaptureTerminalDisposition.SAVE"))
+
+        val recoveryScreen = source("src/app/meeting/[id]/recover.tsx")
+        assertTrue(recoveryScreen.contains("Recover saved audio"))
+        assertTrue(recoveryScreen.contains("Discard this recording"))
+        assertTrue(recoveryScreen.contains("recoverNativeCaptureQuarantine"))
+        assertTrue(recoveryScreen.contains("discardNativeMeeting"))
+
+        val stopAndSave = source("src/app/record.tsx").substring(
+            source("src/app/record.tsx").indexOf("const stopAndSave = async"),
+            source("src/app/record.tsx").indexOf("useEffect(() => {\n    stopAndSaveRef.current"),
+        )
+        val nativeStopFailure = stopAndSave.indexOf("native capture stop request failed")
+        val nativeStopFailureReturn = stopAndSave.indexOf("return;", nativeStopFailure)
+        assertTrue(nativeStopFailure >= 0)
+        assertTrue(nativeStopFailureReturn > nativeStopFailure)
+        assertTrue(
+            nativeStopFailureReturn < stopAndSave.indexOf("const id = idRef.current"),
+        )
+        val statusOnlyRecovery = stopAndSave.substring(
+            stopAndSave.indexOf("if (entryAction !== 'begin_stop')"),
+            stopAndSave.indexOf("} else {", stopAndSave.indexOf("if (entryAction !== 'begin_stop')")),
+        )
+        assertTrue(statusOnlyRecovery.contains("confirmNativeSaveCompletion"))
+        assertFalse(statusOnlyRecovery.contains("stopNativeCapture()"))
+        assertTrue(source("src/app/record.tsx").contains("retryNativeCaptureFinalization()"))
 
         val native = source(
             "modules/maina-recorder/android/src/main/java/com/divay/maina/recorder/MainaNativeAudioCapture.kt",
@@ -1674,6 +2328,128 @@ class MainaCallInterruptionPolicyTest {
     }
 
     @Test
+    fun `prepared discard can supersede stale stop recovery but not a live terminal owner`() {
+        val terminal = MainaCaptureControlState(
+            phase = MainaCaptureControlPhase.TERMINAL,
+            generation = 8,
+        )
+        assertTrue(MainaTerminalPublicationPolicy.preparedDiscardMayRun(
+            active = null,
+            state = terminal,
+            disposition = MainaCaptureTerminalDisposition.DISCARD,
+            discardId = "discard-1",
+            terminalEffectReady = false,
+        ))
+        assertFalse(MainaTerminalPublicationPolicy.preparedDiscardMayRun(
+            active = MainaCaptureOperationToken(
+                operationId = 52,
+                generation = 8,
+                owner = MainaCapturePauseOwner.NONE,
+                kind = MainaCaptureOperationKind.ABORT,
+                expectedPhase = MainaCaptureControlPhase.TERMINAL,
+            ),
+            state = terminal,
+            disposition = MainaCaptureTerminalDisposition.DISCARD,
+            discardId = "discard-1",
+            terminalEffectReady = false,
+        ))
+        assertFalse(MainaTerminalPublicationPolicy.preparedDiscardMayRun(
+            active = null,
+            state = terminal,
+            disposition = MainaCaptureTerminalDisposition.DISCARD,
+            discardId = "discard-1",
+            terminalEffectReady = true,
+        ))
+        assertFalse(MainaTerminalPublicationPolicy.preparedDiscardMayRun(
+            active = null,
+            state = terminal,
+            disposition = MainaCaptureTerminalDisposition.SAVE,
+            discardId = null,
+            terminalEffectReady = false,
+        ))
+    }
+
+    @Test
+    fun `discard completion remains terminal until exact cross-store acknowledgement`() {
+        val abort = MainaCaptureOperationToken(
+            operationId = 51,
+            generation = 4,
+            owner = MainaCapturePauseOwner.NONE,
+            kind = MainaCaptureOperationKind.ABORT,
+            expectedPhase = MainaCaptureControlPhase.TERMINAL,
+        )
+        val ready = MainaTerminalPublicationPolicy.discardReadyForAck(
+            MainaTerminalPublicationPolicy.running(
+                MainaTerminalPublicationPolicy.queued(abort, 100),
+                abort,
+                110,
+            ),
+            abort.operationId,
+            150,
+        )
+        assertEquals(MainaTerminalPublicationPhase.SUCCEEDED, ready.phase)
+        assertEquals(MainaTerminalReasonCode.DISCARD_READY_FOR_ACK, ready.reasonCode)
+        assertEquals(abort.operationId, ready.ownerOperationId)
+    }
+
+    @Test
+    fun `one bounded terminal recovery retry requires the exact saved terminal owner`() {
+        val stop = MainaCaptureOperationToken(
+            operationId = 55,
+            generation = 3,
+            owner = MainaCapturePauseOwner.NONE,
+            kind = MainaCaptureOperationKind.STOP,
+            expectedPhase = MainaCaptureControlPhase.TERMINAL,
+        )
+        val terminal = MainaCaptureControlState(phase = MainaCaptureControlPhase.TERMINAL)
+        val recovery = MainaTerminalPublicationPolicy.recoveryRequired(
+            MainaTerminalPublicationPolicy.running(
+                MainaTerminalPublicationPolicy.queued(stop, 100),
+                stop,
+                110,
+            ),
+            stop,
+            200,
+        )
+
+        assertTrue(MainaTerminalPublicationPolicy.terminalRecoveryRetryAllowed(
+            active = null,
+            state = terminal,
+            publication = recovery,
+            disposition = MainaCaptureTerminalDisposition.SAVE,
+            retryAlreadyUsed = false,
+        ))
+        assertFalse(MainaTerminalPublicationPolicy.terminalRecoveryRetryAllowed(
+            active = stop,
+            state = terminal,
+            publication = recovery,
+            disposition = MainaCaptureTerminalDisposition.SAVE,
+            retryAlreadyUsed = false,
+        ))
+        assertFalse(MainaTerminalPublicationPolicy.terminalRecoveryRetryAllowed(
+            active = null,
+            state = terminal,
+            publication = recovery,
+            disposition = MainaCaptureTerminalDisposition.DISCARD,
+            retryAlreadyUsed = false,
+        ))
+        assertFalse(MainaTerminalPublicationPolicy.terminalRecoveryRetryAllowed(
+            active = null,
+            state = terminal,
+            publication = recovery,
+            disposition = MainaCaptureTerminalDisposition.SAVE,
+            retryAlreadyUsed = true,
+        ))
+        assertFalse(MainaTerminalPublicationPolicy.terminalRecoveryRetryAllowed(
+            active = null,
+            state = terminal,
+            publication = MainaTerminalPublicationPolicy.succeeded(recovery, stop, 300),
+            disposition = MainaCaptureTerminalDisposition.SAVE,
+            retryAlreadyUsed = false,
+        ))
+    }
+
+    @Test
     fun `stale terminal completion needs an exact newer owner or lifecycle shutdown`() {
         val older = MainaCaptureOperationToken(
             operationId = 60,
@@ -1738,13 +2514,22 @@ class MainaCallInterruptionPolicyTest {
             record.indexOf("const cancel = async"),
             record.indexOf("const confirmCancel"),
         )
+        assertTrue(cancel.indexOf("nativeTerminalIntentRef.current.tryBegin('discard')") < cancel.indexOf("discardNativeMeeting({"))
+        assertTrue(cancel.indexOf("savingRef.current = true") < cancel.indexOf("discardNativeMeeting({"))
+        assertTrue(cancel.indexOf("setNativeSaveRecoveryBusy(true)") < cancel.indexOf("discardNativeMeeting({"))
         assertTrue(cancel.contains("native discard finalization was not acknowledged"))
-        assertTrue(cancel.contains("Your data was left untouched"))
-        assertTrue(cancel.indexOf("return;") < cancel.indexOf("deleteMeeting("))
+        assertTrue(cancel.contains("Discard is safely retained and will finish before recovery"))
+        assertTrue(cancel.contains("if (meetingCreatedRef.current && !logicalMeetingDeleted) await deleteMeeting"))
         assertTrue(cancel.contains("CAPTURE_ENGINE !== 'native-qwen'"))
+        assertTrue(record.contains("if (nativeSaveSurface === 'busy')"))
+        assertTrue(record.contains("label={discarding ? 'Discarding…' : 'Saving…'} disabled loading"))
+        assertTrue(record.contains("const savedMeetingPendingNavigationRef = useRef<string | null>(null)"))
+        assertTrue(record.contains("savedMeetingPendingNavigationRef.current = id"))
+        assertTrue(record.contains("const pendingSavedMeetingId = savedMeetingPendingNavigationRef.current"))
+        assertTrue(record.contains("if (savingRef.current) return;\n    if (!meetingCreatedRef.current"))
 
         val lifecycleCleanup = record.substring(
-            record.indexOf("return () => {\n      if (captureNoteTimerRef.current)"),
+            record.indexOf("return () => {\n      recordScreenMountedRef.current = false"),
             record.indexOf("// This effect owns one recording session lifecycle"),
         )
         val nativeCleanup = lifecycleCleanup.substring(
@@ -1772,6 +2557,7 @@ class MainaCallInterruptionPolicyTest {
         assertTrue(stopOutcome.contains("publishTerminalRecoveryRequired"))
         assertTrue(stopOutcome.indexOf("MainaTerminalPublicationPolicy.succeeded") < stopOutcome.indexOf("setCaptureState(\"idle\")"))
         assertTrue(service.contains("\"terminalReasonCode\" to terminalPublication.reasonCode.wireValue"))
+        assertTrue(service.contains("\"terminalOperationId\" to terminalPublication.ownerOperationId"))
         assertTrue(service.contains("\"error\" -> \"Maina save needs recovery\""))
         val externalState = service.substring(
             service.indexOf("if (intent?.action == ACTION_SET_STATE)"),
@@ -1780,12 +2566,20 @@ class MainaCallInterruptionPolicyTest {
         assertTrue(externalState.contains("MainaExternalCapturePresentationPolicy.allowed"))
         assertTrue(externalState.contains("external-capture-state-rejected"))
         assertTrue(stopOutcome.contains("outcome.snapshot.lastError"))
+        assertTrue(stopOutcome.contains("publishDiscardReadyForAck"))
         val durableHandoff = service.substring(
             service.indexOf("private fun handleStopCompletion"),
             service.indexOf("private fun handleAbortCompletion"),
         )
         assertTrue(durableHandoff.indexOf("outbox.begin(") < durableHandoff.indexOf("startForegroundService(intent)"))
         assertTrue(durableHandoff.contains("if (!durableHandoff) return false"))
+        val durableDiscard = service.substring(
+            service.indexOf("private fun handleAbortCompletion"),
+            service.indexOf("private fun publishDiscardReadyForAck"),
+        )
+        assertTrue(durableDiscard.contains("discardMeeting(current.meetingId)"))
+        assertTrue(durableDiscard.contains("markTerminalEffectReady"))
+        assertFalse(durableDiscard.contains("clearIfMatches"))
 
         val native = source(
             "modules/maina-recorder/android/src/main/java/com/divay/maina/recorder/MainaNativeAudioCapture.kt",

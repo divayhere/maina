@@ -30,7 +30,12 @@ internal object DiagnosticAudioTranscoder {
         val dataSize: Long,
     )
 
-    fun prepare(artifact: ArtifactRecord, outputDir: File): PreparedArtifact {
+    fun prepare(
+        artifact: ArtifactRecord,
+        outputDir: File,
+        assertAllowed: () -> Unit = {},
+    ): PreparedArtifact {
+        assertAllowed()
         if (artifact.kind != "audio") {
             val file = mainaFileFromUriOrPath(artifact.preparedPath ?: artifact.sourcePath)
             require(file.isFile) { "Artifact source does not exist: ${file.absolutePath}" }
@@ -40,12 +45,13 @@ internal object DiagnosticAudioTranscoder {
                 codec = artifact.codec ?: "utf-8",
                 extension = file.extension.ifBlank { "txt" },
                 bytes = file.length(),
-                sha256 = sha256(file),
+                sha256 = sha256(file, assertAllowed),
                 durationMs = artifact.durationMs,
             )
         }
 
         artifact.preparedPath?.let { existingPath ->
+            assertAllowed()
             val existing = File(existingPath)
             if (existing.isFile && existing.length() > 0L && artifact.contentType != null && artifact.codec != null) {
                 return PreparedArtifact(
@@ -54,7 +60,7 @@ internal object DiagnosticAudioTranscoder {
                     codec = artifact.codec,
                     extension = existing.extension,
                     bytes = existing.length(),
-                    sha256 = artifact.sha256 ?: sha256(existing),
+                    sha256 = artifact.sha256 ?: sha256(existing, assertAllowed),
                     durationMs = artifact.durationMs,
                 )
             }
@@ -64,7 +70,7 @@ internal object DiagnosticAudioTranscoder {
         val source = mainaFileFromUriOrPath(artifact.sourcePath)
         require(source.isFile && source.length() >= 44L) { "WAV source is missing or incomplete" }
         outputDir.mkdirs()
-        val wav = readWavInfo(source)
+        val wav = readWavInfo(source, assertAllowed)
 
         // AAC-LC is Android's most broadly exercised low-bitrate recorder
         // path. On the Pixel 9 Pro the software Opus codec stalled for minutes,
@@ -81,8 +87,13 @@ internal object DiagnosticAudioTranscoder {
                 codecName = "aac-lc",
                 contentType = "audio/mp4",
                 extension = "m4a",
+                assertAllowed = assertAllowed,
             )
-        }.getOrElse { aac.delete(); null }
+        }.getOrElse { cause ->
+            aac.delete()
+            if (cause is MainaAutomaticWorkBlockedException) throw cause
+            null
+        }
         if (prepared != null) return prepared
 
         val opus = File(outputDir, "${artifact.artifactId}.ogg")
@@ -96,6 +107,7 @@ internal object DiagnosticAudioTranscoder {
             codecName = "opus",
             contentType = "audio/ogg",
             extension = "ogg",
+            assertAllowed = assertAllowed,
         )
     }
 
@@ -109,7 +121,9 @@ internal object DiagnosticAudioTranscoder {
         codecName: String,
         contentType: String,
         extension: String,
+        assertAllowed: () -> Unit,
     ): PreparedArtifact {
+        assertAllowed()
         require(wav.bitsPerSample == 16) { "Only 16-bit PCM WAV is supported" }
         destination.delete()
         val format = MediaFormat.createAudioFormat(mime, wav.sampleRate, wav.channels).apply {
@@ -143,6 +157,7 @@ internal object DiagnosticAudioTranscoder {
                 var lastProgressAt = encodeStartedAt
 
                 while (!outputEnded) {
+                    assertAllowed()
                     val now = SystemClock.elapsedRealtime()
                     check(!Thread.currentThread().isInterrupted) { "Audio encoding was cancelled" }
                     check(now - encodeStartedAt <= totalTimeoutMs) {
@@ -157,6 +172,7 @@ internal object DiagnosticAudioTranscoder {
                             val buffer = codec.getInputBuffer(inputIndex) ?: error("Encoder input buffer unavailable")
                             buffer.clear()
                             val wanted = minOf(buffer.remaining().toLong(), remaining).toInt()
+                            assertAllowed()
                             val read = if (wanted > 0) readInto(input, buffer, wanted) else -1
                             if (read <= 0) {
                                 val pts = submittedBytes / bytesPerFrame * 1_000_000L / wav.sampleRate
@@ -208,6 +224,7 @@ internal object DiagnosticAudioTranscoder {
             if (!encodedToEos || !muxerFinalized) destination.delete()
         }
         check(encodedToEos && muxerFinalized) { "Audio encoder did not finalize its output container" }
+        assertAllowed()
         require(destination.isFile && destination.length() > 0L) { "Encoder produced an empty file" }
         val durationMs = wav.dataSize / (wav.sampleRate * wav.channels * 2.0) * 1000.0
         return PreparedArtifact(
@@ -216,7 +233,7 @@ internal object DiagnosticAudioTranscoder {
             codec = codecName,
             extension = extension,
             bytes = destination.length(),
-            sha256 = sha256(destination),
+            sha256 = sha256(destination, assertAllowed),
             durationMs = durationMs.toLong(),
         )
     }
@@ -228,7 +245,8 @@ internal object DiagnosticAudioTranscoder {
         return read
     }
 
-    private fun readWavInfo(file: File): WavInfo = RandomAccessFile(file, "r").use { input ->
+    private fun readWavInfo(file: File, assertAllowed: () -> Unit): WavInfo = RandomAccessFile(file, "r").use { input ->
+        assertAllowed()
         require(readAscii(input, 4) == "RIFF" && readAscii(input.apply { seek(8) }, 4) == "WAVE") {
             "Invalid WAV header"
         }
@@ -239,6 +257,7 @@ internal object DiagnosticAudioTranscoder {
         var dataSize = -1L
         input.seek(12)
         while (input.filePointer + 8 <= input.length()) {
+            assertAllowed()
             val id = readAscii(input, 4)
             val size = readLeInt(input).toLong() and 0xffffffffL
             val start = input.filePointer
@@ -272,11 +291,12 @@ internal object DiagnosticAudioTranscoder {
     private fun readLeInt(input: RandomAccessFile): Int = Integer.reverseBytes(input.readInt())
     private fun readLeShort(input: RandomAccessFile): Int = java.lang.Short.reverseBytes(input.readShort()).toInt() and 0xffff
 
-    private fun sha256(file: File): String {
+    private fun sha256(file: File, assertAllowed: () -> Unit): String {
         val digest = MessageDigest.getInstance("SHA-256")
         file.inputStream().buffered().use { input ->
             val buffer = ByteArray(64 * 1024)
             while (true) {
+                assertAllowed()
                 val read = input.read(buffer)
                 if (read <= 0) break
                 digest.update(buffer, 0, read)

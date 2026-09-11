@@ -106,12 +106,14 @@ function ActionLink({
 function MeetingIconButton({
   icon,
   label,
+  testID,
   onPress,
   disabled,
   destructive,
 }: {
   icon: React.ComponentProps<typeof Ionicons>['name'];
   label: string;
+  testID?: string;
   onPress: () => void;
   disabled?: boolean;
   destructive?: boolean;
@@ -121,6 +123,7 @@ function MeetingIconButton({
     <Pressable
       accessibilityRole="button"
       accessibilityLabel={label}
+      testID={testID}
       disabled={disabled}
       hitSlop={8}
       onPress={onPress}
@@ -144,15 +147,18 @@ function MeetingIconButton({
 function TabChip({
   active,
   label,
+  testID,
   onPress,
 }: {
   active: boolean;
   label: string;
+  testID?: string;
   onPress: () => void;
 }) {
   const { theme } = useAppTheme();
   return (
     <Pressable
+      testID={testID}
       onPress={onPress}
       style={[
         styles.segmentTab,
@@ -838,7 +844,7 @@ export default function MeetingDetail() {
       right={
         <View style={styles.topBarActions}>
           <MeetingIconButton icon="create-outline" label="Rename meeting" onPress={openTitleEditor} disabled={!meeting} />
-          <MeetingIconButton icon="trash-outline" label="Delete meeting" onPress={confirmDelete} disabled={!meeting} destructive />
+          <MeetingIconButton testID="meeting-detail-delete" icon="trash-outline" label="Delete meeting" onPress={confirmDelete} disabled={!meeting} destructive />
         </View>
       }
     />
@@ -848,9 +854,10 @@ export default function MeetingDetail() {
     <View style={{ gap: space.lg, paddingHorizontal: 16, paddingTop: space.lg, paddingBottom: space.lg }}>
       {meeting ? (
         <View style={{ gap: space.sm }}>
-          <AppText variant="meta" muted>
-            {formatDate(meeting.startedAt)} · {formatTime(meeting.startedAt)} · {formatMeetingLength(meeting)}
+          <AppText testID="meeting-detail-metadata" variant="meta" muted>
+            {formatDate(meeting.startedAt)} · {formatTime(meeting.startedAt)} · {formatMeetingLength(meeting)}{meeting.language ? ` · ${meeting.language}` : ''}
           </AppText>
+          <View collapsable={false} testID={`meeting-detail-correlation-${meeting.id}`} style={{ width: 1, height: 1 }} />
           <View style={styles.chipRow}>
             <Chip label={presentation?.label ?? 'Meeting saved'} tone={presentation?.tone ?? 'muted'} />
             {meeting.language ? <Chip label={meeting.language} tone="muted" /> : null}
@@ -886,7 +893,7 @@ export default function MeetingDetail() {
           <TabChip active={tab === 'todos'} label="To-dos" onPress={() => setTab('todos')} />
         </View>
         <View style={{ flex: 1 }}>
-          <TabChip active={tab === 'transcript'} label="Transcript" onPress={() => setTab('transcript')} />
+          <TabChip testID="meeting-tab-transcript" active={tab === 'transcript'} label="Transcript" onPress={() => setTab('transcript')} />
         </View>
       </View>
     </View>
@@ -981,7 +988,7 @@ export default function MeetingDetail() {
                       size={16}
                       color={hasText ? theme.primary : theme.warn}
                     />
-                    <AppText variant="meta" muted>
+                    <AppText testID="meeting-detail-audio-state" variant="meta" muted>
                       {hasText
                         ? `${transcriptSummary?.blockCount ?? blocks.length} transcript blocks${meeting?.status === 'transcript_partial' && coverageLabel ? ` · ${coverageLabel} audio coverage` : ''}`
                         : transcriptionActive

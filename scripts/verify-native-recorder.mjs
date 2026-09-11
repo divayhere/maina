@@ -398,7 +398,10 @@ for (const invariant of [
   'model_manifest_sha256',
   'model_activation_generation',
   'native_model_identity_conflict',
-  'DB_VERSION = 6',
+  'DB_VERSION = 7',
+  'CREATE TABLE IF NOT EXISTS discarded_meetings',
+  'check(!isDiscarded(writableDatabase, meetingId))',
+  'INSERT OR IGNORE INTO discarded_meetings',
 ]) {
   if (!postProcessingOutbox.includes(invariant)) throw new Error(`Post-processing model identity invariant missing: ${invariant}`);
 }
