@@ -1,0 +1,415 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://maina.local/schemas/release-provenance.0.10.69.v1.json",
+  "title": "Maina exact signed 0.10.69 release provenance",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "releaseId",
+    "release",
+    "sources",
+    "toolchains",
+    "featureFlagDefaults",
+    "artifacts",
+    "approval"
+  ],
+  "properties": {
+    "schemaVersion": { "const": "maina.release-provenance.v1" },
+    "releaseId": { "const": "maina-m3-m4-0.10.69" },
+    "release": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "androidVersionCode", "iosBuildNumber"],
+      "properties": {
+        "version": { "const": "0.10.69" },
+        "androidVersionCode": { "const": 95 },
+        "iosBuildNumber": { "const": "51" }
+      }
+    },
+    "sources": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["android", "ios", "coordinationCommit", "backendSourceCommit", "backendProductionDeployment"],
+      "properties": {
+        "android": { "$ref": "#/$defs/sourcePin" },
+        "ios": { "$ref": "#/$defs/sourcePin" },
+        "coordinationCommit": { "$ref": "#/$defs/gitSha" },
+        "backendSourceCommit": { "$ref": "#/$defs/gitSha" },
+        "backendProductionDeployment": { "type": "string", "pattern": "^[0-9a-f-]{36}$" }
+      }
+    },
+    "toolchains": { "$ref": "#/$defs/toolchains" },
+    "featureFlagDefaults": { "$ref": "#/$defs/featureFlagDefaults" },
+    "artifacts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["android", "ios"],
+      "properties": {
+        "android": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/androidArtifact" }] },
+        "ios": { "oneOf": [{ "type": "null" }, { "$ref": "#/$defs/iosArtifact" }] }
+      }
+    },
+    "approval": {
+      "oneOf": [
+        { "$ref": "#/$defs/candidateApproval" },
+        { "$ref": "#/$defs/adminApproval" }
+      ]
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "type": "object",
+        "properties": {
+          "approval": {
+            "type": "object",
+            "properties": { "status": { "const": "admin-approved" } },
+            "required": ["status"]
+          }
+        },
+        "required": ["approval"]
+      },
+      "then": {
+        "type": "object",
+        "properties": {
+          "artifacts": {
+            "type": "object",
+            "properties": {
+              "android": { "$ref": "#/$defs/androidArtifact" },
+              "ios": { "$ref": "#/$defs/iosArtifact" }
+            }
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "nonEmptyString": { "type": "string", "minLength": 1 },
+    "gitSha": { "type": "string", "pattern": "^[0-9a-f]{40}$" },
+    "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+    "uuid": { "type": "string", "pattern": "^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$" },
+    "positiveBytes": { "type": "integer", "minimum": 1 },
+    "sourcePin": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository", "branch", "productCommit", "finalCommit", "upstreamCommit"],
+      "properties": {
+        "repository": { "$ref": "#/$defs/nonEmptyString" },
+        "branch": { "$ref": "#/$defs/nonEmptyString" },
+        "productCommit": { "$ref": "#/$defs/gitSha" },
+        "finalCommit": { "$ref": "#/$defs/gitSha" },
+        "upstreamCommit": { "$ref": "#/$defs/gitSha" }
+      }
+    },
+    "toolchains": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["node", "expo", "reactNative", "android", "ios"],
+      "properties": {
+        "node": { "$ref": "#/$defs/nonEmptyString" },
+        "expo": { "$ref": "#/$defs/nonEmptyString" },
+        "reactNative": { "$ref": "#/$defs/nonEmptyString" },
+        "android": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["jdk", "gradle", "buildTools", "compileSdk", "targetSdk"],
+          "properties": {
+            "jdk": { "$ref": "#/$defs/nonEmptyString" },
+            "gradle": { "$ref": "#/$defs/nonEmptyString" },
+            "buildTools": { "$ref": "#/$defs/nonEmptyString" },
+            "compileSdk": { "type": "integer", "minimum": 1 },
+            "targetSdk": { "type": "integer", "minimum": 1 }
+          }
+        },
+        "ios": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["xcode", "cocoaPods", "swift"],
+          "properties": {
+            "xcode": { "$ref": "#/$defs/nonEmptyString" },
+            "cocoaPods": { "$ref": "#/$defs/nonEmptyString" },
+            "swift": { "$ref": "#/$defs/nonEmptyString" }
+          }
+        }
+      }
+    },
+    "featureFlagDefaults": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "mobileMemorySurfaceV1",
+        "mobileCloudMeetingsV1",
+        "mobileFrozenHandoffV1",
+        "mobileMemoryPulseV1",
+        "mobileSavedRecallsV1",
+        "mobileVerifiedLinksV1",
+        "mobileMeetingTagsV1",
+        "pulseBackgroundPolling",
+        "smartRecallAutomaticExecution",
+        "pulseRefreshMode",
+        "smartRecallExecutionMode"
+      ],
+      "properties": {
+        "mobileMemorySurfaceV1": { "const": false },
+        "mobileCloudMeetingsV1": { "const": false },
+        "mobileFrozenHandoffV1": { "const": false },
+        "mobileMemoryPulseV1": { "const": false },
+        "mobileSavedRecallsV1": { "const": false },
+        "mobileVerifiedLinksV1": { "const": false },
+        "mobileMeetingTagsV1": { "const": false },
+        "pulseBackgroundPolling": { "const": false },
+        "smartRecallAutomaticExecution": { "const": false },
+        "pulseRefreshMode": { "const": "manual-only" },
+        "smartRecallExecutionMode": { "const": "manual-only" }
+      }
+    },
+    "buildLog": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256", "bytes"],
+      "properties": {
+        "path": { "$ref": "#/$defs/nonEmptyString" },
+        "sha256": { "$ref": "#/$defs/sha256" },
+        "bytes": { "$ref": "#/$defs/positiveBytes" }
+      }
+    },
+    "inspection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256", "bytes", "command"],
+      "properties": {
+        "path": { "$ref": "#/$defs/nonEmptyString" },
+        "sha256": { "$ref": "#/$defs/sha256" },
+        "bytes": { "$ref": "#/$defs/positiveBytes" },
+        "command": { "const": "scripts/inspect-exact-artifact.mjs" }
+      }
+    },
+    "debugSymbols": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256", "bytes", "uuid"],
+      "properties": {
+        "path": { "$ref": "#/$defs/nonEmptyString" },
+        "sha256": { "$ref": "#/$defs/sha256" },
+        "bytes": { "$ref": "#/$defs/positiveBytes" },
+        "uuid": { "$ref": "#/$defs/uuid" }
+      }
+    },
+    "androidComponent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "name", "exported", "permission", "process"],
+      "properties": {
+        "type": { "enum": ["activity", "provider", "receiver", "service"] },
+        "name": { "$ref": "#/$defs/nonEmptyString" },
+        "exported": { "enum": ["true", "false"] },
+        "permission": { "type": ["string", "null"] },
+        "process": { "type": ["string", "null"] }
+      }
+    },
+    "androidAudit": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "packageName", "versionName", "versionCode", "releaseSigned", "signerCertificateSha256",
+        "debuggable", "profileable", "permissionsExact", "componentsExact", "exportedBoundariesExact",
+        "permissions", "components", "abis", "jniLibraries", "vadModelSha256", "modelChecksums",
+        "contentsManifestSha256", "inspectionTools"
+      ],
+      "properties": {
+        "packageName": { "const": "com.divay.maina" },
+        "versionName": { "const": "0.10.69" },
+        "versionCode": { "const": 95 },
+        "releaseSigned": { "const": true },
+        "signerCertificateSha256": { "$ref": "#/$defs/sha256" },
+        "debuggable": { "const": false },
+        "profileable": { "const": false },
+        "permissionsExact": { "const": true },
+        "componentsExact": { "const": true },
+        "exportedBoundariesExact": { "const": true },
+        "permissions": { "type": "array", "items": { "$ref": "#/$defs/nonEmptyString" }, "uniqueItems": true },
+        "components": { "type": "array", "items": { "$ref": "#/$defs/androidComponent" } },
+        "abis": { "const": ["arm64-v8a"] },
+        "jniLibraries": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["libonnxruntime.so", "libsherpa-onnx-jni.so"],
+          "properties": {
+            "libonnxruntime.so": { "$ref": "#/$defs/sha256" },
+            "libsherpa-onnx-jni.so": { "$ref": "#/$defs/sha256" }
+          }
+        },
+        "vadModelSha256": { "$ref": "#/$defs/sha256" },
+        "modelChecksums": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["assets/silero_vad.int8.onnx"],
+          "properties": { "assets/silero_vad.int8.onnx": { "$ref": "#/$defs/sha256" } }
+        },
+        "contentsManifestSha256": { "$ref": "#/$defs/sha256" },
+        "inspectionTools": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["aapt2", "apksigner", "unzip"],
+          "properties": {
+            "aapt2": { "$ref": "#/$defs/nonEmptyString" },
+            "apksigner": { "$ref": "#/$defs/nonEmptyString" },
+            "unzip": { "$ref": "#/$defs/nonEmptyString" }
+          }
+        }
+      }
+    },
+    "androidArtifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256", "bytes", "buildLog", "inspection", "audit"],
+      "properties": {
+        "path": { "$ref": "#/$defs/nonEmptyString" },
+        "sha256": { "$ref": "#/$defs/sha256" },
+        "bytes": { "$ref": "#/$defs/positiveBytes" },
+        "buildLog": { "$ref": "#/$defs/buildLog" },
+        "inspection": { "$ref": "#/$defs/inspection" },
+        "audit": { "$ref": "#/$defs/androidAudit" }
+      }
+    },
+    "appEntitlements": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["application-identifier", "com.apple.developer.team-identifier", "get-task-allow"],
+      "properties": {
+        "application-identifier": { "$ref": "#/$defs/nonEmptyString" },
+        "com.apple.developer.team-identifier": { "$ref": "#/$defs/nonEmptyString" },
+        "get-task-allow": { "type": "boolean" }
+      }
+    },
+    "profileEntitlements": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["application-identifier", "keychain-access-groups", "get-task-allow", "com.apple.developer.team-identifier"],
+      "properties": {
+        "application-identifier": { "$ref": "#/$defs/nonEmptyString" },
+        "keychain-access-groups": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/nonEmptyString" }, "uniqueItems": true },
+        "get-task-allow": { "type": "boolean" },
+        "com.apple.developer.team-identifier": { "$ref": "#/$defs/nonEmptyString" }
+      }
+    },
+    "iosProfile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["uuid", "name", "teamId", "expiresAt", "sufficientWindow"],
+      "properties": {
+        "uuid": { "$ref": "#/$defs/uuid" },
+        "name": { "$ref": "#/$defs/nonEmptyString" },
+        "teamId": { "$ref": "#/$defs/nonEmptyString" },
+        "expiresAt": { "type": "string", "format": "date-time" },
+        "sufficientWindow": { "const": true }
+      }
+    },
+    "iosAudit": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "bundleIdentifier", "version", "buildNumber", "architectures", "signatureValid", "teamId",
+        "designatedRequirement", "entitlementsExact", "entitlementsSha256", "entitlements",
+        "profileEntitlements", "profile", "appUuid", "dsymUuid", "appContentsManifestSha256",
+        "appBundleSha256", "inspectionTools"
+      ],
+      "properties": {
+        "bundleIdentifier": { "const": "com.divay.maina.staging" },
+        "version": { "const": "0.10.69" },
+        "buildNumber": { "const": "51" },
+        "architectures": { "const": ["arm64"] },
+        "signatureValid": { "const": true },
+        "teamId": { "$ref": "#/$defs/nonEmptyString" },
+        "designatedRequirement": { "$ref": "#/$defs/nonEmptyString" },
+        "entitlementsExact": { "const": true },
+        "entitlementsSha256": { "$ref": "#/$defs/sha256" },
+        "entitlements": { "$ref": "#/$defs/appEntitlements" },
+        "profileEntitlements": { "$ref": "#/$defs/profileEntitlements" },
+        "profile": { "$ref": "#/$defs/iosProfile" },
+        "appUuid": { "$ref": "#/$defs/uuid" },
+        "dsymUuid": { "$ref": "#/$defs/uuid" },
+        "appContentsManifestSha256": { "$ref": "#/$defs/sha256" },
+        "appBundleSha256": { "$ref": "#/$defs/sha256" },
+        "inspectionTools": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["codesign", "security", "dwarfdump", "ditto"],
+          "properties": {
+            "codesign": { "$ref": "#/$defs/nonEmptyString" },
+            "security": { "$ref": "#/$defs/nonEmptyString" },
+            "dwarfdump": { "$ref": "#/$defs/nonEmptyString" },
+            "ditto": { "$ref": "#/$defs/nonEmptyString" }
+          }
+        }
+      }
+    },
+    "iosArtifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256", "bytes", "buildLog", "inspection", "audit", "debugSymbols"],
+      "properties": {
+        "path": { "$ref": "#/$defs/nonEmptyString" },
+        "sha256": { "$ref": "#/$defs/sha256" },
+        "bytes": { "$ref": "#/$defs/positiveBytes" },
+        "buildLog": { "$ref": "#/$defs/buildLog" },
+        "inspection": { "$ref": "#/$defs/inspection" },
+        "audit": { "$ref": "#/$defs/iosAudit" },
+        "debugSymbols": { "$ref": "#/$defs/debugSymbols" }
+      }
+    },
+    "ownerAuthorizationReference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "path", "sha256", "bytes", "authorizationId", "directiveSha256", "planSha256",
+        "candidateProvenanceSha256", "androidArtifactSha256", "iosArtifactSha256",
+        "scope", "nonce", "issuedAt"
+      ],
+      "properties": {
+        "path": { "$ref": "#/$defs/nonEmptyString" },
+        "sha256": { "$ref": "#/$defs/sha256" },
+        "bytes": { "$ref": "#/$defs/positiveBytes" },
+        "authorizationId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "directiveSha256": { "$ref": "#/$defs/sha256" },
+        "planSha256": { "$ref": "#/$defs/sha256" },
+        "candidateProvenanceSha256": { "$ref": "#/$defs/sha256" },
+        "androidArtifactSha256": { "$ref": "#/$defs/sha256" },
+        "iosArtifactSha256": { "$ref": "#/$defs/sha256" },
+        "scope": {
+          "const": [
+            "release-provenance:approve",
+            "preserving-data-install:android",
+            "preserving-data-install:ios",
+            "automated-device-qualification:android",
+            "automated-device-qualification:ios"
+          ]
+        },
+        "nonce": { "$ref": "#/$defs/uuid" },
+        "issuedAt": { "type": "string", "format": "date-time" }
+      }
+    },
+    "candidateApproval": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "approvedBy", "approvedAt"],
+      "properties": {
+        "status": { "const": "candidate" },
+        "approvedBy": { "type": "null" },
+        "approvedAt": { "type": "null" }
+      }
+    },
+    "adminApproval": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "approvedBy", "approvedAt", "authorization"],
+      "properties": {
+        "status": { "const": "admin-approved" },
+        "approvedBy": { "$ref": "#/$defs/nonEmptyString" },
+        "approvedAt": { "type": "string", "format": "date-time" },
+        "authorization": { "$ref": "#/$defs/ownerAuthorizationReference" }
+      }
+    }
+  }
+}

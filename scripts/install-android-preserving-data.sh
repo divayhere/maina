@@ -15,8 +15,11 @@ MODE="${2:-}"
 [[ -z "$MODE" || "$MODE" == "--dry-run" ]] || { echo "Unknown installer option: $MODE" >&2; exit 1; }
 
 PROVENANCE="${MAINA_RELEASE_PROVENANCE:?Set MAINA_RELEASE_PROVENANCE to the Admin-approved dual-platform provenance}"
-node "$PROJECT_DIR/scripts/release-provenance-cli.mjs" authorize android \
-  "$PROJECT_DIR/release/m3-m4-0.10.68-candidate-plan.json" "$PROVENANCE" "$APK"
+if ! "$MAINA_NODE_BIN/node" "$PROJECT_DIR/scripts/release-provenance-cli.mjs" authorize android \
+  "$PROJECT_DIR/release/m3-m4-0.10.69-candidate-plan.json" "$PROVENANCE" "$APK" >/dev/null 2>&1; then
+  echo "ANDROID_RELEASE_PROVENANCE_REJECTED" >&2
+  exit 1
+fi
 
 candidate_sha256="$(shasum -a 256 "$APK" | awk '{print $1}')"
 safe_device="$(printf '%s' "$MAINA_DEVICE_SERIAL" | tr -cd 'A-Za-z0-9._-')"
