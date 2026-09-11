@@ -22,6 +22,7 @@ import {
 const repoRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 const recordSource = readFileSync(join(repoRoot, 'src/app/record.tsx'), 'utf8');
 const homeSource = readFileSync(join(repoRoot, 'src/app/(tabs)/index.tsx'), 'utf8');
+const shellSource = readFileSync(join(repoRoot, 'src/design/shell.tsx'), 'utf8');
 let assertions = 0;
 
 function node(attributes) {
@@ -72,7 +73,7 @@ const recording = parse(
   node({ text: 'Recording', 'resource-id': 'com.divay.maina:id/recording-state' }),
   node({ text: 'Stop and save', 'resource-id': 'com.divay.maina:id/recording-stop-save', clickable: 'true', bounds: '[10,100][210,180]' }),
   node({ text: 'Pause', 'resource-id': 'com.divay.maina:id/recording-pause-resume', clickable: 'true', bounds: '[10,200][210,280]' }),
-  node({ text: 'Discard this recording' }),
+  node({ text: 'Discard this recording', 'resource-id': 'recording-discard', clickable: 'true' }),
 );
 assert.deepEqual(classifyRecordingSurface(recording), { state: 'recording', timerSeconds: 4 });
 assert.deepEqual(requireUniqueAction(recording, { label: 'Pause', testId: 'recording-pause-resume' }), { x: 110, y: 240 });
@@ -89,17 +90,17 @@ const paused = parse(
   node({ text: 'Paused', 'resource-id': 'recording-state' }),
   node({ text: 'Stop and save', 'resource-id': 'recording-stop-save', clickable: 'true' }),
   node({ text: 'Resume', 'resource-id': 'recording-pause-resume', clickable: 'true' }),
-  node({ text: 'Discard this recording' }),
+  node({ text: 'Discard this recording', 'resource-id': 'recording-discard', clickable: 'true' }),
 );
 assert.deepEqual(classifyRecordingSurface(paused), { state: 'paused', timerSeconds: 3723 });
 assertions += 1;
 
 rejects(() => classifyRecordingSurface(parse(
   node({ text: '0:04', 'resource-id': 'recording-timer' }),
-  node({ text: 'Paused' }),
+  node({ text: 'Paused', 'resource-id': 'recording-state' }),
   node({ text: 'Stop and save', 'resource-id': 'recording-stop-save', clickable: 'true' }),
   node({ text: 'Pause', 'resource-id': 'recording-pause-resume', clickable: 'true' }),
-  node({ text: 'Discard this recording' }),
+  node({ text: 'Discard this recording', 'resource-id': 'recording-discard', clickable: 'true' }),
 )), /disagree/);
 rejects(() => requireUniqueAction(parse(
   node({ text: 'Resume', 'resource-id': 'recording-pause-resume', clickable: 'true' }),
@@ -108,17 +109,18 @@ rejects(() => requireUniqueAction(parse(
 rejects(() => requireUniqueAction(parse(node({ text: 'Resume', 'resource-id': 'recording-pause-resume', clickable: 'false' })), { label: 'Resume', testId: 'recording-pause-resume' }), /missing or ambiguous/);
 rejects(() => requireUniqueAction(parse(node({ text: 'Resume', clickable: 'true' })), { label: 'Resume', testId: 'recording-pause-resume' }), /missing or ambiguous/);
 rejects(() => requireUniqueAction(parse(node({ text: 'Resume', 'resource-id': 'wrong-control', clickable: 'true' })), { label: 'Resume', testId: 'recording-pause-resume' }), /missing or ambiguous/);
-rejects(() => parseRecordingTimer(parse(node({ text: '0:60' }))), /range/);
+rejects(() => parseRecordingTimer(parse(node({ text: '0:60', 'resource-id': 'recording-timer' }))), /range/);
+rejects(() => parseRecordingTimer(parse(node({ text: '0:04' }))), /missing or ambiguous/);
 rejects(() => requireTimerAdvance(8, 8), /did not advance/);
 
 const homeBefore = parse(
   node({ text: 'Recent' }),
-  node({ text: '12 recordings' }),
+  node({ text: '12 recordings', 'resource-id': 'recording-count' }),
   node({ 'resource-id': 'com.divay.maina:id/meeting-card', clickable: 'true', bounds: '[10,300][990,500]' }),
 );
 const homeAfter = parse(
   node({ text: 'Recent' }),
-  node({ text: '13 recordings' }),
+  node({ text: '13 recordings', 'resource-id': 'recording-count' }),
   node({ 'resource-id': 'com.divay.maina:id/meeting-card', clickable: 'true', bounds: '[10,260][990,460]' }),
   node({ 'resource-id': 'com.divay.maina:id/meeting-card', clickable: 'true', bounds: '[10,500][990,700]' }),
 );
@@ -128,7 +130,8 @@ assert.equal(requireOneNewRecording(12, 13), 13);
 assert.deepEqual(selectTopMeetingCard(homeAfter), { visibleCardCount: 2, x: 500, y: 360 });
 assertions += 4;
 rejects(() => requireOneNewRecording(12, 14), /exactly one/);
-rejects(() => parsePublicRecordingCount(parse(node({ text: '13 recordings' }), node({ 'content-desc': '13 recordings' }))), /ambiguous/);
+rejects(() => parsePublicRecordingCount(parse(node({ text: '13 recordings', 'resource-id': 'recording-count' }), node({ 'content-desc': '13 recordings', 'resource-id': 'recording-count' }))), /ambiguous/);
+rejects(() => parsePublicRecordingCount(parse(node({ text: '13 recordings' }))), /missing or ambiguous/);
 rejects(() => selectTopMeetingCard(parse(
   node({ 'resource-id': 'meeting-card', clickable: 'true', bounds: '[10,260][400,460]' }),
   node({ 'resource-id': 'meeting-card', clickable: 'true', bounds: '[500,260][990,460]' }),
@@ -167,13 +170,24 @@ rejects(() => parseUiAutomatorHierarchy('<hierarchy></hierarchy>'), /no nodes/);
 rejects(() => parseUiAutomatorHierarchy(`${hierarchy(node({ text: 'ok' }))}<hierarchy></hierarchy>`), /cardinality/);
 rejects(() => parseUiAutomatorHierarchy(hierarchy('<node text="a" text="b" />')), /duplicate/);
 rejects(() => parseUiAutomatorHierarchy(hierarchy('<node text="a" ??? />')), /unconsumed/);
+rejects(() => parseUiAutomatorHierarchy(hierarchy('<node></node>')), /unparsed/);
 passes(() => parseUiAutomatorHierarchy(hierarchy(node({ text: 'A &amp; B' }))));
 
 for (const testId of androidLifecyclePolicy.exactTestIds) {
-  const source = testId === 'meeting-card' ? homeSource : recordSource;
+  const source = testId === 'meeting-card' || testId === 'recording-count'
+    ? homeSource
+    : testId === 'record-meeting'
+      ? shellSource
+      : recordSource;
   assert.match(source, new RegExp(`testID=["']${testId}["']`));
   assertions += 1;
 }
+assert.match(
+  homeSource,
+  /<AppText testID="recording-count" variant="meta" muted>\s*\{meetings\.length\} recording\{meetings\.length === 1 \? '' : 's'\}\s*<\/AppText>/,
+);
+assert.doesNotMatch(homeSource, /testID="recording-count"[^>]*>\s*\{meta\}/);
+assertions += 2;
 assert.equal(androidLifecyclePolicy.rawHierarchyPersistenceAllowed, false);
 assert.equal(androidLifecyclePolicy.processRecoveryRecordingDelta, 1);
 assertions += 2;

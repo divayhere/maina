@@ -55,6 +55,7 @@ export function parseUiAutomatorHierarchy(xml) {
   invariant((xml.match(/<\/hierarchy>/g) ?? []).length === 1, 'UI hierarchy closing root cardinality is invalid.');
 
   const nodes = [];
+  const declaredNodeCount = (xml.match(/<node\b/g) ?? []).length;
   for (const match of xml.matchAll(/<node\s+([^>]*?)(?:\/>|>)/g)) {
     const attributes = parseAttributes(match[1]);
     const visible = attributes['visible-to-user'];
@@ -75,6 +76,7 @@ export function parseUiAutomatorHierarchy(xml) {
     }));
     invariant(nodes.length <= MAX_NODE_COUNT, 'UI hierarchy exceeds the bounded node count.');
   }
+  invariant(nodes.length === declaredNodeCount, 'UI hierarchy contains an unparsed node element.');
   invariant(nodes.length > 0, 'UI hierarchy contains no nodes.');
   return Object.freeze(nodes);
 }
@@ -117,7 +119,7 @@ export function requireUniqueAction(nodes, { label, testId }) {
 
 export function parseRecordingTimer(nodes) {
   const candidates = nodes.filter((node) => node.visible
-    && (hasExactTestId(node, 'recording-timer') || [...exactLabels(node)].some((label) => /^(?:\d+:)?\d{1,2}:\d{2}$/.test(label))));
+    && hasExactTestId(node, 'recording-timer'));
   invariant(candidates.length === 1, 'Recording timer is missing or ambiguous.');
   const labels = [...exactLabels(candidates[0])].filter((label) => /^(?:\d+:)?\d{1,2}:\d{2}$/.test(label));
   invariant(labels.length === 1, 'Recording timer label is missing or ambiguous.');
@@ -141,10 +143,12 @@ export function classifyRecordingSurface(nodes) {
   const stop = actionableMatches(nodes, { label: 'Stop and save', testId: 'recording-stop-save' }).length;
   const pause = actionableMatches(nodes, { label: 'Pause', testId: 'recording-pause-resume' }).length;
   const resume = actionableMatches(nodes, { label: 'Resume', testId: 'recording-pause-resume' }).length;
-  const discard = nodes.filter((node) => node.visible && hasExactLabel(node, 'Discard this recording')).length;
+  const discard = actionableMatches(nodes, { label: 'Discard this recording', testId: 'recording-discard' }).length;
   invariant(stop === 1 && discard === 1 && pause + resume === 1, 'Recording controls are missing or ambiguous.');
   const timerSeconds = parseRecordingTimer(nodes);
-  const stateLabels = nodes.filter((node) => node.visible && (hasExactLabel(node, 'Recording') || hasExactLabel(node, 'Paused')));
+  const stateLabels = nodes.filter((node) => node.visible
+    && hasExactTestId(node, 'recording-state')
+    && (hasExactLabel(node, 'Recording') || hasExactLabel(node, 'Paused')));
   invariant(stateLabels.length === 1, 'Recording state is missing or ambiguous.');
   const state = hasExactLabel(stateLabels[0], 'Recording') ? 'recording' : 'paused';
   invariant((state === 'recording' && pause === 1) || (state === 'paused' && resume === 1), 'Recording control and public state disagree.');
@@ -154,7 +158,7 @@ export function classifyRecordingSurface(nodes) {
 export function parsePublicRecordingCount(nodes) {
   const matches = [];
   for (const node of nodes) {
-    if (!node.visible) continue;
+    if (!node.visible || !hasExactTestId(node, 'recording-count')) continue;
     for (const label of exactLabels(node)) {
       const match = /^(\d+) recordings?$/.exec(label);
       if (match) matches.push(Number(match[1]));
@@ -231,6 +235,9 @@ export const androidLifecyclePolicy = Object.freeze({
     'recording-state',
     'recording-stop-save',
     'recording-pause-resume',
+    'recording-discard',
+    'record-meeting',
+    'recording-count',
     'meeting-card',
   ]),
   processRecoveryRecordingDelta: 1,
