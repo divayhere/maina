@@ -17,6 +17,7 @@ const projectDir = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const storageGuard = '/Users/divay/Developer/Maina/qualification/storage-architecture/jobs/storage-local-staging-format-20260904/require-maina-storage.sh';
 const storageGuardSha256 = 'e8efcaa346ca46ed746970f7739f1346f25442719961f1c8e3d884b3d54c538f';
 const expectedStorageRoot = '/Volumes/DivaySSD/MainaBuild';
+const activeReleasePlanRelativePath = 'release/m3-m4-0.10.69-candidate-plan.json';
 const expectedCapabilities = Object.freeze([
   'node',
   'storage_guard',
@@ -80,7 +81,7 @@ export function collectIosPreflight({
     'scripts/install-ios-preserving-data.sh',
     'scripts/release-provenance-cli.mjs',
     'scripts/lib/renewal-core.mjs',
-    'release/m3-m4-0.10.69-candidate-plan.json',
+    activeReleasePlanRelativePath,
   ];
   record('helper_runtime', helpers.every((path) => isReadable(join(projectDir, path))), 'HELPER_RUNTIME_UNAVAILABLE');
 
@@ -149,7 +150,7 @@ function loadContract() {
 }
 
 function loadReleasePlan() {
-  return JSON.parse(readFileSync(join(projectDir, 'release', 'm3-m4-0.10.69-candidate-plan.json'), 'utf8'));
+  return JSON.parse(readFileSync(join(projectDir, activeReleasePlanRelativePath), 'utf8'));
 }
 
 function runCommand(command, args, { input } = {}) {

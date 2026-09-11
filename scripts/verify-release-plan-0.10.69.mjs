@@ -450,11 +450,28 @@ for (const relative of [
 ]) {
   assert.match(source(relative), /m3-m4-0\.10\.69-candidate-plan\.json/, `${relative} must use the active 0.10.69 plan.`);
 }
-assert.doesNotMatch(
-  source('scripts/qualification/ios-lane.mjs'),
-  /m3-m4-0\.10\.68-candidate-plan\.json/,
-  'iOS qualification must not retain the historical 0.10.68 plan as its active signing-readiness input.',
-);
+function assertIosLaneActivePlanBinding(value) {
+  assert.equal(
+    (value.match(/const activeReleasePlanRelativePath = 'release\/m3-m4-0\.10\.69-candidate-plan\.json';/g) ?? []).length,
+    1,
+    'iOS qualification must declare exactly one active 0.10.69 plan authority.',
+  );
+  assert.equal(
+    (value.match(/\bactiveReleasePlanRelativePath\b/g) ?? []).length,
+    3,
+    'iOS qualification must use its active plan authority only for declaration, helper preflight, and runtime loading.',
+  );
+  assert.match(value, /const helpers = \[[\s\S]*?activeReleasePlanRelativePath,[\s\S]*?\];/);
+  assert.match(value, /readFileSync\(join\(projectDir, activeReleasePlanRelativePath\), 'utf8'\)/);
+}
+const iosLaneSource = source('scripts/qualification/ios-lane.mjs');
+assertIosLaneActivePlanBinding(iosLaneSource);
+for (const staleVersion of ['0.10.68', '0.10.67']) {
+  assert.throws(
+    () => assertIosLaneActivePlanBinding(iosLaneSource.replace('0.10.69-candidate-plan.json', `${staleVersion}-candidate-plan.json`)),
+    /active 0\.10\.69 plan authority/,
+  );
+}
 assert.match(source('scripts/build-android-release-candidate.sh'), /Maina-0\.10\.69-95\.apk/);
 assert.match(source('scripts/build-ios-release-candidate.sh'), /Maina-0\.10\.69-51\.app\.zip/);
 assert.match(source('scripts/build-ios-release-candidate.sh'), /Maina-0\.10\.69-51\.app\.dSYM\.zip/);
