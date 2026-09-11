@@ -443,12 +443,18 @@ for (const relative of [
   'scripts/build-ios-release-candidate.sh',
   'scripts/install-android-preserving-data.sh',
   'scripts/install-ios-preserving-data.sh',
+  'scripts/qualification/ios-lane.mjs',
   'scripts/m0-replay-harness.sh',
   'scripts/verify-release-provenance.mjs',
   'scripts/verify-generated-native-release-metadata.mjs',
 ]) {
   assert.match(source(relative), /m3-m4-0\.10\.69-candidate-plan\.json/, `${relative} must use the active 0.10.69 plan.`);
 }
+assert.doesNotMatch(
+  source('scripts/qualification/ios-lane.mjs'),
+  /m3-m4-0\.10\.68-candidate-plan\.json/,
+  'iOS qualification must not retain the historical 0.10.68 plan as its active signing-readiness input.',
+);
 assert.match(source('scripts/build-android-release-candidate.sh'), /Maina-0\.10\.69-95\.apk/);
 assert.match(source('scripts/build-ios-release-candidate.sh'), /Maina-0\.10\.69-51\.app\.zip/);
 assert.match(source('scripts/build-ios-release-candidate.sh'), /Maina-0\.10\.69-51\.app\.dSYM\.zip/);
