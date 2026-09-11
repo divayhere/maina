@@ -221,6 +221,7 @@ export function MainaTabBar({ state, navigation }: any) {
       <View style={styles.tabBarRow}>
         <Pressable
           accessibilityRole="button"
+          testID={`main-tab-${leftItem.key}`}
           accessibilityState={{ selected: activeRoute === leftItem.key }}
           accessibilityLabel={leftItem.label}
           onPress={() => goToTab(leftItem.key)}
@@ -237,6 +238,7 @@ export function MainaTabBar({ state, navigation }: any) {
         </Pressable>
         <Pressable
           accessibilityRole="button"
+          testID={`main-tab-${rightItem.key}`}
           accessibilityState={{ selected: activeRoute === rightItem.key }}
           accessibilityLabel={rightItem.label}
           onPress={() => goToTab(rightItem.key)}
@@ -254,6 +256,7 @@ export function MainaTabBar({ state, navigation }: any) {
       </View>
       <Pressable
         accessibilityRole="button"
+        testID="record-meeting"
         accessibilityLabel="Record a meeting"
         onPress={() => router.push('/record')}
         style={({ pressed }) => [

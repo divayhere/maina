@@ -167,7 +167,7 @@ export default function MeetingsScreen() {
 
             <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
               <SectionLabel>Recent</SectionLabel>
-              <AppText variant="meta" muted>
+              <AppText testID="recording-count" variant="meta" muted>
                 {meetings.length} recording{meetings.length === 1 ? '' : 's'}
               </AppText>
             </View>
