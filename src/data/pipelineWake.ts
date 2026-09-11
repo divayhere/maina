@@ -285,6 +285,7 @@ async function earliestCanonicalPipelineDue(
       END AS due_at
       FROM meetings
       WHERE summary_status IN ('queued', 'running', 'retryable')
+        AND qualification_evidence_digest IS NULL
       UNION ALL
       SELECT CASE
         WHEN knowledge_cloud_sync_status IN ('sync_queued', 'syncing') THEN ?
@@ -294,6 +295,7 @@ async function earliestCanonicalPipelineDue(
       WHERE knowledge_cloud_sync_status IN (
         'sync_queued', 'syncing', 'sync_failed_retryable', 'sync_blocked_budget'
       )
+        AND qualification_evidence_digest IS NULL
       UNION ALL
       SELECT CASE
         WHEN sync_status IN ('sync_queued', 'syncing') THEN ?
@@ -428,6 +430,7 @@ export async function prepareTransportRetriesForConnectivityEpoch(epoch: number)
       `UPDATE meetings SET cloud_notes_next_retry_at = NULL,
          cloud_notes_last_wake_epoch = ?, updated_at = ?
        WHERE summary_status = 'retryable'
+         AND qualification_evidence_digest IS NULL
          AND cloud_notes_failure_class IN (${placeholders})
          AND cloud_notes_last_wake_epoch < ?`,
       [epoch, now, ...TRANSPORT_FAILURE_CLASSES, epoch],
@@ -436,6 +439,7 @@ export async function prepareTransportRetriesForConnectivityEpoch(epoch: number)
       `UPDATE meetings SET knowledge_cloud_next_retry_at = NULL,
          knowledge_cloud_last_wake_epoch = ?, updated_at = ?
        WHERE knowledge_cloud_sync_status = 'sync_failed_retryable'
+         AND qualification_evidence_digest IS NULL
          AND knowledge_cloud_failure_class IN (${placeholders})
          AND knowledge_cloud_last_wake_epoch < ?`,
       [epoch, now, ...TRANSPORT_FAILURE_CLASSES, epoch],

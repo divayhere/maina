@@ -82,8 +82,18 @@ export interface NativeCaptureStatus {
   systemRecreationResumeCount?: number;
   systemRecoveryReason?: string | null;
   terminalPublicationState?: 'none' | 'queued' | 'running' | 'succeeded' | 'stale_superseded' | 'recovery_required';
-  terminalReasonCode?: 'no_terminal_operation' | 'stop_queued' | 'stop_running' | 'stop_succeeded' | 'stop_stale_superseded' | 'stop_timeout_or_error';
+  terminalReasonCode?: 'no_terminal_operation' | 'stop_queued' | 'stop_running' | 'stop_succeeded' | 'discard_ready_for_ack' | 'stop_stale_superseded' | 'stop_timeout_or_error';
+  terminalOperationId?: number | null;
   terminalElapsedMs?: number;
+  terminalDisposition?: 'save' | 'discard' | null;
+  terminalMeetingId?: string | null;
+  terminalReceiptSchemaVersion?: 'maina.ios-native-stop.v1' | null;
+  terminalGeneration?: number | null;
+  terminalSegmentCount?: number;
+  terminalAudioBytes?: number;
+  discardId?: string | null;
+  discardReadyForAck?: boolean;
+  quarantineReason?: 'legacy_terminal_disposition_missing' | null;
   recoveryAwaitingPublicSignal?: boolean;
   recoveryReasonCode?: string | null;
   platformHoldCount?: number;
@@ -394,17 +404,48 @@ interface MainaRecorderNativeModule {
   armRemoteControl(): Promise<RemoteControlStatus>;
   disarmRemoteControl(): Promise<void>;
   setCaptureState(state: CaptureState): Promise<void>;
+  consumeAndroidQualificationSession?(runId: string): Promise<string | null>;
+  beginAndroidQualificationDiagnostics?(meetingId: string, evidenceDigest: string): Promise<boolean>;
+  cancelAndroidQualificationDiagnosticsBeforeCapture?(meetingId: string, evidenceDigest: string): Promise<boolean>;
+  isAndroidQualificationSessionActive?(): Promise<boolean>;
   startNativeCapture(
     meetingId: string,
     directory: string,
     sourceMode: NativeCaptureSourceMode,
     chunkDurationMs: number,
     meetingStartedAt: number,
+    qualificationSession?: boolean,
+    qualificationEvidenceDigest?: string | null,
   ): Promise<{ requested: boolean }>;
   pauseNativeCapture(): Promise<{ requested: boolean }>;
   resumeNativeCapture(): Promise<{ requested: boolean }>;
   stopNativeCapture(): Promise<{ requested: boolean }>;
-  abortNativeCapture(): Promise<{ requested: boolean }>;
+  prepareNativeDiscard?(meetingId: string, discardId: string): {
+    prepared: boolean;
+    state: 'none' | 'pending' | 'ready_for_ack' | 'blocked';
+    meetingId?: string;
+    discardId?: string;
+    directory?: string;
+    qualificationEvidenceDigest?: string | null;
+    generation?: number;
+  };
+  getPendingNativeDiscard?(): {
+    state: 'none' | 'pending' | 'ready_for_ack' | 'blocked';
+    meetingId?: string;
+    discardId?: string;
+    directory?: string;
+    qualificationEvidenceDigest?: string | null;
+    generation?: number;
+  };
+  getNativeCaptureQuarantine?(): {
+    state: 'none' | 'legacy_terminal' | 'blocked';
+    meetingId?: string;
+    reason?: 'legacy_terminal_disposition_missing';
+  };
+  recoverNativeCaptureQuarantine?(meetingId: string): Promise<{ requested: boolean }>;
+  abortNativeCapture(meetingId?: string, discardId?: string): Promise<{ requested: boolean }>;
+  acknowledgeNativeDiscard?(meetingId: string, discardId: string): Promise<{ requested: boolean }>;
+  retryNativeCaptureFinalization?(): Promise<{ requested: boolean }>;
   prepareIOSNativePostProcessingAudio?(meetingId: string, directory: string): Promise<IOSNativePostProcessingAudioDescriptor>;
   startIOSNativePostProcessing?(
     request: IOSNativePostProcessingStartRequest,
@@ -432,6 +473,7 @@ interface MainaRecorderNativeModule {
   getNativeCaptureStatusAsync?(): Promise<NativeCaptureStatus>;
   inspectNativeCaptureDirectory(directory: string, recoverPartials: boolean): Promise<NativeCaptureDirectoryInspection>;
   deleteNativeCaptureDirectory(directory: string): Promise<boolean>;
+  deleteNativeDiscardDirectory?(meetingId: string, directory: string): Promise<boolean>;
   getQwenAsrStatus(): Promise<QwenAsrStatus>;
   getNativeModelPackLifecycleStatus(): Promise<NativeModelPackLifecycleStatus>;
   beginNativeModelPackAcquisition(

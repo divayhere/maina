@@ -21,6 +21,7 @@ import {
 } from '@/services/remoteLog';
 import { isSentryConfigured } from '@/services/sentry';
 import { formatStorageBytes, getStorageSnapshot } from '@/services/storageBudget';
+import { readNativeCaptureDestructiveWorkFence } from '@/services/nativeCaptureQuarantineFence';
 import type { DiagnosticsStatus, NativeCaptureStatus, QwenAsrStatus } from '../../modules/maina-recorder/src';
 
 function Row({ label, value, warning = false }: { label: string; value: string; warning?: boolean }) {
@@ -96,7 +97,8 @@ export default function Diagnostics() {
         onPress: async () => {
           setSyncing(true);
           try {
-            const deleted = await purgeStagingMeetings();
+            const fence = readNativeCaptureDestructiveWorkFence();
+            const deleted = await purgeStagingMeetings(fence.protectedMeetingIds);
             await Promise.all(
               deleted
                 .map((meeting) => meeting.audioUri)
@@ -104,6 +106,11 @@ export default function Diagnostics() {
                 .map((uri) => FileSystem.deleteAsync(uri, { idempotent: true }).catch(() => {})),
             );
             await refresh();
+          } catch {
+            Alert.alert(
+              'Cleanup paused',
+              'Maina kept meetings that still need an explicit recording recovery choice.',
+            );
           } finally {
             setSyncing(false);
           }

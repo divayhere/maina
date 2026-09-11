@@ -10,6 +10,7 @@ import {
   MEETING_TAG_OUTBOX_V18_MIGRATION_SQL,
   migrateMeetingTagOutboxV19,
 } from './meetingTagsMigration';
+import { MEETING_DISCARD_V21_MIGRATION_SQL } from './meetingDiscardMigration';
 
 let dbPromise: Promise<SQLite.SQLiteDatabase> | null = null;
 
@@ -426,6 +427,14 @@ const MIGRATIONS: Migration[] = [
     getAllAsync: (source, params = []) => db.getAllAsync(source, params),
     runAsync: (source, params = []) => db.runAsync(source, params),
   }),
+  // v20 — local-only lifecycle-qualification ownership. These rows remain
+  // visible for human inspection but can never enter cloud packet/source
+  // queues or remote diagnostic audio transport.
+  async (db) => addColumnIfMissing(db, 'meetings', 'qualification_evidence_digest', 'TEXT'),
+  // v21 — crash-consistent user Discard intent. This deliberately has no
+  // meeting foreign key: the tombstone must survive logical meeting deletion
+  // until the exact native terminal owner is acknowledged.
+  async (db) => db.execAsync(MEETING_DISCARD_V21_MIGRATION_SQL),
 ];
 
 export async function initDb(): Promise<void> {

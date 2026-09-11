@@ -10,6 +10,8 @@ function dependencies(events: string[]): PipelineRecoveryDependencies {
   const step = <T>(name: string, result: T) => vi.fn(async () => { events.push(name); return result; });
   return {
     initDb: step('db', undefined),
+    reconcilePendingNativeDiscards: step('discards', 0),
+    establishNativeCaptureAutomaticWorkFence: step('quarantine', { protectedMeetingIds: [] }),
     repairStoredRecordingReferences: step('paths', 2),
     getMeetingsWithDeletedAudio: step('deleted-audio', ['meeting']),
     markMeetingsAudioDeleted: step('mark-audio', undefined),
@@ -29,7 +31,7 @@ describe('unattended pipeline recovery', () => {
     const events: string[] = [];
     const result = await executePipelineRecovery(dependencies(events));
     expect(events).toEqual([
-      'db', 'paths', 'deleted-audio', 'mark-audio', 'asr', 'retention',
+      'db', 'discards', 'quarantine', 'paths', 'deleted-audio', 'mark-audio', 'asr', 'retention',
       'notes-eligible', 'notes-poll', 'source-sync', 'corrections', 'meeting-tags',
       'diagnostics',
     ]);
@@ -61,6 +63,20 @@ describe('unattended pipeline recovery', () => {
     await expect(executePipelineRecovery(deps)).resolves.toMatchObject({ nativeMeetings: 1 });
   });
 
+  it('carries the exact quarantine fence across path repair, native work, retention, and deleted-audio reconciliation', async () => {
+    const events: string[] = [];
+    const deps = dependencies(events);
+    deps.establishNativeCaptureAutomaticWorkFence = vi.fn(async () => ({
+      protectedMeetingIds: ['legacy-meeting'],
+    }));
+    deps.getMeetingsWithDeletedAudio = vi.fn(async () => ['legacy-meeting', 'ordinary-meeting']);
+    await executePipelineRecovery(deps);
+    expect(deps.repairStoredRecordingReferences).toHaveBeenCalledWith(['legacy-meeting']);
+    expect(deps.markMeetingsAudioDeleted).toHaveBeenCalledWith(['ordinary-meeting']);
+    expect(deps.reconcilePendingNativeMeetingWork).toHaveBeenCalledWith(['legacy-meeting']);
+    expect(deps.enforceAudioRetentionPolicy).toHaveBeenCalledWith('pipeline', ['legacy-meeting']);
+  });
+
   it('coalesces concurrent signals into one effective outbox drain', async () => {
     let release!: () => void;
     const gate = new Promise<void>((resolve) => { release = resolve; });
@@ -86,7 +102,7 @@ describe('unattended pipeline recovery', () => {
     let checkpoints = 0;
     deps.assertActive = vi.fn(async () => {
       checkpoints += 1;
-      if (checkpoints === 6) throw new Error('lease-ended');
+      if (checkpoints === 7) throw new Error('lease-ended');
     });
     await expect(executePipelineRecovery(deps)).rejects.toThrow('lease-ended');
     expect(events).toContain('asr');

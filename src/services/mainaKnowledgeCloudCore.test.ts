@@ -59,6 +59,19 @@ describe('mainaKnowledgeCloudCore', () => {
     })).toBe(false);
   });
 
+  it('never freezes or retries a local lifecycle-qualification meeting', () => {
+    expect(isMeetingEligibleForMainaKnowledgeCloudSync({
+      ...baseMeeting,
+      qualificationEvidenceDigest: 'a'.repeat(64),
+    })).toBe(false);
+    expect(isMeetingEligibleForMainaKnowledgeCloudSync({
+      ...baseMeeting,
+      qualificationEvidenceDigest: 'a'.repeat(64),
+      knowledgeCloudSyncStatus: 'sync_failed_retryable',
+      knowledgeCloudPayloadJson: '{"schema_version":"mkc.source.v1"}',
+    })).toBe(false);
+  });
+
   it('allows retry states when a payload snapshot already exists', () => {
     expect(
       isMeetingEligibleForMainaKnowledgeCloudSync({

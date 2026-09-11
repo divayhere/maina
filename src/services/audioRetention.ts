@@ -10,6 +10,7 @@ import {
 import { log } from '@/services/logger';
 import { planAudioRetention } from '@/services/audioRetentionCore';
 import { notifyMeetingPipelineChanged } from '@/services/meetingPipelineSignals';
+import { readNativeCaptureAutomaticWorkFence } from '@/services/nativeCaptureQuarantineFence';
 
 let retentionInFlight: Promise<void> | null = null;
 const meetingCleanupInFlight = new Map<string, Promise<boolean>>();
@@ -95,6 +96,8 @@ async function deleteAndVerifyMeetingAudio(meeting: Meeting, expiredIncomplete: 
 
 /** Terminal transcript cleanup is per-meeting and never waits for cloud notes. */
 export function cleanupTerminalMeetingAudio(meetingId: string): Promise<boolean> {
+  const protectedMeetingIds = new Set(readNativeCaptureAutomaticWorkFence().protectedMeetingIds);
+  if (protectedMeetingIds.has(meetingId)) return Promise.resolve(false);
   const existing = meetingCleanupInFlight.get(meetingId);
   if (existing) return existing;
   let task: Promise<boolean>;
@@ -115,10 +118,17 @@ export function cleanupTerminalMeetingAudio(meetingId: string): Promise<boolean>
   return task;
 }
 
-async function enforceAudioRetentionPolicyInternal(): Promise<void> {
+async function enforceAudioRetentionPolicyInternal(
+  explicitlyProtectedMeetingIds: readonly string[],
+): Promise<void> {
+  const nativeFence = readNativeCaptureAutomaticWorkFence();
+  const protectedMeetingIds = new Set([
+    ...explicitlyProtectedMeetingIds,
+    ...nativeFence.protectedMeetingIds,
+  ]);
   const config = await getAppConfig();
   const meetings = (await listMeetings())
-    .filter((meeting) => !!meeting.audioUri)
+    .filter((meeting) => !!meeting.audioUri && !protectedMeetingIds.has(meeting.id))
     .sort((a, b) => a.startedAt - b.startedAt);
 
   const measured = await Promise.all(
@@ -157,12 +167,13 @@ async function enforceAudioRetentionPolicyInternal(): Promise<void> {
 /** Coalesces broad fallback scans and limits routine pipeline scans to daily. */
 export function enforceAudioRetentionPolicy(
   reason: 'startup' | 'pipeline' | 'daily' | 'size_pressure' | 'diagnostics' = 'pipeline',
+  protectedMeetingIds: readonly string[] = [],
 ): Promise<void> {
   if (retentionInFlight) return retentionInFlight;
   if (reason === 'pipeline' && Date.now() - lastFullScanAt < 24 * 60 * 60_000) {
     return Promise.resolve();
   }
-  const task = enforceAudioRetentionPolicyInternal().finally(() => {
+  const task = enforceAudioRetentionPolicyInternal(protectedMeetingIds).finally(() => {
     lastFullScanAt = Date.now();
     if (retentionInFlight === task) retentionInFlight = null;
   });

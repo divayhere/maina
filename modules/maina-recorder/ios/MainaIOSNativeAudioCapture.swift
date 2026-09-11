@@ -20,6 +20,27 @@ final class MainaIOSNativeAudioCapture: NSObject, AVAudioRecorderDelegate, CXCal
     case idle, starting, recording, pausing, paused, resuming, finalizing, error
   }
 
+  private enum ChunkCloseOutcome: String {
+    case noActive = "no_active"
+    case discarded, finalized, failed
+  }
+
+  private struct TerminalAudioEvidence {
+    let segmentCount: Int
+    let payloadBytes: Int64
+  }
+
+  private struct PendingTerminalStop {
+    let meetingId: String?
+    let directory: URL?
+    let stoppedState: CaptureState
+    let generation: Int
+    // Keep the exact recorder alive until its delegate callback or timeout so
+    // object identity cannot be recycled underneath the terminal fence.
+    let recorder: AVAudioRecorder
+    var closeOutcome: ChunkCloseOutcome?
+  }
+
   private let queue = DispatchQueue(label: "com.divay.maina.ios.capture")
   private let audioSession = AVAudioSession.sharedInstance()
   private var recorder: AVAudioRecorder?
@@ -41,6 +62,19 @@ final class MainaIOSNativeAudioCapture: NSObject, AVAudioRecorderDelegate, CXCal
   private var startedUptime: TimeInterval?
   private var lastProgressAtMs: Double?
   private var lastError: String?
+  // Active capture identity is cleared at idle. Keep one bounded terminal
+  // receipt separately so JavaScript can bind a completed save to the exact
+  // meeting without treating stale live ownership as current.
+  private var terminalMeetingId: String?
+  private var terminalReceiptSchemaVersion: String?
+  private var terminalGeneration: Int?
+  private var terminalDisposition: String?
+  private var terminalPublicationState = "none"
+  private var terminalReasonCode = "no_terminal_operation"
+  private var terminalSegmentCount = 0
+  private var terminalAudioBytes: Int64 = 0
+  private var terminalStopGeneration = 0
+  private var pendingTerminalStop: PendingTerminalStop?
   private var routeRestartCount = 0
   private var routeRecoveryActive = false
   private var lastRouteChangeAtMs: Double?
@@ -78,6 +112,7 @@ final class MainaIOSNativeAudioCapture: NSObject, AVAudioRecorderDelegate, CXCal
   // background-time assertion instead of requiring the owner to reopen Maina.
   private static let recoveryDelaysMs = [0, 250, 500, 1_000, 2_000, 3_000]
   private static let recoveryRetryBudgetMs: Double = 30_000
+  private static let terminalStopTimeoutMs = 5_000
 
   private override init() {
     super.init()
@@ -145,6 +180,10 @@ final class MainaIOSNativeAudioCapture: NSObject, AVAudioRecorderDelegate, CXCal
           "route": routeDescription(),
         ])
         try openAndStartChunk(reason: "initial")
+        // A prior process-latched receipt remains available through any failed
+        // replacement start and is superseded only after new recorder
+        // ownership has actually been installed.
+        clearTerminalReceipt()
         state = .recording
         startTimers()
         return ["requested": true]
@@ -225,15 +264,67 @@ final class MainaIOSNativeAudioCapture: NSObject, AVAudioRecorderDelegate, CXCal
   func stop() -> [String: Any] {
     queue.sync {
       guard state != .idle else { return ["requested": true] }
+      guard state != .finalizing else { return ["requested": true] }
+      let stoppedState = state
+      let stoppedMeetingId = meetingId
+      let stoppedDirectory = directory
       cancelSystemRecovery(reason: "stop")
+      guard let stoppedGeneration = MainaIOSNativeCaptureTerminalPolicy.nextTerminalGeneration(
+        after: terminalStopGeneration
+      ) else {
+        state = .finalizing
+        lastError = "Native terminal generation could not advance safely."
+        let closeOutcome = closeActiveChunk(reason: "stop", preserve: true)
+        tearDownSession()
+        publishTerminalStopReceipt(
+          meetingId: stoppedMeetingId,
+          directory: stoppedDirectory,
+          stoppedState: stoppedState,
+          closeOutcome: closeOutcome,
+          generation: terminalStopGeneration
+        )
+        resetIdle()
+        return ["requested": true]
+      }
+      terminalStopGeneration = stoppedGeneration
       state = .finalizing
-      closeActiveChunk(reason: "stop", preserve: true)
+      if let active = recorder {
+        pendingTerminalStop = PendingTerminalStop(
+          meetingId: stoppedMeetingId,
+          directory: stoppedDirectory,
+          stoppedState: stoppedState,
+          generation: stoppedGeneration,
+          recorder: active,
+          closeOutcome: nil
+        )
+      }
+      let closeOutcome = closeActiveChunk(reason: "stop", preserve: true)
+      if pendingTerminalStop?.generation == stoppedGeneration {
+        pendingTerminalStop?.closeOutcome = closeOutcome
+      }
       appendJournal("stopped", fields: [
         "routeRestartCount": routeRestartCount,
         "captureGapMs": captureGapMs,
       ])
       tearDownSession()
-      resetIdle()
+      if let pending = pendingTerminalStop {
+        queue.asyncAfter(deadline: .now() + .milliseconds(Self.terminalStopTimeoutMs)) { [weak self] in
+          self?.completePendingTerminalStop(
+            recorder: pending.recorder,
+            generation: pending.generation,
+            signal: "timeout"
+          )
+        }
+      } else {
+        publishTerminalStopReceipt(
+          meetingId: stoppedMeetingId,
+          directory: stoppedDirectory,
+          stoppedState: stoppedState,
+          closeOutcome: closeOutcome,
+          generation: stoppedGeneration
+        )
+        resetIdle()
+      }
       return ["requested": true]
     }
   }
@@ -241,9 +332,11 @@ final class MainaIOSNativeAudioCapture: NSObject, AVAudioRecorderDelegate, CXCal
   func abort() -> [String: Any] {
     queue.sync {
       guard state != .idle else { return ["requested": true] }
+      pendingTerminalStop = nil
       cancelSystemRecovery(reason: "abort")
       closeActiveChunk(reason: "abort", preserve: false)
       tearDownSession()
+      clearTerminalReceipt()
       resetIdle()
       return ["requested": true]
     }
@@ -271,6 +364,14 @@ final class MainaIOSNativeAudioCapture: NSObject, AVAudioRecorderDelegate, CXCal
         "recoverySignalCount": recoverySignalCount,
         "interruptionBridgeStartCount": interruptionBridgeStartCount,
         "interruptionBridgeExpirationCount": interruptionBridgeExpirationCount,
+        "terminalMeetingId": terminalMeetingId ?? NSNull(),
+        "terminalReceiptSchemaVersion": terminalReceiptSchemaVersion ?? NSNull(),
+        "terminalGeneration": terminalGeneration ?? NSNull(),
+        "terminalDisposition": terminalDisposition ?? NSNull(),
+        "terminalPublicationState": terminalPublicationState,
+        "terminalReasonCode": terminalReasonCode,
+        "terminalSegmentCount": terminalSegmentCount,
+        "terminalAudioBytes": terminalAudioBytes,
       ]
       if let meetingId { result["meetingId"] = meetingId }
       if state == .paused {
@@ -445,20 +546,24 @@ final class MainaIOSNativeAudioCapture: NSObject, AVAudioRecorderDelegate, CXCal
     appendJournal("chunk-opened", fields: ["index": chunkIndex, "reason": reason, "file": partial.lastPathComponent])
   }
 
-  private func closeActiveChunk(reason: String, preserve: Bool) {
-    guard let active = recorder else { return }
+  @discardableResult
+  private func closeActiveChunk(reason: String, preserve: Bool) -> ChunkCloseOutcome {
+    guard let active = recorder else { return .noActive }
     active.updateMeters()
     active.stop()
     recorder = nil
     let partial = currentPartialURL
     currentPartialURL = nil
-    guard let partial else { return }
+    guard let partial else {
+      lastError = "Active native audio had no durable partial file."
+      return .failed
+    }
     let bytes = Self.fileBytes(at: partial)
     let payloadBytes = Self.pcmWavDataBytes(at: partial)
     guard preserve, payloadBytes > 0 else {
       try? FileManager.default.removeItem(at: partial)
       appendJournal("chunk-discarded", fields: ["index": chunkIndex, "reason": reason])
-      return
+      return .discarded
     }
     let final = partial.deletingLastPathComponent()
       .appendingPathComponent(partial.lastPathComponent.replacingOccurrences(of: ".partial.wav", with: ".wav"))
@@ -469,12 +574,18 @@ final class MainaIOSNativeAudioCapture: NSObject, AVAudioRecorderDelegate, CXCal
       guard !FileManager.default.fileExists(atPath: final.path) else {
         lastError = "Saved audio name conflict for chunk \(chunkIndex)."
         appendJournal("chunk-finalization-conflict", fields: ["index": chunkIndex, "file": partial.lastPathComponent])
-        return
+        return .failed
       }
       try FileManager.default.moveItem(at: partial, to: final)
-      let duration = (try? AVAudioFile(forReading: final)).flatMap { file in
-        file.fileFormat.sampleRate > 0 ? Double(file.length) * 1_000 / file.fileFormat.sampleRate : nil
-      } ?? 0
+      let readable = try AVAudioFile(forReading: final)
+      let duration = readable.fileFormat.sampleRate > 0
+        ? Double(readable.length) * 1_000 / readable.fileFormat.sampleRate
+        : 0
+      guard payloadBytes > 0, readable.length > 0, duration > 0 else {
+        lastError = "Finalized native audio could not be read back safely."
+        appendJournal("chunk-finalization-invalid", fields: ["index": chunkIndex, "reason": reason])
+        return .failed
+      }
       appendJournal("chunk-finalized", fields: [
         "index": chunkIndex,
         "file": final.lastPathComponent,
@@ -482,9 +593,11 @@ final class MainaIOSNativeAudioCapture: NSObject, AVAudioRecorderDelegate, CXCal
         "durationMs": duration,
         "reason": reason,
       ])
+      return .finalized
     } catch {
       lastError = "Could not finalize saved audio: \(error.localizedDescription)"
       appendJournal("chunk-finalization-failed", fields: ["index": chunkIndex, "reason": reason, "error": lastError ?? "unknown"])
+      return .failed
     }
   }
 
@@ -1057,6 +1170,120 @@ final class MainaIOSNativeAudioCapture: NSObject, AVAudioRecorderDelegate, CXCal
     endRecoveryBackgroundTask()
   }
 
+  private func clearTerminalReceipt() {
+    terminalMeetingId = nil
+    terminalReceiptSchemaVersion = nil
+    terminalGeneration = nil
+    terminalDisposition = nil
+    terminalPublicationState = "none"
+    terminalReasonCode = "no_terminal_operation"
+    terminalSegmentCount = 0
+    terminalAudioBytes = 0
+  }
+
+  private func terminalAudioEvidence(in directory: URL?) -> TerminalAudioEvidence? {
+    guard let directory,
+      let files = try? FileManager.default.contentsOfDirectory(
+        at: directory,
+        includingPropertiesForKeys: nil,
+        options: [.skipsHiddenFiles]
+      )
+    else { return nil }
+    if files.contains(where: {
+      $0.lastPathComponent.range(of: #"^capture-\d+\.partial\.wav$"#, options: .regularExpression) != nil
+    }) { return nil }
+    let finalized = files.filter {
+      $0.lastPathComponent.range(of: #"^capture-\d+\.wav$"#, options: .regularExpression) != nil
+    }
+    guard !finalized.isEmpty else { return nil }
+    var totalPayloadBytes: Int64 = 0
+    for fileURL in finalized {
+      let payloadBytes = Self.pcmWavDataBytes(at: fileURL)
+      guard payloadBytes > 0,
+        let readable = try? AVAudioFile(forReading: fileURL),
+        readable.length > 0,
+        readable.fileFormat.sampleRate > 0,
+        Double(readable.length) * 1_000 / readable.fileFormat.sampleRate > 0
+      else { return nil }
+      let sum = totalPayloadBytes.addingReportingOverflow(payloadBytes)
+      guard !sum.overflow else { return nil }
+      totalPayloadBytes = sum.partialValue
+    }
+    return TerminalAudioEvidence(segmentCount: finalized.count, payloadBytes: totalPayloadBytes)
+  }
+
+  private func publishTerminalStopReceipt(
+    meetingId: String?,
+    directory: URL?,
+    stoppedState: CaptureState,
+    closeOutcome: ChunkCloseOutcome,
+    generation: Int
+  ) {
+    let evidence = terminalAudioEvidence(in: directory)
+    terminalMeetingId = meetingId
+    terminalReceiptSchemaVersion = "maina.ios-native-stop.v1"
+    terminalGeneration = generation
+    terminalDisposition = "save"
+    terminalSegmentCount = evidence?.segmentCount ?? 0
+    terminalAudioBytes = evidence?.payloadBytes ?? 0
+    let clean = MainaIOSNativeCaptureTerminalPolicy.isCleanStop(
+      meetingId: meetingId,
+      generation: generation,
+      stoppedState: stoppedState.rawValue,
+      closeOutcome: closeOutcome.rawValue,
+      finalizationErrorPresent: lastError != nil,
+      segmentCount: terminalSegmentCount,
+      payloadBytes: terminalAudioBytes,
+      terminalEvidenceComplete: evidence != nil
+    )
+    terminalPublicationState = clean ? "succeeded" : "recovery_required"
+    terminalReasonCode = clean ? "stop_succeeded" : "stop_timeout_or_error"
+    if !clean && lastError == nil {
+      lastError = "No finalized native audio was available for the completed save."
+    }
+  }
+
+  private func completePendingTerminalStop(
+    recorder: AVAudioRecorder,
+    generation: Int,
+    signal: String
+  ) {
+    let pending = pendingTerminalStop
+    let action = MainaIOSNativeCaptureTerminalPolicy.completionAction(
+      pendingGeneration: pending?.generation,
+      completionGeneration: generation,
+      recorderIdentityMatches: pending?.recorder === recorder,
+      stateIsFinalizing: state == .finalizing,
+      signal: signal
+    )
+    guard let pending, action != .ignore else { return }
+    if action == .recoveryRequired {
+      switch signal {
+      case "recorder_failed":
+        lastError = "Native audio recorder did not complete the final segment successfully."
+      case "encode_error":
+        lastError = "Native audio encoder could not complete the final segment."
+      default:
+        lastError = "Native audio recorder completion timed out."
+      }
+    }
+    let closeOutcome = pending.closeOutcome ?? .failed
+    publishTerminalStopReceipt(
+      meetingId: pending.meetingId,
+      directory: pending.directory,
+      stoppedState: pending.stoppedState,
+      closeOutcome: closeOutcome,
+      generation: pending.generation
+    )
+    appendJournal("terminal-stop-completed", fields: [
+      "generation": pending.generation,
+      "signal": signal,
+      "publication": terminalPublicationState,
+    ])
+    pendingTerminalStop = nil
+    resetIdle()
+  }
+
   @discardableResult
   private func prepareSystemPause(reason: String) -> Int? {
     guard state == .recording else {
@@ -1127,6 +1354,30 @@ final class MainaIOSNativeAudioCapture: NSObject, AVAudioRecorderDelegate, CXCal
       observerCallActive: observerCallActive
     )
     return observerCallActive
+  }
+
+  func audioRecorderDidFinishRecording(_ recorder: AVAudioRecorder, successfully flag: Bool) {
+    queue.async { [weak self] in
+      guard let self else { return }
+      guard let generation = self.pendingTerminalStop?.generation else { return }
+      self.completePendingTerminalStop(
+        recorder: recorder,
+        generation: generation,
+        signal: flag ? "recorder_succeeded" : "recorder_failed"
+      )
+    }
+  }
+
+  func audioRecorderEncodeErrorDidOccur(_ recorder: AVAudioRecorder, error: Error?) {
+    queue.async { [weak self] in
+      guard let self else { return }
+      guard let generation = self.pendingTerminalStop?.generation else { return }
+      self.completePendingTerminalStop(
+        recorder: recorder,
+        generation: generation,
+        signal: "encode_error"
+      )
+    }
   }
 
   func callObserver(_ callObserver: CXCallObserver, callChanged call: CXCall) {

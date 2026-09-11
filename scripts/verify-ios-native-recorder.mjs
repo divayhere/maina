@@ -20,6 +20,8 @@ const continuedProcessingPolicy = path.join(moduleRoot, 'ios', 'MainaIOSContinue
 const continuedProcessingPolicyTests = path.join(project, 'scripts', 'fixtures', 'MainaIOSContinuedProcessingRetentionPolicyTests.swift');
 const callRecoveryPolicy = path.join(moduleRoot, 'ios', 'MainaIOSCallRecoveryPolicy.swift');
 const callRecoveryPolicyTests = path.join(project, 'scripts', 'fixtures', 'MainaIOSCallRecoveryPolicyTests.swift');
+const terminalPolicy = path.join(moduleRoot, 'ios', 'MainaIOSNativeCaptureTerminalPolicy.swift');
+const terminalPolicyTests = path.join(project, 'scripts', 'fixtures', 'MainaIOSNativeCaptureTerminalPolicyTests.swift');
 const pipelineWake = path.join(moduleRoot, 'ios', 'MainaIOSPipelineWake.swift');
 const pipelineWakePolicy = path.join(moduleRoot, 'ios', 'MainaIOSPipelineWakePolicy.swift');
 const pipelineWakePolicyTests = path.join(project, 'scripts', 'fixtures', 'MainaIOSPipelineWakePolicyTests.swift');
@@ -32,10 +34,70 @@ const config = JSON.parse(readFileSync(path.join(moduleRoot, 'expo-module.config
 const appConfig = JSON.parse(readFileSync(path.join(project, 'app.json'), 'utf8'));
 const captureSource = readFileSync(capture, 'utf8');
 const callRecoveryPolicySource = readFileSync(callRecoveryPolicy, 'utf8');
+const terminalPolicySource = readFileSync(terminalPolicy, 'utf8');
 const nativePostProcessingStoreSource = readFileSync(nativePostProcessingStore, 'utf8');
 const nativePostProcessingCoordinatorSource = readFileSync(nativePostProcessingCoordinator, 'utf8');
 
-for (const file of [capture, module, podspec, qwen, modelPackLifecycle, modelPackLifecycleTests, continuedProcessing, continuedProcessingPolicy, continuedProcessingPolicyTests, callRecoveryPolicy, callRecoveryPolicyTests, pipelineWake, pipelineWakePolicy, pipelineWakePolicyTests, nativePostProcessingStore, nativePostProcessingCoordinator, nativePostProcessingTests, continuedProcessingPlugin]) {
+function verifyTerminalStopOrdering(source) {
+  const anchor = 'terminalStopGeneration = stoppedGeneration';
+  const anchorIndex = source.indexOf(anchor);
+  if (anchorIndex < 0 || source.indexOf(anchor, anchorIndex + anchor.length) >= 0) {
+    throw new Error('iOS explicit stop must contain exactly one successful terminal-generation anchor.');
+  }
+  const overflowSource = source.slice(0, anchorIndex);
+  for (const token of ['state = .finalizing', 'resetIdle()', 'return ["requested": true]']) {
+    if (!overflowSource.includes(token)) {
+      throw new Error(`iOS terminal-generation overflow branch is incomplete: ${token}`);
+    }
+  }
+  let cursor = anchorIndex + anchor.length;
+  for (const token of [
+    'state = .finalizing',
+    'pendingTerminalStop = PendingTerminalStop(',
+    'closeActiveChunk(reason: "stop", preserve: true)',
+    'queue.asyncAfter(',
+  ]) {
+    const tokenIndex = source.indexOf(token, cursor);
+    if (tokenIndex < 0) {
+      throw new Error(`iOS issued-generation terminal ordering is incomplete: ${token}`);
+    }
+    cursor = tokenIndex + token.length;
+  }
+}
+
+const terminalOrderingFixture = `
+state = .finalizing
+resetIdle()
+return ["requested": true]
+terminalStopGeneration = stoppedGeneration
+state = .finalizing
+pendingTerminalStop = PendingTerminalStop(
+closeActiveChunk(reason: "stop", preserve: true)
+queue.asyncAfter(
+`;
+verifyTerminalStopOrdering(terminalOrderingFixture);
+for (const [label, fixture] of [
+  ['missing normal finalizing', terminalOrderingFixture.replace(
+    'terminalStopGeneration = stoppedGeneration\nstate = .finalizing',
+    'terminalStopGeneration = stoppedGeneration',
+  )],
+  ['reordered pending owner', terminalOrderingFixture.replace(
+    'state = .finalizing\npendingTerminalStop = PendingTerminalStop(',
+    'pendingTerminalStop = PendingTerminalStop(\nstate = .finalizing',
+  )],
+  ['duplicate anchor', `${terminalOrderingFixture}\nterminalStopGeneration = stoppedGeneration`],
+  ['missing overflow exit', terminalOrderingFixture.replace('resetIdle()\n', '')],
+]) {
+  let rejected = false;
+  try {
+    verifyTerminalStopOrdering(fixture);
+  } catch {
+    rejected = true;
+  }
+  if (!rejected) throw new Error(`iOS terminal ordering self-test failed: ${label}`);
+}
+
+for (const file of [capture, module, podspec, qwen, modelPackLifecycle, modelPackLifecycleTests, continuedProcessing, continuedProcessingPolicy, continuedProcessingPolicyTests, callRecoveryPolicy, callRecoveryPolicyTests, terminalPolicy, terminalPolicyTests, pipelineWake, pipelineWakePolicy, pipelineWakePolicyTests, nativePostProcessingStore, nativePostProcessingCoordinator, nativePostProcessingTests, continuedProcessingPlugin]) {
   if (!existsSync(file) || readFileSync(file, 'utf8').trim().length === 0) {
     throw new Error(`Required iOS recorder source is missing: ${file}`);
   }
@@ -156,9 +218,73 @@ for (const token of [
   'refreshCommunicationActiveFromObserver()',
   'chunk-allocated',
   'next.record(), next.isRecording',
+  'private var terminalMeetingId: String?',
+  'private var pendingTerminalStop: PendingTerminalStop?',
+  'private var terminalStopGeneration = 0',
+  'MainaIOSNativeCaptureTerminalPolicy.nextTerminalGeneration(',
+  'terminalReceiptSchemaVersion = "maina.ios-native-stop.v1"',
+  'state = .finalizing',
+  'queue.asyncAfter(deadline: .now() + .milliseconds(Self.terminalStopTimeoutMs))',
+  'func audioRecorderDidFinishRecording(_ recorder: AVAudioRecorder, successfully flag: Bool)',
+  'func audioRecorderEncodeErrorDidOccur(_ recorder: AVAudioRecorder, error: Error?)',
+  'MainaIOSNativeCaptureTerminalPolicy.completionAction(',
+  'let evidence = terminalAudioEvidence(in: directory)',
+  'readable.fileFormat.sampleRate > 0',
+  'MainaIOSNativeCaptureTerminalPolicy.isCleanStop(',
+  'terminalPublicationState = clean ? "succeeded" : "recovery_required"',
+  'terminalReasonCode = clean ? "stop_succeeded" : "stop_timeout_or_error"',
 ]) {
   if (!captureSource.includes(token)) {
     throw new Error(`iOS recorder reliability invariant missing: ${token}`);
+  }
+}
+const terminalStopStart = captureSource.indexOf('func stop() -> [String: Any]');
+const terminalStopEnd = captureSource.indexOf('func abort() -> [String: Any]', terminalStopStart);
+const terminalStopSource = captureSource.slice(terminalStopStart, terminalStopEnd);
+if (terminalStopStart < 0 || terminalStopEnd < 0) throw new Error('iOS explicit stop source is missing.');
+verifyTerminalStopOrdering(terminalStopSource);
+const terminalCompletionStart = captureSource.indexOf('private func completePendingTerminalStop(');
+const terminalCompletionEnd = captureSource.indexOf('@discardableResult\n  private func prepareSystemPause', terminalCompletionStart);
+const terminalCompletionSource = captureSource.slice(terminalCompletionStart, terminalCompletionEnd);
+const terminalActionIndex = terminalCompletionSource.indexOf('MainaIOSNativeCaptureTerminalPolicy.completionAction(');
+const terminalGuardIndex = terminalCompletionSource.indexOf('guard let pending, action != .ignore');
+const terminalPublishIndex = terminalCompletionSource.indexOf('publishTerminalStopReceipt(');
+const terminalClearIndex = terminalCompletionSource.indexOf('pendingTerminalStop = nil');
+const terminalIdleIndex = terminalCompletionSource.indexOf('resetIdle()');
+if (terminalCompletionStart < 0 || terminalCompletionEnd < 0
+  || terminalActionIndex < 0
+  || terminalGuardIndex <= terminalActionIndex
+  || terminalPublishIndex <= terminalGuardIndex
+  || terminalClearIndex <= terminalPublishIndex
+  || terminalIdleIndex <= terminalClearIndex
+) {
+  throw new Error('iOS terminal callback must validate its fence, publish one receipt, clear the lease, then enter idle.');
+}
+if (terminalCompletionSource.includes('recoveryGeneration')) {
+  throw new Error('iOS terminal completion must never depend on the mutable call-recovery generation.');
+}
+for (const token of [
+  'case validateAudio = "validate_audio"',
+  'case recoveryRequired = "recovery_required"',
+  'current < Int.max',
+  'pendingGeneration: Int?',
+  'completionGeneration: Int',
+  'recorderIdentityMatches',
+  'completionGeneration == pendingGeneration',
+  'stateIsFinalizing',
+  'case "recorder_succeeded"',
+  'case "recorder_failed", "encode_error", "timeout"',
+  'meetingId?.isEmpty == false',
+  'generation > 0',
+  '!finalizationErrorPresent',
+  'segmentCount > 0',
+  'payloadBytes > 0',
+  'terminalEvidenceComplete',
+  'stoppedState == "recording" && closeOutcome == "finalized"',
+  'stoppedState == "paused" && closeOutcome == "no_active"',
+]) {
+  if (!terminalPolicySource.includes(token)) {
+    throw new Error(`iOS terminal-receipt policy invariant missing: ${token}`);
   }
 }
 for (const token of [
@@ -519,7 +645,7 @@ if (process.platform === 'darwin') {
   const sdk = execFileSync('xcrun', ['--sdk', 'iphoneos', '--show-sdk-path'], { encoding: 'utf8' }).trim();
   execFileSync('xcrun', [
     'swiftc', '-target', 'arm64-apple-ios16.4', '-sdk', sdk,
-    '-typecheck', callRecoveryPolicy, capture,
+    '-typecheck', callRecoveryPolicy, terminalPolicy, capture,
   ], { stdio: 'inherit' });
   execFileSync('xcrun', [
     'swiftc', '-target', 'arm64-apple-ios16.4', '-sdk', sdk,
@@ -569,6 +695,14 @@ if (process.platform === 'darwin') {
     execFileSync(callPolicyTestExecutable, [], { stdio: 'inherit' });
   } finally {
     rmSync(callPolicyTestDirectory, { recursive: true, force: true });
+  }
+  const terminalPolicyTestDirectory = mkdtempSync(path.join(tmpdir(), 'maina-ios-terminal-policy-'));
+  const terminalPolicyTestExecutable = path.join(terminalPolicyTestDirectory, 'terminal-policy-tests');
+  try {
+    execFileSync('xcrun', ['swiftc', terminalPolicy, terminalPolicyTests, '-o', terminalPolicyTestExecutable], { stdio: 'inherit' });
+    execFileSync(terminalPolicyTestExecutable, [], { stdio: 'inherit' });
+  } finally {
+    rmSync(terminalPolicyTestDirectory, { recursive: true, force: true });
   }
   const continuedPolicyTestDirectory = mkdtempSync(path.join(tmpdir(), 'maina-ios-continued-policy-'));
   const continuedPolicyTestExecutable = path.join(continuedPolicyTestDirectory, 'continued-policy-tests');

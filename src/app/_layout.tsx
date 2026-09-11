@@ -29,6 +29,7 @@ import {
   getPcmWavDurationsMs,
   getIOSAutomationScenario,
   getNativeCaptureStatusAsync,
+  isAndroidQualificationSessionActive,
   armRemoteControl,
   inspectNativeCaptureDirectory,
   repairWavFiles,
@@ -38,7 +39,9 @@ import { installHardwareTriggerListener } from '@/hardware/trigger/hardwareTrigg
 import { resolveRemoteAction } from '@/hardware/trigger/remoteControl';
 import { log } from '@/services/logger';
 import { reconcilePendingNativeMeetingWork } from '@/services/meetingCaptureLifecycle';
+import { reconcilePendingNativeDiscards } from '@/services/nativeDiscard';
 import { enforceAudioRetentionPolicy } from '@/services/audioRetention';
+import { establishNativeCaptureAutomaticWorkFence } from '@/services/nativeCaptureQuarantineFence';
 import {
   finalizeDiagnosticRun,
   flushDiagnostics,
@@ -46,6 +49,9 @@ import {
   getDiagnosticsStatus,
   installRemoteLog,
   queueAudioArtifact,
+  setQualificationDiagnosticMeetingIds,
+  setQualificationDiagnosticsSuppressed,
+  setQuarantineDiagnosticMeetingIds,
 } from '@/services/remoteLog';
 import { queueEligibleMeetingPackets, reconcilePendingMeetingPackets } from '@/services/meetingPacket';
 import { reconcilePendingMainaKnowledgeCloudSyncs } from '@/services/mainaKnowledgeCloud';
@@ -99,6 +105,22 @@ function RootLayout() {
     setInitError(null);
     void (async () => {
       try {
+        await initDb();
+        // User Discard is a logical deletion, not generic capture recovery.
+        // Reconcile its retained native/SQLite handshake before any meeting,
+        // segment, diagnostics, ASR, packet, or cloud enumeration.
+        await reconcilePendingNativeDiscards();
+        const nativeCaptureFence = await establishNativeCaptureAutomaticWorkFence();
+        const protectedMeetingIds = new Set(nativeCaptureFence.protectedMeetingIds);
+        const launchMeetings = await listMeetings();
+        setQualificationDiagnosticMeetingIds(
+          launchMeetings
+            .filter((meeting) => meeting.qualificationEvidenceDigest != null)
+            .map((meeting) => meeting.id),
+        );
+        setQuarantineDiagnosticMeetingIds([...protectedMeetingIds]);
+        const qualificationCaptureActive = await isAndroidQualificationSessionActive().catch(() => true);
+        setQualificationDiagnosticsSuppressed(qualificationCaptureActive);
         await installRemoteLog();
         const diagnostics = await getDiagnosticsStatus().catch(() => null);
         if (diagnostics) {
@@ -112,8 +134,7 @@ function RootLayout() {
           await flushDiagnostics().catch(() => {});
         }
         log.info('app', 'launch');
-        await initDb();
-        await repairStoredRecordingReferences();
+        await repairStoredRecordingReferences([...protectedMeetingIds]);
         // Previous staging builds stored direct provider and MKC values in
         // SQLite. Cloud notes now use a scoped SecureStore session only.
         await clearLegacyDirectAiConfiguration();
@@ -128,7 +149,9 @@ function RootLayout() {
         // A process death can leave the active native WAV as *.partial. Finalize
         // it before trying to resume native post-processing from durable audio.
         const activeMeetings = (await listMeetings()).filter(
-          (meeting) => meeting.status === 'recording' && !!meeting.audioUri,
+          (meeting) => meeting.status === 'recording'
+            && !!meeting.audioUri
+            && !protectedMeetingIds.has(meeting.id),
         );
         const liveMeetingIds: string[] = [];
         for (const meeting of activeMeetings) {
@@ -170,14 +193,19 @@ function RootLayout() {
 
         // Snapshot unfinished rows before changing their meeting state. The
         // deterministic artifact IDs make this safe to repeat after another crash.
-        const interruptedSegments = await listInterruptedRecordingSegments();
+        const interruptedSegments = (await listInterruptedRecordingSegments())
+          .filter((segment) => !protectedMeetingIds.has(segment.meetingId));
         const repaired = await repairWavFiles(interruptedSegments.map((segment) => segment.audioUri));
         const recoveredDurations = await getPcmWavDurationsMs(
           interruptedSegments.map((segment) => segment.audioUri),
         );
         const interruptedMeetingIds = [...new Set(interruptedSegments.map((segment) => segment.meetingId))];
+        const qualificationMeetingIds = new Set((await Promise.all(
+          interruptedMeetingIds.map(async (meetingId) => (await getMeeting(meetingId))?.qualificationEvidenceDigest ? meetingId : null),
+        )).filter((meetingId): meetingId is string => meetingId !== null));
 
         for (const segment of interruptedSegments) {
+          if (qualificationMeetingIds.has(segment.meetingId)) continue;
           await queueAudioArtifact({
             artifactId: `${segment.meetingId}-audio-${segment.index}`,
             meetingId: segment.meetingId,
@@ -201,7 +229,7 @@ function RootLayout() {
             (segment) => (recoveredDurations[segment.audioUri] ?? 0) > 0,
           ).length;
           const measuredGapMs = Math.max(0, wallDurationMs - audioDurationMs);
-          await finalizeDiagnosticRun({
+          if (!meeting.qualificationEvidenceDigest) await finalizeDiagnosticRun({
             runId: `recovery-${meetingId}`,
             meetingId,
             startedAt: new Date(meeting.startedAt).toISOString(),
@@ -225,11 +253,16 @@ function RootLayout() {
             },
           });
         }
-        const resumedNativeMeetings = await reconcilePendingNativeMeetingWork();
+        const resumedNativeMeetings = await reconcilePendingNativeMeetingWork([...protectedMeetingIds]);
+        setQualificationDiagnosticsSuppressed(
+          await isAndroidQualificationSessionActive().catch(() => true),
+        );
+        await installRemoteLog();
 
-        const deletedAudioMeetingIds = await getMeetingsWithDeletedAudio();
+        const deletedAudioMeetingIds = (await getMeetingsWithDeletedAudio())
+          .filter((meetingId) => !protectedMeetingIds.has(meetingId));
         await markMeetingsAudioDeleted(deletedAudioMeetingIds);
-        await enforceAudioRetentionPolicy('startup');
+        await enforceAudioRetentionPolicy('startup', [...protectedMeetingIds]);
         if (Platform.OS === 'android' && Platform.Version >= 33) {
           await PermissionsAndroid.request(PermissionsAndroid.PERMISSIONS.POST_NOTIFICATIONS).catch(() => null);
         }

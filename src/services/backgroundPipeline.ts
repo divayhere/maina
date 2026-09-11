@@ -10,8 +10,14 @@ import { reconcilePendingMainaKnowledgeCloudSyncs } from '@/services/mainaKnowle
 import { reconcilePendingMainaKnowledgeCloudCorrections } from '@/services/mainaKnowledgeCloudCorrections';
 import { reconcilePendingMkcMeetingTagMutations } from '@/services/mkc-meeting-tags-outbox';
 import { reconcilePendingNativeMeetingWork } from '@/services/meetingCaptureLifecycle';
+import { reconcilePendingNativeDiscards } from '@/services/nativeDiscard';
+import { establishNativeCaptureAutomaticWorkFence } from '@/services/nativeCaptureQuarantineFence';
 import { reconcileAutoSummaryEligibility, reconcilePendingMeetingPackets } from '@/services/meetingPacket';
-import { flushDiagnostics, getMeetingsWithDeletedAudio } from '@/services/remoteLog';
+import {
+  flushDiagnostics,
+  getMeetingsWithDeletedAudio,
+  setQuarantineDiagnosticMeetingIds,
+} from '@/services/remoteLog';
 import {
   createCoalescedPipelineRunner,
   executePipelineRecovery,
@@ -33,6 +39,12 @@ async function performPipelineRecoveryCycle(assertActive?: () => Promise<void>):
   return executePipelineRecovery({
     assertActive,
     initDb,
+    reconcilePendingNativeDiscards,
+    establishNativeCaptureAutomaticWorkFence: async () => {
+      const fence = await establishNativeCaptureAutomaticWorkFence();
+      setQuarantineDiagnosticMeetingIds(fence.protectedMeetingIds);
+      return fence;
+    },
     repairStoredRecordingReferences,
     getMeetingsWithDeletedAudio,
     markMeetingsAudioDeleted,

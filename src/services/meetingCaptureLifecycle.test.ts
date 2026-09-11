@@ -21,6 +21,9 @@ const mocks = vi.hoisted(() => ({
     transcriptionRecoveryRounds: 0,
   },
   nativeResult: null as unknown,
+  nativeQuarantine: { state: 'none' } as
+    | { state: 'none' | 'blocked' }
+    | { state: 'legacy_terminal'; meetingId: string; reason: 'legacy_terminal_disposition_missing' },
   durableImport: null as { importedAt: string; transactionCommitSha256: string } | null,
   acknowledge: vi.fn(async () => true),
   cleanup: vi.fn(async () => {}),
@@ -89,6 +92,7 @@ vi.mock('@/hardware/recording/foreground', () => ({
   beginIOSContinuedProcessing: vi.fn(() => null),
   bindIOSContinuedProcessingRun: vi.fn(() => true),
   finishIOSContinuedProcessing: vi.fn(),
+  getNativeCaptureQuarantine: vi.fn(() => mocks.nativeQuarantine),
   getNativeCaptureStatusAsync: vi.fn(async () => ({ state: 'idle', meetingId: null })),
   isNativePostProcessingServiceRunning: vi.fn(() => false),
   prepareIOSNativePostProcessingAudio: mocks.prepareAudio,
@@ -190,6 +194,7 @@ describe('iOS durable native post-processing lifecycle', () => {
       nativePostprocessImportedAt: null,
     });
     mocks.nativeResult = null;
+    mocks.nativeQuarantine = { state: 'none' };
     mocks.durableImport = {
       importedAt: '2026-09-09T00:01:00.000Z',
       transactionCommitSha256: 'f'.repeat(64),
@@ -203,6 +208,20 @@ describe('iOS durable native post-processing lifecycle', () => {
     mocks.getStages.mockResolvedValue([]);
     mocks.getTranscriptSummary.mockResolvedValue(null);
     mocks.updateStage.mockImplementation(async () => {});
+  });
+
+  it('skips the exact meeting retained by durable native quarantine', async () => {
+    mocks.nativeQuarantine = {
+      state: 'legacy_terminal',
+      meetingId: 'meeting-a',
+      reason: 'legacy_terminal_disposition_missing',
+    };
+
+    await expect(reconcilePendingNativeMeetingWork()).resolves.toBe(0);
+
+    expect(mocks.readResult).not.toHaveBeenCalled();
+    expect(mocks.start).not.toHaveBeenCalled();
+    expect(mocks.importResult).not.toHaveBeenCalled();
   });
 
   it('acknowledges and cleans complete audio only after exact durable import evidence', async () => {
