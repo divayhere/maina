@@ -43,9 +43,9 @@ const fakeGitSentinel = join(fakeGitDir, 'invoked');
 const privateSentinel = 'PRIVATE_DEVICE_OUTPUT_MUST_NOT_PERSIST';
 const syntheticArtifactSha256 = 'a'.repeat(64);
 const releaseBinding = Object.freeze({
-  releaseId: 'maina-synthetic-0.10.68',
-  expectedVersion: '0.10.68',
-  expectedBuild: 94,
+  releaseId: 'maina-synthetic-0.10.69',
+  expectedVersion: '0.10.69',
+  expectedBuild: 95,
   plan: Object.freeze({ path: '/synthetic/release-plan.json', sha256: 'b'.repeat(64), bytes: 123, mode: 0o600 }),
   provenance: Object.freeze({ path: '/synthetic/provenance.json', sha256: 'c'.repeat(64), bytes: 123, mode: 0o600 }),
   artifact: Object.freeze({

@@ -20,7 +20,7 @@ const fixture = path.join(temporary, 'project');
 
 function invoke(runtime, project, suppliedNode, suppliedNpm, suppliedExpo) {
   return spawnSync(runtime, [helper, project, suppliedNode, suppliedNpm, suppliedExpo,
-    path.join(project, 'release/m3-m4-0.10.68-candidate-plan.json')], { encoding: 'utf8' });
+    path.join(project, 'release/m3-m4-0.10.69-candidate-plan.json')], { encoding: 'utf8' });
 }
 
 try {
@@ -37,7 +37,7 @@ try {
   for (const relative of [
     'node_modules/expo/bin/cli', 'node_modules/expo/package.json',
     'node_modules/expo/node_modules/@expo/cli/package.json', 'package-lock.json',
-    'release/m3-m4-0.10.68-candidate-plan.json',
+    'release/m3-m4-0.10.69-candidate-plan.json',
   ]) copyFileSync(path.join(root, relative), path.join(fixture, relative));
   chmodSync(path.join(fixture, 'node_modules/expo/bin/cli'), 0o755);
 
@@ -56,7 +56,7 @@ try {
   assert.equal(nestedDrift.stderr, 'EXPO_CLI_MANIFEST_HASH_DRIFT\n');
   writeFileSync(cliManifest, originalCliManifest);
 
-  const planPath = path.join(fixture, 'release/m3-m4-0.10.68-candidate-plan.json');
+  const planPath = path.join(fixture, 'release/m3-m4-0.10.69-candidate-plan.json');
   const plan = JSON.parse(readFileSync(planPath, 'utf8'));
   plan.toolchains.unexpected = true;
   writeFileSync(planPath, JSON.stringify(plan));

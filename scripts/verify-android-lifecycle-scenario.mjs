@@ -128,7 +128,7 @@ class FakeDevice {
     }
   };
 
-  installedIdentity = async () => ({ version: this.version ?? '0.10.68', build: this.build ?? 94 });
+  installedIdentity = async () => ({ version: this.version ?? '0.10.69', build: this.build ?? 95 });
   installedArtifactSha256 = async () => this.artifactSha256 ?? syntheticArtifactSha256;
   notificationState = async () => this.capture;
   powerState = async () => this.power;
@@ -358,8 +358,8 @@ class FakeDevice {
 }
 
 const config = {
-  expectedVersion: '0.10.68',
-  expectedBuild: 94,
+  expectedVersion: '0.10.69',
+  expectedBuild: 95,
   localMeetingCreatorExclusive: true,
   meetingListNewestFirst: true,
   expectedArtifactSha256: syntheticArtifactSha256,

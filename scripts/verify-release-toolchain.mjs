@@ -67,7 +67,7 @@ const nodeExecutable = path.resolve(nodeInput);
 const npmCli = path.resolve(npmInput);
 const expoWrapper = path.resolve(expoInput);
 const planPath = path.resolve(planInput);
-if (planPath !== path.join(projectRoot, 'release/m3-m4-0.10.68-candidate-plan.json')) fail('RELEASE_PLAN_PATH_INVALID');
+if (planPath !== path.join(projectRoot, 'release/m3-m4-0.10.69-candidate-plan.json')) fail('RELEASE_PLAN_PATH_INVALID');
 
 regularNonSymlink(nodeExecutable, true, 'NODE_EXECUTABLE_UNAVAILABLE');
 if (nodeExecutable !== EXPECTED.nodePath) fail('NODE_EXECUTABLE_PATH_DRIFT');

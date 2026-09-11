@@ -11,6 +11,10 @@ const helper = path.join(root, 'scripts/lib/release-build-attempt-guard.sh');
 const temporary = mkdtempSync(path.join(os.tmpdir(), 'maina-release-build-attempt-'));
 const source = 'a'.repeat(40);
 const plan = 'b'.repeat(64);
+const activeRelease = 'maina-m3-m4-0.10.69';
+const successorRelease = 'maina-m3-m4-0.10.70';
+const concurrentRelease = 'maina-m3-m4-0.10.71';
+const invalidPlatformRelease = 'maina-m3-m4-0.10.72';
 
 function command(releaseId, platform, terminal = null) {
   const terminalCommand = terminal
@@ -31,17 +35,24 @@ function run(releaseId, platform, terminal = null) {
 }
 
 try {
-  const first = run('maina-m3-m4-0.10.68', 'android', 'terminal_success');
+  assert.equal(new Set([
+    `${activeRelease}/android`,
+    `${activeRelease}/ios`,
+    `${successorRelease}/android`,
+    `${concurrentRelease}/android`,
+  ]).size, 4, 'independent synthetic attempt keys must remain unique');
+
+  const first = run(activeRelease, 'android', 'terminal_success');
   assert.equal(first.status, 0);
-  const secondDifferentOutput = run('maina-m3-m4-0.10.68', 'android', 'terminal_success');
+  const secondDifferentOutput = run(activeRelease, 'android', 'terminal_success');
   assert.equal(secondDifferentOutput.status, 75, 'same release/platform must reject independently of output directory');
-  assert.equal(run('maina-m3-m4-0.10.68', 'ios', 'terminal_success').status, 0);
-  assert.equal(run('maina-m3-m4-0.10.69', 'android', 'terminal_success').status, 0);
+  assert.equal(run(activeRelease, 'ios', 'terminal_success').status, 0);
+  assert.equal(run(successorRelease, 'android', 'terminal_success').status, 0);
 
   for (const [releaseId, platform] of [
-    ['maina-m3-m4-0.10.68', 'android'],
-    ['maina-m3-m4-0.10.68', 'ios'],
-    ['maina-m3-m4-0.10.69', 'android'],
+    [activeRelease, 'android'],
+    [activeRelease, 'ios'],
+    [successorRelease, 'android'],
   ]) {
     const attempt = path.join(temporary, releaseId, platform);
     assert.equal(statSync(attempt).mode & 0o777, 0o700);
@@ -56,7 +67,6 @@ try {
     assert.equal(statSync(path.join(attempt, 'terminal-success.json')).mode & 0o777, 0o600);
   }
 
-  const concurrentRelease = 'maina-m3-m4-0.10.70';
   const children = [0, 1].map(() => spawn('/bin/bash', [
     '-c',
     command(concurrentRelease, 'android'),
@@ -75,7 +85,7 @@ try {
   assert.equal(statSync(path.join(concurrentAttempt, 'reconciliation-required.json')).mode & 0o777, 0o600);
 
   assert.equal(run('../escape', 'android').status, 2);
-  assert.equal(run('maina-m3-m4-0.10.71', 'windows').status, 2);
+  assert.equal(run(invalidPlatformRelease, 'windows').status, 2);
   const helperSource = readFileSync(helper, 'utf8');
   assert.doesNotMatch(helperSource, /MAINA_RELEASE_OUTPUT_DIR/);
   console.log('Release build attempt guard verified: distinct-output replay, platform separation, successor identity, concurrency, retained terminal state, and fail-closed inputs.');
