@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import fs from 'node:fs';
@@ -69,6 +70,80 @@ function verifyXcodeDiagnosticsAdversaries(source, label) {
       rejected = true;
     }
     if (!rejected) throw new Error(`${label} accepted diagnostics adversary: ${mutation}`);
+  }
+}
+
+const IOS_DIRECT_SHARD_TIMEOUTS = new Map([
+  ['navigation-audit', '60.0'],
+  ['short-recording-lifecycle', '90.0'],
+  ['rapid-pause-resume', '60.0'],
+  ['paused-state', '60.0'],
+  ['background-recording', '90.0'],
+  ['discard-recording', '60.0'],
+  ['process-death-recovery', '150.0'],
+  ['long-recording', '180.0'],
+]);
+
+function verifyDirectIosSharding(source) {
+  for (const [testName, timeout] of IOS_DIRECT_SHARD_TIMEOUTS) {
+    const token = `    "${testName}": ${timeout},`;
+    if (source.split(token).length !== 2) {
+      throw new Error(`Direct iOS UI-test runner has invalid ${testName} timeout policy.`);
+    }
+  }
+  for (const token of [
+    'if len(set(requested)) != len(requested):',
+    'if set(CASE_TIMEOUT_SECONDS) != set(ALLOWED_TESTS):',
+    'for case_name, method, timeout_seconds in selected_cases:',
+    'listener = SanitizedListener(result_path.parent, case_name)',
+    'case_config = TestConfig(',
+    'case_config.tests_to_run = [method]',
+    'timeout=timeout_seconds',
+    'case_results[case_name] = sanitized_case_result(',
+    'if execution_error is not None:',
+    'break',
+    '"completedCaseCount": len(case_results)',
+    '"activeCase": active_case',
+    '"CASE_TIMEOUT"',
+    '"DTX_DISCONNECTED"',
+    '"UNEXPECTED_TEST_EVENT"',
+  ]) {
+    if (!source.includes(token)) throw new Error(`Direct iOS UI-test sharding is missing bounded token: ${token}`);
+  }
+  assertSourceOrder(source, [
+    'selected_cases = case_plan(requested)',
+    'for case_name, method, timeout_seconds in selected_cases:',
+    'listener = SanitizedListener(result_path.parent, case_name)',
+    'case_config = TestConfig(',
+    'case_config.tests_to_run = [method]',
+    'await XCUITestService(rsd).run(',
+    'case_results[case_name] = sanitized_case_result(',
+    'if execution_error is not None:',
+    'break',
+  ], 'direct sharded runner');
+  for (const forbidden of [
+    'config.tests_to_run = selected',
+    'asyncio.gather(',
+    'asyncio.create_task(',
+    'asyncio.ensure_future(',
+  ]) {
+    if (source.includes(forbidden)) throw new Error(`Direct iOS UI-test runner exposes unsafe sharding token: ${forbidden}`);
+  }
+}
+
+function verifyDirectIosShardingAdversaries(source) {
+  for (const [label, before, after] of [
+    ['multi-method shard', 'case_config.tests_to_run = [method]', 'case_config.tests_to_run = [method, method]'],
+    ['unbounded shard', 'timeout=timeout_seconds', 'timeout=None'],
+    ['parallel shards', 'for case_name, method, timeout_seconds in selected_cases:', 'await asyncio.gather('],
+    ['missing ambiguity break', '            if execution_error is not None:\n                break', '            if execution_error is not None:\n                pass'],
+    ['duplicate timeout key', '    "navigation-audit": 60.0,', '    "navigation-audit": 60.0,\n    "navigation-audit": 60.0,'],
+  ]) {
+    assert.throws(
+      () => verifyDirectIosSharding(source.replace(before, after)),
+      /Direct iOS UI-test|missing ordered token/,
+      `Direct iOS UI-test verifier accepted ${label}.`,
+    );
   }
 }
 
@@ -319,7 +394,6 @@ if (iosDirectUiRun) {
     'MainaUITests/testDiscardRecordingLifecycle',
     'MainaUITests/testProcessDeathRecovery',
     'MainaUITests/testLongRecordingWithBackgroundAndPauses',
-    'config.tests_to_run = selected',
     'os.O_EXCL',
     'hashlib.sha256(attachment.data).hexdigest()',
     'DEVICE_TRANSPORT_UNAVAILABLE',
@@ -331,6 +405,8 @@ if (iosDirectUiRun) {
   for (const token of ['testCloudPairingWithExternalApproval', 'testStopExistingRecording', 'testKeepInterruptedRecording']) {
     if (iosDirectUiRun.includes(token)) throw new Error(`Direct iOS UI-test runner exposes unsafe or state-dependent test: ${token}`);
   }
+  verifyDirectIosSharding(iosDirectUiRun);
+  verifyDirectIosShardingAdversaries(iosDirectUiRun);
 }
 
 console.log('M0 harness safety verification passed.');
