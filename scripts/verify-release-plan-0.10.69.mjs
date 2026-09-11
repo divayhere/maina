@@ -51,7 +51,16 @@ assert.equal(plan.sources.backendProductionDeployment, historicalPlan.sources.ba
 assert.equal(plan.identity.androidPackage, 'com.divay.maina');
 assert.equal(plan.identity.iosBundleIdentifier, 'com.divay.maina.staging');
 assert.equal(plan.identity.iosTeamId, '9X4X3R4KCN');
-assert.deepEqual(plan.artifactPolicy, historicalPlan.artifactPolicy);
+const expectedArtifactPolicy = structuredClone(historicalPlan.artifactPolicy);
+const automaticWorkAuthorityProvider = {
+  type: 'provider',
+  name: 'com.divay.maina.recorder.MainaCaptureAutomaticWorkAuthorityProvider',
+  exported: 'false',
+  permission: null,
+  process: null,
+};
+expectedArtifactPolicy.android.components.splice(3, 0, automaticWorkAuthorityProvider);
+assert.deepEqual(plan.artifactPolicy, expectedArtifactPolicy);
 const expectedToolchains = structuredClone(historicalPlan.toolchains);
 expectedToolchains.node = '24.19.0';
 expectedToolchains.nodeExecutablePath = '/Users/divay/.cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node';
@@ -404,6 +413,14 @@ for (const relative of [
 assert.match(source('modules/maina-recorder/android/src/main/AndroidManifest.xml'), /MainaShellCommandReceiver/);
 assert.match(source('modules/maina-recorder/android/src/main/AndroidManifest.xml'), /android:permission="android\.permission\.DUMP"/);
 assert.match(source('modules/maina-recorder/android/src/main/AndroidManifest.xml'), /MainaCommandReceiver"[\s\S]*?android:exported="false"/);
+assert.match(
+  source('modules/maina-recorder/android/src/main/AndroidManifest.xml'),
+  /MainaCaptureAutomaticWorkAuthorityProvider"[\s\S]*?android:authorities="\$\{applicationId\}\.maina\.capture-authority"[\s\S]*?android:enabled="true"[\s\S]*?android:exported="false"[\s\S]*?android:grantUriPermissions="false"[\s\S]*?android:multiprocess="false"/,
+);
+assert.deepEqual(
+  plan.artifactPolicy.android.components.filter(({ name }) => name === automaticWorkAuthorityProvider.name),
+  [automaticWorkAuthorityProvider],
+);
 assert.match(source('scripts/verify-android-command-surface-emulator.mjs'), /const hostileIdleStabilityMs = 30_000;/);
 assert.match(source('scripts/verify-android-command-surface-emulator.mjs'), /result\.preShellIdleStabilityMs = hostileIdleStabilityMs;/);
 
