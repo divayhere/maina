@@ -94,6 +94,9 @@ class FakeDevice {
     this.ambiguousMutationApplied = false;
     this.notSpawnedMutationId = null;
     this.invalidReceiptMutationId = null;
+    this.sleepPowerObservations = [];
+    this.wakePowerObservations = [];
+    this.powerObservationQueue = [];
     this.mutationCalls = new Map();
     this.mutationStates = [];
     this.qualificationArmed = null;
@@ -144,7 +147,7 @@ class FakeDevice {
     }
     return this.notificationOverridesByState[this.capture] ?? this.capture;
   };
-  powerState = async () => this.power;
+  powerState = async () => this.powerObservationQueue.shift() ?? this.power;
   processState = async () => this.process;
   foregroundState = async () => this.screen === 'background' ? 'background' : 'foreground';
   nativeCaptureProgress = async () => ({
@@ -245,10 +248,12 @@ class FakeDevice {
     }
     if (mutation === 'sleep_device') {
       this.power = 'off';
+      this.powerObservationQueue = [...this.sleepPowerObservations];
       return;
     }
     if (mutation === 'wake_up') {
       this.power = 'on';
+      this.powerObservationQueue = [...this.wakePowerObservations];
       return;
     }
     if (mutation === 'press_back') {
@@ -423,6 +428,11 @@ async function expectPass(device = new FakeDevice()) {
   assertAtMostOneMutation(device);
   cases += 1;
 }
+
+await expectPass(new FakeDevice({
+  sleepPowerObservations: ['transitioning', 'ambient'],
+  wakePowerObservations: ['transitioning'],
+}));
 
 async function expectFailure(overrides, reasonCode, verify = () => {}) {
   const device = new FakeDevice(overrides);

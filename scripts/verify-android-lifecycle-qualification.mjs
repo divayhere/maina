@@ -344,13 +344,16 @@ assert.equal(classifyPowerState(
 ), 'off');
 assertions += 3;
 rejects(() => classifyPowerState('  mWakefulness=Awake\n  mWakefulness=Asleep\n  mWakefulnessChanging=false\n', displayDump('ON')), /ambiguous/);
-rejects(() => classifyPowerState('  mWakefulness=Dozing\n  mWakefulnessChanging=false\n', displayDump('DOZE')), /not an exact/);
+assert.equal(classifyPowerState('  mWakefulness=Dozing\n  mWakefulnessChanging=false\n', displayDump('DOZE')), 'ambient');
+assert.equal(classifyPowerState('  mWakefulness=Awake\n  mWakefulnessChanging=true\n', displayDump('ON')), 'transitioning');
 rejects(() => classifyPowerState('  mWakefulness=Awake\n  mWakefulnessChanging=false\n', displayDump('OFF')), /not an exact/);
-rejects(() => classifyPowerState('  mWakefulness=Awake\n  mWakefulnessChanging=true\n', displayDump('ON')), /in progress/);
 rejects(() => classifyPowerState('  mWakefulness=Awake\n', displayDump('ON')), /transition state/);
 rejects(() => classifyPowerState('  mWakefulness=Awake\n  mWakefulnessChanging=false\n  mWakefulnessChanging=false\n', displayDump('ON')), /ambiguous/);
 rejects(() => classifyPowerState('    mWakefulness=Awake\n  mWakefulnessChanging=false\n', displayDump('ON')), /Power state/);
-rejects(() => classifyPowerState('  mWakefulness=Awake\n  mWakefulnessChanging=false\n', displayDump('ON', { transition: true })), /transition/);
+assert.equal(
+  classifyPowerState('  mWakefulness=Awake\n  mWakefulnessChanging=false\n', displayDump('ON', { transition: true })),
+  'transitioning',
+);
 rejects(() => classifyPowerState('  mWakefulness=Awake\n  mWakefulnessChanging=false\n', displayDump('ON', { size: 2 })), /section/);
 rejects(() => classifyPowerState('  mWakefulness=Awake\n  mWakefulnessChanging=false\n', displayDump('ON', { id: 1 })), /Default display/);
 rejects(() => classifyPowerState('  mWakefulness=Awake\n  mWakefulnessChanging=false\n', displayDump('ON', { controllerSize: 2 })), /controller section/);
@@ -359,6 +362,7 @@ rejects(() => classifyPowerState('  mWakefulness=Awake\n  mWakefulnessChanging=f
   extraPhotonicState: '\nPhotonic Modulator State:\n  mPendingState=ON\n  mPendingBacklight=0.5\n  mPendingSdrBacklight=0.5\n  mActualState=ON\n  mActualBacklight=0.5\n  mActualSdrBacklight=0.5\n  mStateChangeInProgress=false\n  mBacklightChangeInProgress=false',
 })), /controller state/);
 rejects(() => classifyPowerState('  mWakefulness=Awake\n  mWakefulnessChanging=false\n', ''), /nonempty/);
+assertions += 3;
 
 const readyNotification = [
   'NotificationRecord(0x00000001: pkg=com.divay.maina user=UserHandle{0} id=7001 tag=null importance=2 key=synthetic: Notification(channel=maina_recording shortcut=null contentView=null))',
