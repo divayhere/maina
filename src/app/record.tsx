@@ -36,6 +36,7 @@ import {
   type NativeTerminalIntent,
   type NativeSaveRecoveryMode,
   waitForNativeTerminalRecovery,
+  waitForNativeSaveResolution,
 } from '@/core/recording/nativeSaveRecovery';
 import { authorizeAndroidQualificationSession, canonicalAndroidQualificationRunId } from '@/core/recording/qualificationSession';
 import { openNewlySavedMeetingRoute } from '@/core/navigation/navigationPolicy';
@@ -1277,18 +1278,22 @@ export default function RecordScreen() {
         });
       }
       try {
-        status = await waitForNativeCaptureState(getNativeCaptureStatusAsync, 'idle', {
-          timeoutMs: 20_000,
-        });
+        status = await waitForNativeSaveResolution(
+          getNativeCaptureStatusAsync,
+          { expectedMeetingId: idRef.current, platform: Platform.OS === 'android' ? 'android' : 'ios' },
+          { timeoutMs: 20_000 },
+        );
       } catch {
         // A fresh state below determines whether the terminal owner is now
         // pending, recovery-required, or still absent.
       }
     } else if (options.waitForCompletion) {
       try {
-        status = await waitForNativeCaptureState(getNativeCaptureStatusAsync, 'idle', {
-          timeoutMs: 20_000,
-        });
+        status = await waitForNativeSaveResolution(
+          getNativeCaptureStatusAsync,
+          { expectedMeetingId: idRef.current, platform: Platform.OS === 'android' ? 'android' : 'ios' },
+          { timeoutMs: 20_000 },
+        );
       } catch {
         // The bounded state below distinguishes pending, retryable, and
         // restart-required outcomes without persisting a raw native exception.
