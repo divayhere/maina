@@ -284,6 +284,19 @@ try {
     );
   }
   assertions += 8;
+  await assert.rejects(
+    () => runAndroidLifecycleQualification({
+      env: {
+        MAINA_ANDROID_LIFECYCLE_QUALIFICATION_RELEASE: 'approved',
+        MAINA_ANDROID_LIFECYCLE_TEST_MODE: 'approved',
+      },
+      releaseBinding: { ...releaseBinding, source: subsetSource },
+      attemptNonce: '00000000-0000-4000-8000-000000000097',
+      run: () => { throw new Error('COMMAND_MUST_NOT_RUN'); },
+    }),
+    (error) => error instanceof AndroidLifecycleRunnerFailure && error.code === 'DEVICE_BINDING_INVALID',
+  );
+  assertions += 1;
   for (const invalidSource of [
     { ...releaseBinding.source, unexpected: true },
     { ...releaseBinding.source, qualificationCommit: 'invalid' },
