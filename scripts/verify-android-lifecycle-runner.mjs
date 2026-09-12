@@ -42,6 +42,19 @@ const fakeGitDir = join('/tmp', `.maina-fake-git-${suffix}`);
 const fakeGitSentinel = join(fakeGitDir, 'invoked');
 const privateSentinel = 'PRIVATE_DEVICE_OUTPUT_MUST_NOT_PERSIST';
 const syntheticArtifactSha256 = 'a'.repeat(64);
+const syntheticGitContent = Object.freeze({ bytes: 123, mode: 0o644, sha256: 'f'.repeat(64) });
+const syntheticPostBuildDelta = Object.freeze([
+  'release/m3-m4-0.10.69-candidate-plan.json',
+  'scripts/run-android-lifecycle-qualification.mjs',
+  'scripts/verify-android-lifecycle-evidence.mjs',
+  'scripts/verify-android-lifecycle-runner.mjs',
+  'scripts/verify-release-plan-0.10.69.mjs',
+].map((path) => Object.freeze({
+  path,
+  status: 'M',
+  artifact: syntheticGitContent,
+  qualification: syntheticGitContent,
+})));
 const releaseBinding = Object.freeze({
   releaseId: 'maina-synthetic-0.10.69',
   expectedVersion: '0.10.69',
@@ -60,7 +73,12 @@ const releaseBinding = Object.freeze({
     sha256: '27db838bb204ef7c21df2931f5656e4c8fb32e6e947f363a402b49714d32b5b1',
     version: process.versions.node,
   }),
-  source: Object.freeze({ repository: '/Users/divay/Developer/MainaV2', commit: 'e'.repeat(40) }),
+  source: Object.freeze({
+    repository: '/Users/divay/Developer/MainaV2',
+    artifactCommit: 'e'.repeat(40),
+    qualificationCommit: 'f'.repeat(40),
+    postBuildDelta: syntheticPostBuildDelta,
+  }),
 });
 let assertions = 0;
 
@@ -212,6 +230,32 @@ try {
     })),
   }), true);
   assertions += 9;
+  for (const invalidSource of [
+    { ...releaseBinding.source, unexpected: true },
+    { ...releaseBinding.source, qualificationCommit: 'invalid' },
+    { ...releaseBinding.source, postBuildDelta: releaseBinding.source.postBuildDelta.slice(1) },
+    {
+      ...releaseBinding.source,
+      postBuildDelta: releaseBinding.source.postBuildDelta.map((entry, index) => (
+        index === 0 ? { ...entry, qualification: { ...entry.qualification, sha256: 'invalid' } } : entry
+      )),
+    },
+  ]) {
+    await assert.rejects(
+      () => runAndroidLifecycleQualification({
+        env: {
+          MAINA_ANDROID_LIFECYCLE_QUALIFICATION_RELEASE: 'approved',
+          MAINA_ANDROID_LIFECYCLE_TEST_MODE: 'approved',
+        },
+        releaseBinding: { ...releaseBinding, source: invalidSource },
+        attemptNonce: '00000000-0000-4000-8000-000000000098',
+        run: () => { throw new Error('COMMAND_MUST_NOT_RUN'); },
+      }),
+      (error) => error instanceof AndroidLifecycleRunnerFailure && error.code === 'RELEASE_BINDING_INVALID',
+    );
+  }
+  assert.equal(readdirSync(internalParent).includes(`.android-lifecycle-wrong-node-test-${suffix}`), false);
+  assertions += 5;
   await assert.rejects(
     () => runAndroidLifecycleQualification({
       env: {

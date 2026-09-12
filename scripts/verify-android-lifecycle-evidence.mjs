@@ -24,6 +24,11 @@ const CANONICAL_GIT_SHA256 = 'b8763cf250e607a778bb4603cecb5b90338814d0a3dfcba0d5
 const CANONICAL_GIT_VERSION = 'git version 2.50.1 (Apple Git-155)';
 const SHA256 = /^[0-9a-f]{64}$/u;
 const RESULT_KEYS = ['cleanup', 'measurements', 'mutations', 'reasonCode', 'reconciliationRequired', 'status', 'tests'];
+const QUALIFICATION_RUNTIME_DELTA_PATHS = Object.freeze([
+  'scripts/run-android-lifecycle-qualification.mjs',
+  'scripts/verify-android-lifecycle-evidence.mjs',
+  'scripts/verify-android-lifecycle-runner.mjs',
+]);
 const ATTEMPT_KEYS = [
   'adb', 'artifact', 'attemptNonce', 'attemptRoot', 'executionMode', 'expectedBuild', 'expectedVersion', 'git',
   'ledger', 'node', 'physicalIncomingCallTestPerformed', 'plan', 'provenance', 'rawDeviceOutputPersisted',
@@ -145,6 +150,69 @@ function verifyLooseFileRecord(record, code, { pathKey = true } = {}) {
 function gitObject(repository, commit) {
   const result = spawnSync(CANONICAL_GIT, ['-C', repository, 'rev-parse', `${commit}^{commit}`], { encoding: 'utf8', timeout: 15_000 });
   return result.status === 0 && result.signal === null && result.stdout.trim() === commit;
+}
+
+function expectedQualificationDeltaPaths(expectedVersion) {
+  if (typeof expectedVersion !== 'string' || !/^\d+\.\d+\.\d+$/u.test(expectedVersion)) {
+    fail('RELEASE_BINDING_INVALID');
+  }
+  return [
+    `release/m3-m4-${expectedVersion}-candidate-plan.json`,
+    ...QUALIFICATION_RUNTIME_DELTA_PATHS,
+    `scripts/verify-release-plan-${expectedVersion}.mjs`,
+  ].sort();
+}
+
+function validateGitContentRecord(record, code) {
+  exactKeys(record, ['bytes', 'mode', 'sha256'], code);
+  if (!Number.isSafeInteger(record.bytes) || record.bytes <= 0
+    || ![0o644, 0o755].includes(record.mode) || !SHA256.test(record.sha256)) fail(code);
+  return record;
+}
+
+function verifyQualificationSource(source, expectedVersion, provenanceSource) {
+  exactKeys(source, ['artifactCommit', 'postBuildDelta', 'qualificationCommit', 'repository'], 'ATTEMPT_BINDING_INVALID');
+  const expectedPaths = expectedQualificationDeltaPaths(expectedVersion);
+  if (!isAbsolute(source.repository)
+    || !/^[0-9a-f]{40}$/u.test(source.artifactCommit)
+    || !/^[0-9a-f]{40}$/u.test(source.qualificationCommit)
+    || source.repository !== provenanceSource.repository
+    || source.artifactCommit !== provenanceSource.finalCommit
+    || !gitObject(source.repository, source.artifactCommit)
+    || !gitObject(source.repository, source.qualificationCommit)
+    || !Array.isArray(source.postBuildDelta)
+    || source.postBuildDelta.length !== expectedPaths.length) fail('RELEASE_BINDING_INVALID');
+  const ancestor = spawnSync(CANONICAL_GIT, [
+    '-C', source.repository, 'merge-base', '--is-ancestor', source.artifactCommit, source.qualificationCommit,
+  ], { encoding: 'utf8', timeout: 15_000 });
+  if (ancestor.status !== 0 || ancestor.signal !== null || ancestor.stdout !== '' || ancestor.stderr !== '') {
+    fail('RELEASE_BINDING_INVALID');
+  }
+  const diff = spawnSync(CANONICAL_GIT, [
+    '-C', source.repository, 'diff', '--name-status', '--no-renames',
+    source.artifactCommit, source.qualificationCommit, '--',
+  ], { encoding: 'utf8', timeout: 15_000 });
+  if (diff.status !== 0 || diff.signal !== null || diff.stderr !== '') fail('RELEASE_BINDING_INVALID');
+  const actualLines = diff.stdout.trim() === '' ? [] : diff.stdout.trim().split('\n');
+  const actualPaths = actualLines.map((line) => {
+    const fields = line.split('\t');
+    if (fields.length !== 2 || fields[0] !== 'M') fail('RELEASE_BINDING_INVALID');
+    return fields[1];
+  }).sort();
+  if (JSON.stringify(actualPaths) !== JSON.stringify(expectedPaths)) fail('RELEASE_BINDING_INVALID');
+  const recordedPaths = [];
+  for (const entry of source.postBuildDelta) {
+    exactKeys(entry, ['artifact', 'path', 'qualification', 'status'], 'ATTEMPT_BINDING_INVALID');
+    validateGitContentRecord(entry.artifact, 'ATTEMPT_BINDING_INVALID');
+    validateGitContentRecord(entry.qualification, 'ATTEMPT_BINDING_INVALID');
+    if (entry.status !== 'M' || !expectedPaths.includes(entry.path)) fail('RELEASE_BINDING_INVALID');
+    const artifact = gitFileRecord(source.repository, source.artifactCommit, entry.path, 'RELEASE_BINDING_INVALID');
+    const qualification = gitFileRecord(source.repository, source.qualificationCommit, entry.path, 'RELEASE_BINDING_INVALID');
+    if (JSON.stringify(entry.artifact) !== JSON.stringify(artifact)
+      || JSON.stringify(entry.qualification) !== JSON.stringify(qualification)) fail('RELEASE_BINDING_INVALID');
+    recordedPaths.push(entry.path);
+  }
+  if (JSON.stringify(recordedPaths) !== JSON.stringify(expectedPaths)) fail('RELEASE_BINDING_INVALID');
 }
 
 function gitFileRecord(repository, commit, relativePath, code) {
@@ -288,7 +356,7 @@ export function verifyAndroidLifecycleEvidence(root, {
   const attempt = exactKeys(json(attemptPath, 'ATTEMPT_INVALID'), ATTEMPT_KEYS, 'ATTEMPT_INVALID');
   const result = exactKeys(json(resultPath, 'RESULT_INVALID'), RESULT_KEYS, 'RESULT_INVALID');
   const terminal = exactKeys(json(terminalPath, 'TERMINAL_INVALID'), TERMINAL_KEYS, 'TERMINAL_INVALID');
-  if (attempt.schemaVersion !== 'maina.android-lifecycle-attempt.v2' || attempt.status !== 'running'
+  if (attempt.schemaVersion !== 'maina.android-lifecycle-attempt.v3' || attempt.status !== 'running'
     || !['native', 'injected_test'].includes(attempt.executionMode)
     || terminal.schemaVersion !== 'maina.android-lifecycle-terminal.v2'
     || terminal.executionMode !== attempt.executionMode
@@ -314,8 +382,6 @@ export function verifyAndroidLifecycleEvidence(root, {
   verifyLooseFileRecord(attempt.plan, 'ATTEMPT_BINDING_INVALID');
   verifyLooseFileRecord(attempt.provenance, 'ATTEMPT_BINDING_INVALID');
   exactKeys(attempt.artifact, ['bytes', 'mode', 'path', 'sha256', 'signerCertificateSha256'], 'ATTEMPT_BINDING_INVALID');
-  exactKeys(attempt.source, ['commit', 'repository'], 'ATTEMPT_BINDING_INVALID');
-  if (!isAbsolute(attempt.source.repository) || !/^[0-9a-f]{40}$/u.test(attempt.source.commit)) fail('ATTEMPT_BINDING_INVALID');
   exactKeys(attempt.node, ['bytes', 'mode', 'path', 'sha256', 'version'], 'NODE_BINDING_INVALID');
   if (!Number.isSafeInteger(attempt.node.bytes) || attempt.node.bytes <= 0
     || !Number.isSafeInteger(attempt.node.mode) || attempt.node.mode < 0 || attempt.node.mode > 0o777
@@ -366,8 +432,7 @@ export function verifyAndroidLifecycleEvidence(root, {
   if (!SHA256.test(attempt.artifact.signerCertificateSha256)
     || !isAbsolute(attempt.plan.path) || !isAbsolute(attempt.provenance.path)
     || attempt.plan.sha256 !== sha256File(attempt.plan.path)
-    || attempt.provenance.sha256 !== sha256File(attempt.provenance.path)
-    || !gitObject(attempt.source.repository, attempt.source.commit)) fail('RELEASE_BINDING_INVALID');
+    || attempt.provenance.sha256 !== sha256File(attempt.provenance.path)) fail('RELEASE_BINDING_INVALID');
   const plan = parseJsonBytesRejectDuplicateKeys(readFileSync(attempt.plan.path), 'plan');
   const provenance = parseJsonBytesRejectDuplicateKeys(readFileSync(attempt.provenance.path), 'provenance');
   try {
@@ -382,8 +447,15 @@ export function verifyAndroidLifecycleEvidence(root, {
     || attempt.artifact.sha256 !== provenance.artifacts.android.sha256
     || attempt.artifact.bytes !== provenance.artifacts.android.bytes
     || attempt.artifact.signerCertificateSha256 !== provenance.artifacts.android.audit.signerCertificateSha256
-    || attempt.source.repository !== provenance.sources.android.repository
-    || attempt.source.commit !== provenance.sources.android.finalCommit) fail('RELEASE_BINDING_INVALID');
+    || !Array.isArray(provenance.approval?.authorization?.scope)
+    || !provenance.approval.authorization.scope.includes('automated-device-qualification:android')) {
+    fail('RELEASE_BINDING_INVALID');
+  }
+  verifyQualificationSource(
+    attempt.source,
+    attempt.expectedVersion,
+    provenance.sources.android,
+  );
   if (!exactKeys(attempt.node, ['bytes', 'mode', 'path', 'sha256', 'version'], 'NODE_BINDING_INVALID')
     || attempt.node.path !== plan.toolchains.nodeExecutablePath
     || attempt.node.sha256 !== plan.toolchains.nodeExecutableSha256
@@ -396,7 +468,12 @@ export function verifyAndroidLifecycleEvidence(root, {
     if (typeof record.relativePath !== 'string' || !RUNTIME_PATHS.includes(record.relativePath)
       || runtimeNames.has(record.relativePath)) fail('RUNTIME_BINDING_INVALID');
     runtimeNames.add(record.relativePath);
-    const committed = gitFileRecord(attempt.source.repository, attempt.source.commit, record.relativePath, 'RUNTIME_BINDING_INVALID');
+    const committed = gitFileRecord(
+      attempt.source.repository,
+      attempt.source.qualificationCommit,
+      record.relativePath,
+      'RUNTIME_BINDING_INVALID',
+    );
     if (committed.bytes !== record.bytes || committed.mode !== record.mode
       || committed.sha256 !== record.sha256) fail('RUNTIME_BINDING_INVALID');
   }

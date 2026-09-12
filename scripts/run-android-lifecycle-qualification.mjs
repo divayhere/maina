@@ -35,6 +35,11 @@ const CANONICAL_GIT_SHA256 = 'b8763cf250e607a778bb4603cecb5b90338814d0a3dfcba0d5
 const CANONICAL_GIT_VERSION = 'git version 2.50.1 (Apple Git-155)';
 const SHA256 = /^[0-9a-f]{64}$/u;
 const RESULT_KEYS = ['cleanup', 'measurements', 'mutations', 'reasonCode', 'reconciliationRequired', 'status', 'tests'];
+const QUALIFICATION_RUNTIME_DELTA_PATHS = Object.freeze([
+  'scripts/run-android-lifecycle-qualification.mjs',
+  'scripts/verify-android-lifecycle-evidence.mjs',
+  'scripts/verify-android-lifecycle-runner.mjs',
+]);
 
 export class AndroidLifecycleRunnerFailure extends Error {
   constructor(code) {
@@ -91,6 +96,101 @@ function gitOutput(args, code) {
   return result.stdout.trim();
 }
 
+function gitFileRecord(commit, relativePath, code) {
+  const blob = spawnSync(CANONICAL_GIT, ['-C', PROJECT_ROOT, 'show', `${commit}:${relativePath}`], {
+    encoding: null,
+    timeout: 15_000,
+    maxBuffer: 16 * 1024 * 1024,
+  });
+  const tree = spawnSync(CANONICAL_GIT, ['-C', PROJECT_ROOT, 'ls-tree', commit, '--', relativePath], {
+    encoding: 'utf8',
+    timeout: 15_000,
+  });
+  if (blob.status !== 0 || blob.signal !== null || !Buffer.isBuffer(blob.stdout)
+    || blob.stderr.length !== 0 || tree.status !== 0 || tree.signal !== null || tree.stderr !== '') fail(code);
+  const match = /^(100644|100755) blob [0-9a-f]{40}\t(.+)\n?$/u.exec(tree.stdout);
+  if (!match || match[2] !== relativePath) fail(code);
+  return Object.freeze({
+    bytes: blob.stdout.length,
+    mode: match[1] === '100755' ? 0o755 : 0o644,
+    sha256: createHash('sha256').update(blob.stdout).digest('hex'),
+  });
+}
+
+function expectedQualificationDeltaPaths(expectedVersion) {
+  if (typeof expectedVersion !== 'string' || !/^\d+\.\d+\.\d+$/u.test(expectedVersion)) fail('SOURCE_CUSTODY_INVALID');
+  return Object.freeze([
+    `release/m3-m4-${expectedVersion}-candidate-plan.json`,
+    ...QUALIFICATION_RUNTIME_DELTA_PATHS,
+    `scripts/verify-release-plan-${expectedVersion}.mjs`,
+  ].sort());
+}
+
+function validateGitContentRecord(record) {
+  return exactKeys(record, ['bytes', 'mode', 'sha256'])
+    && Number.isSafeInteger(record.bytes) && record.bytes > 0
+    && [0o644, 0o755].includes(record.mode) && SHA256.test(record.sha256);
+}
+
+function validateQualificationSourceShape(source, expectedVersion) {
+  const expectedPaths = expectedQualificationDeltaPaths(expectedVersion);
+  if (!exactKeys(source, ['artifactCommit', 'postBuildDelta', 'qualificationCommit', 'repository'])
+    || source.repository !== PROJECT_ROOT
+    || !/^[0-9a-f]{40}$/u.test(source.artifactCommit)
+    || !/^[0-9a-f]{40}$/u.test(source.qualificationCommit)
+    || !Array.isArray(source.postBuildDelta)
+    || source.postBuildDelta.length !== expectedPaths.length) fail('RELEASE_BINDING_INVALID');
+  const paths = [];
+  for (const entry of source.postBuildDelta) {
+    if (!exactKeys(entry, ['artifact', 'path', 'qualification', 'status'])
+      || entry.status !== 'M' || typeof entry.path !== 'string'
+      || !validateGitContentRecord(entry.artifact) || !validateGitContentRecord(entry.qualification)) {
+      fail('RELEASE_BINDING_INVALID');
+    }
+    paths.push(entry.path);
+  }
+  if (JSON.stringify(paths) !== JSON.stringify(expectedPaths)) fail('RELEASE_BINDING_INVALID');
+  return source;
+}
+
+export function resolveQualificationSourceBinding({ artifactCommit, expectedVersion, state = currentGitState() }) {
+  if (!/^[0-9a-f]{40}$/u.test(artifactCommit) || !state || typeof state !== 'object'
+    || !state.clean || state.head !== state.upstream || !/^[0-9a-f]{40}$/u.test(state.head)) {
+    fail('SOURCE_CUSTODY_INVALID');
+  }
+  const ancestor = spawnSync(CANONICAL_GIT, [
+    '-C', PROJECT_ROOT, 'merge-base', '--is-ancestor', artifactCommit, state.head,
+  ], { encoding: 'utf8', timeout: 15_000 });
+  if (ancestor.status !== 0 || ancestor.signal !== null || ancestor.stdout !== '' || ancestor.stderr !== '') {
+    fail('SOURCE_CUSTODY_INVALID');
+  }
+  const expectedPaths = expectedQualificationDeltaPaths(expectedVersion);
+  const rawDelta = gitOutput([
+    'diff', '--name-status', '--no-renames', artifactCommit, state.head, '--',
+  ], 'SOURCE_CUSTODY_INVALID');
+  const entries = rawDelta === '' ? [] : rawDelta.split('\n').map((line) => {
+    const fields = line.split('\t');
+    if (fields.length !== 2 || fields[0] !== 'M' || !expectedPaths.includes(fields[1])) {
+      fail('SOURCE_CUSTODY_INVALID');
+    }
+    return Object.freeze({
+      path: fields[1],
+      status: 'M',
+      artifact: gitFileRecord(artifactCommit, fields[1], 'SOURCE_CUSTODY_INVALID'),
+      qualification: gitFileRecord(state.head, fields[1], 'SOURCE_CUSTODY_INVALID'),
+    });
+  }).sort((left, right) => left.path.localeCompare(right.path, 'en'));
+  if (JSON.stringify(entries.map(({ path }) => path)) !== JSON.stringify(expectedPaths)) {
+    fail('SOURCE_CUSTODY_INVALID');
+  }
+  return validateQualificationSourceShape(Object.freeze({
+    repository: PROJECT_ROOT,
+    artifactCommit,
+    qualificationCommit: state.head,
+    postBuildDelta: Object.freeze(entries),
+  }), expectedVersion);
+}
+
 function canonicalGitRecord() {
   const record = fileRecord(CANONICAL_GIT, 'GIT_BINARY_INVALID', { executable: true });
   const version = spawnSync(CANONICAL_GIT, ['--version'], { encoding: 'utf8', timeout: 15_000 });
@@ -132,8 +232,7 @@ function validateReleaseBindingShape(binding) {
     ))
     || !exactKeys(binding.node, ['path', 'sha256', 'version']) || !isAbsolute(binding.node.path)
     || !SHA256.test(binding.node.sha256) || !/^\d+\.\d+\.\d+$/u.test(binding.node.version)
-    || !exactKeys(binding.source, ['commit', 'repository']) || binding.source.repository !== PROJECT_ROOT
-    || !/^[0-9a-f]{40}$/u.test(binding.source.commit)) fail('RELEASE_BINDING_INVALID');
+    || !validateQualificationSourceShape(binding.source, binding.expectedVersion)) fail('RELEASE_BINDING_INVALID');
   return binding;
 }
 
@@ -159,9 +258,15 @@ export function loadApprovedAndroidReleaseBinding(env = process.env) {
   const state = currentGitState();
   const source = provenance.sources.android;
   if (plan.sources.android.repository !== PROJECT_ROOT || source.repository !== PROJECT_ROOT
-    || !state.clean || state.head !== state.upstream || state.head !== source.finalCommit) {
+    || !Array.isArray(provenance.approval?.authorization?.scope)
+    || !provenance.approval.authorization.scope.includes('automated-device-qualification:android')) {
     fail('SOURCE_CUSTODY_INVALID');
   }
+  const qualificationSource = resolveQualificationSourceBinding({
+    artifactCommit: source.finalCommit,
+    expectedVersion: provenance.artifacts.android.audit.versionName,
+    state,
+  });
   const planRecord = fileRecord(planPath, 'RELEASE_PLAN_INVALID');
   const provenanceRecord = fileRecord(provenancePath, 'RELEASE_PROVENANCE_INVALID');
   const artifactRecord = fileRecord(provenance.artifacts.android.path, 'RELEASE_ARTIFACT_INVALID');
@@ -187,7 +292,7 @@ export function loadApprovedAndroidReleaseBinding(env = process.env) {
       sha256: plan.toolchains.nodeExecutableSha256,
       version: plan.toolchains.node,
     }),
-    source: Object.freeze({ repository: PROJECT_ROOT, commit: source.finalCommit }),
+    source: qualificationSource,
   }));
 }
 
@@ -395,7 +500,7 @@ export async function runAndroidLifecycleQualification({
   });
   const attemptRoot = validateFreshInternalRoot(attemptRootInput);
   const attempt = {
-    schemaVersion: 'maina.android-lifecycle-attempt.v2',
+    schemaVersion: 'maina.android-lifecycle-attempt.v3',
     status: 'running',
     startedAt,
     attemptNonce: nonce,
