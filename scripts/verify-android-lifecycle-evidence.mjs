@@ -525,7 +525,7 @@ export function verifyAndroidLifecycleEvidence(root, {
       fail('MUTATION_JOURNAL_INVALID');
     }
     if (name !== `${String(entry.sequence).padStart(3, '0')}-${entry.id}-${entry.state}.json`
-      || !['arm_qualification', 'force_stop', 'launch_main', 'launch_record_qualification', 'pause_qualification', 'press_back', 'press_home', 'sleep_device', 'tap', 'wake_up'].includes(entry.action)
+      || !androidLifecycleScenarioPolicy.allowedMutations.includes(entry.action)
       || JSON.stringify(entry.payloadShape) !== JSON.stringify(
         entry.action === 'tap' ? ['x', 'y'] : ['arm_qualification', 'launch_record_qualification', 'pause_qualification'].includes(entry.action) ? ['qualificationRunId'] : [],
       )

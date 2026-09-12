@@ -22,7 +22,10 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { authorizeExactArtifact, sha256File, validateApprovedRelease } from './lib/release-provenance-core.mjs';
 import { parseJsonBytesRejectDuplicateKeys } from './lib/strict-json.mjs';
 import { createAndroidLifecycleAdbTools } from './qualification/android-lifecycle-adapter.mjs';
-import { executeAndroidLifecycleScenario } from './qualification/android-lifecycle-scenario.mjs';
+import {
+  androidLifecycleScenarioPolicy,
+  executeAndroidLifecycleScenario,
+} from './qualification/android-lifecycle-scenario.mjs';
 
 const PROJECT_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const INTERNAL_OUTPUT_ROOT = '/Users/divay/.cache/maina-build-v2/outputs';
@@ -379,7 +382,7 @@ export function createDurableMutationJournal(attemptRoot) {
   return async (entry) => {
     if (!exactKeys(entry, ['action', 'attempts', 'id', 'payloadDigest', 'payloadShape', 'state'])
       || typeof entry.id !== 'string' || !/^[a-z][a-z0-9-]{2,95}$/u.test(entry.id)
-      || !['arm_qualification', 'force_stop', 'launch_main', 'launch_record_qualification', 'pause_qualification', 'press_back', 'press_home', 'sleep_device', 'tap', 'wake_up'].includes(entry.action)
+      || !androidLifecycleScenarioPolicy.allowedMutations.includes(entry.action)
       || !Array.isArray(entry.payloadShape)
       || JSON.stringify(entry.payloadShape) !== JSON.stringify(
         entry.action === 'tap' ? ['x', 'y'] : ['arm_qualification', 'launch_record_qualification', 'pause_qualification'].includes(entry.action) ? ['qualificationRunId'] : [],

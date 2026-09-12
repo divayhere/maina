@@ -437,10 +437,14 @@ try {
   const journal = createDurableMutationJournal(journalRoot);
   await journal({ id: 'tap-start-test', action: 'tap', payloadDigest: null, payloadShape: ['x', 'y'], state: 'issued', attempts: 1 });
   await journal({ id: 'tap-start-test', action: 'tap', payloadDigest: null, payloadShape: ['x', 'y'], state: 'confirmed_applied', attempts: 1 });
+  await journal({ id: 'launch-home-test', action: 'launch_home', payloadDigest: null, payloadShape: [], state: 'issued', attempts: 1 });
+  await journal({ id: 'launch-home-test', action: 'launch_home', payloadDigest: null, payloadShape: [], state: 'confirmed_applied', attempts: 1 });
   const journalFiles = readdirSync(join(journalRoot, 'mutations'));
   assert.deepEqual(journalFiles, [
     '001-tap-start-test-issued.json',
     '002-tap-start-test-confirmed_applied.json',
+    '003-launch-home-test-issued.json',
+    '004-launch-home-test-confirmed_applied.json',
   ]);
   assert.equal(journalFiles.every((file) => (lstatSync(join(journalRoot, 'mutations', file)).mode & 0o777) === 0o600), true);
   await assert.rejects(
@@ -456,7 +460,7 @@ try {
     () => journal({ id: 'action-mismatch-test', action: 'force_stop', payloadDigest: null, payloadShape: [], state: 'confirmed_applied', attempts: 1 }),
     (error) => error instanceof AndroidLifecycleRunnerFailure && error.code === 'MUTATION_JOURNAL_TRANSITION_INVALID',
   );
-  assertions += 6;
+  assertions += 8;
 } finally {
   rmSync(runnerRoot, { recursive: true, force: true });
   rmSync(journalRoot, { recursive: true, force: true });
