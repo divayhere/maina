@@ -2,7 +2,7 @@ import * as BackgroundTask from 'expo-background-task';
 import * as TaskManager from 'expo-task-manager';
 import { Platform } from 'react-native';
 
-import { initDb } from '@/data/db';
+import { assertRecordingAdmissionInactive, initDb } from '@/data/db';
 import { markMeetingsAudioDeleted, repairStoredRecordingReferences } from '@/data/meetings';
 import { enforceAudioRetentionPolicy } from '@/services/audioRetention';
 import { log } from '@/services/logger';
@@ -36,8 +36,12 @@ export const MAINA_BACKGROUND_PIPELINE_TASK = 'maina-background-pipeline-v1';
 const MINIMUM_BACKGROUND_INTERVAL_MINUTES = 15;
 
 async function performPipelineRecoveryCycle(assertActive?: () => Promise<void>): Promise<PipelineRecoveryResult> {
+  const assertBackgroundWorkMayContinue = async () => {
+    assertRecordingAdmissionInactive();
+    await assertActive?.();
+  };
   return executePipelineRecovery({
-    assertActive,
+    assertActive: assertBackgroundWorkMayContinue,
     initDb,
     reconcilePendingNativeDiscards,
     establishNativeCaptureAutomaticWorkFence: async () => {
@@ -54,7 +58,9 @@ async function performPipelineRecoveryCycle(assertActive?: () => Promise<void>):
     reconcilePendingMeetingPackets,
     reconcilePendingMainaKnowledgeCloudSyncs,
     reconcilePendingMainaKnowledgeCloudCorrections,
-    reconcilePendingMkcMeetingTagMutations: () => reconcilePendingMkcMeetingTagMutations({ assertActive }),
+    reconcilePendingMkcMeetingTagMutations: () => reconcilePendingMkcMeetingTagMutations({
+      assertActive: assertBackgroundWorkMayContinue,
+    }),
     flushDiagnostics,
   });
 }

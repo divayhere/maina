@@ -11,6 +11,7 @@ import android.os.Build
 import android.provider.Settings
 import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
+import expo.modules.kotlin.functions.Coroutine
 import java.io.File
 import java.io.RandomAccessFile
 
@@ -18,6 +19,7 @@ class MainaRecorderModule : Module() {
     private var triggerReceiverRegistered = false
     private var qwenAsr: MainaQwenAsr? = null
     private var modelPackLifecycle: MainaModelPackLifecycle? = null
+    private val databaseWriterLeases = MainaDatabaseWriterLeaseRegistry()
 
     // Expo bridge values inside a Map arrive as Number (normally Double), not
     // necessarily a decimal String. Parsing through toString() made epoch
@@ -80,6 +82,7 @@ class MainaRecorderModule : Module() {
 
         OnDestroy {
             unregisterTriggerReceiver()
+            databaseWriterLeases.retire().forEach(MainaDatabaseWriterCoordinator::abandon)
             qwenAsr?.release()
             qwenAsr = null
         }
@@ -125,6 +128,24 @@ class MainaRecorderModule : Module() {
             Unit
         }
 
+        AsyncFunction("acquireDatabaseWriterLease") Coroutine { priority: String, timeoutMs: Long ->
+            val token = MainaDatabaseWriterCoordinator.acquire(priority, timeoutMs)
+            val retained = databaseWriterLeases.retain(token)
+            if (!retained) {
+                MainaDatabaseWriterCoordinator.release(token)
+                error("Database writer bridge is unavailable")
+            }
+            token
+        }
+
+        Function("releaseDatabaseWriterLease") { token: String ->
+            if (!databaseWriterLeases.release(token)) return@Function false
+            MainaDatabaseWriterCoordinator.release(token)
+        }
+
+        Function("isDatabaseRecordingAdmissionPending") {
+            MainaDatabaseWriterCoordinator.isRecordingPending()
+        }
         // These calls are deliberately separate from Expo SpeechRecognizer.
         // They are the staged bridge for the service-owned AudioRecord engine.
         AsyncFunction("startNativeCapture") { meetingId: String, directory: String, sourceMode: String, chunkDurationMs: Long, meetingStartedAt: Long ->

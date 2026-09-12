@@ -4,6 +4,7 @@
  * existing installs upgrade cleanly. Repositories build on top of this.
  */
 import * as SQLite from 'expo-sqlite';
+import { MainaRecorder } from '../../modules/maina-recorder/src';
 import { log } from '../services/logger';
 import { migratePipelineWakeV17 } from '../core/pipeline/pipelineWakeMigration';
 import {
@@ -12,14 +13,226 @@ import {
 } from './meetingTagsMigration';
 import { MEETING_DISCARD_V21_MIGRATION_SQL } from './meetingDiscardMigration';
 
+let rawDbPromise: Promise<SQLite.SQLiteDatabase> | null = null;
 let dbPromise: Promise<SQLite.SQLiteDatabase> | null = null;
+let databaseWriterLeaseActive = false;
+let recordingWriterDemand = 0;
+
+type DatabaseWriterPriority = 'recording' | 'background';
+type DatabaseWriterWaiter = {
+  priority: DatabaseWriterPriority;
+  granted: boolean;
+  timer: ReturnType<typeof setTimeout> | null;
+  resolve(release: () => void): void;
+  reject(cause: Error): void;
+};
+type DatabaseWriterAdmission = {
+  native: boolean;
+  release(): void;
+};
+
+const recordingWriterQueue: DatabaseWriterWaiter[] = [];
+const backgroundWriterQueue: DatabaseWriterWaiter[] = [];
 
 export const DURABLE_WAKE_BUSY_TIMEOUT_MS = 5_000;
 
-type DurableWakeTransactionOptions = {
+type ImmediateWriteTransactionOptions = {
   openConnection?: () => Promise<SQLite.SQLiteDatabase>;
   busyTimeoutMs?: number;
+  writerPriority?: DatabaseWriterPriority;
+  writerLeaseTimeoutMs?: number;
+  writerDeadlineMs?: number;
+  now?: () => number;
 };
+
+export class RecordingAdmissionPriorityError extends Error {
+  constructor() {
+    super('Background database work yielded to recording admission.');
+    this.name = 'RecordingAdmissionPriorityError';
+  }
+}
+
+export function assertRecordingAdmissionInactive(): void {
+  if (recordingWriterDemand > 0) throw new RecordingAdmissionPriorityError();
+  const nativePending = MainaRecorder?.isDatabaseRecordingAdmissionPending;
+  if (!nativePending) return;
+  try {
+    if (nativePending.call(MainaRecorder)) throw new RecordingAdmissionPriorityError();
+  } catch (cause) {
+    if (cause instanceof RecordingAdmissionPriorityError) throw cause;
+    // A destroyed/poisoned bridge is not permission for background mutation.
+    throw new RecordingAdmissionPriorityError();
+  }
+}
+
+function grantNextDatabaseWriter(): void {
+  if (databaseWriterLeaseActive) return;
+  const waiter = recordingWriterQueue.shift() ?? backgroundWriterQueue.shift();
+  if (!waiter) return;
+  databaseWriterLeaseActive = true;
+  waiter.granted = true;
+  if (waiter.timer) clearTimeout(waiter.timer);
+  let released = false;
+  waiter.resolve(() => {
+    if (released) return;
+    released = true;
+    if (waiter.priority === 'recording') recordingWriterDemand -= 1;
+    databaseWriterLeaseActive = false;
+    grantNextDatabaseWriter();
+  });
+}
+
+function acquireNativeDatabaseWriter(
+  priority: DatabaseWriterPriority,
+  timeoutMs?: number,
+): Promise<DatabaseWriterAdmission> | null {
+  const recorder = MainaRecorder;
+  const acquireLease = recorder?.acquireDatabaseWriterLease;
+  const releaseLease = recorder?.releaseDatabaseWriterLease;
+  if (!recorder || !acquireLease || !releaseLease) {
+    return null;
+  }
+  return (async () => {
+    if (priority === 'recording') recordingWriterDemand += 1;
+    let token: string;
+    try {
+      token = await acquireLease.call(recorder, priority, timeoutMs ?? 0);
+    } catch (cause) {
+      if (priority === 'recording') {
+        recordingWriterDemand -= 1;
+        throw new RecordingAdmissionPriorityError();
+      }
+      throw cause;
+    }
+    let released = false;
+    return {
+      native: true,
+      release: () => {
+        if (released) return;
+        released = true;
+        if (priority === 'recording') recordingWriterDemand -= 1;
+        // Module teardown can race SQLite completion. Native release failure
+        // must never invert a durable transaction or invite a replay.
+        try {
+          releaseLease.call(recorder, token);
+        } catch {
+          // OnDestroy either retired the token or left the native coordinator
+          // fail-closed. The next bounded admission determines liveness.
+        }
+      },
+    };
+  })();
+}
+
+async function acquireDatabaseWriter(
+  priority: DatabaseWriterPriority,
+  timeoutMs?: number,
+): Promise<DatabaseWriterAdmission> {
+  const nativeRelease = acquireNativeDatabaseWriter(priority, timeoutMs);
+  if (nativeRelease) return nativeRelease;
+  const release = await new Promise<() => void>((resolve, reject) => {
+    const queue = priority === 'recording' ? recordingWriterQueue : backgroundWriterQueue;
+    const waiter: DatabaseWriterWaiter = {
+      priority,
+      granted: false,
+      timer: null,
+      resolve,
+      reject,
+    };
+    if (priority === 'recording') recordingWriterDemand += 1;
+    queue.push(waiter);
+    grantNextDatabaseWriter();
+    if (!waiter.granted && timeoutMs !== undefined) {
+      waiter.timer = setTimeout(() => {
+        if (waiter.granted) return;
+        const index = queue.indexOf(waiter);
+        if (index >= 0) queue.splice(index, 1);
+        if (priority === 'recording') recordingWriterDemand -= 1;
+        waiter.reject(new RecordingAdmissionPriorityError());
+      }, Math.max(0, Math.trunc(timeoutMs)));
+    }
+  });
+  return { native: false, release };
+}
+
+export async function withBackgroundDatabaseWriter<T>(task: () => Promise<T>): Promise<T> {
+  const admission = await acquireDatabaseWriter('background');
+  try {
+    return await task();
+  } finally {
+    admission.release();
+  }
+}
+
+export async function withRecordingAdmissionPriority<T>(
+  task: () => Promise<T>,
+  timeoutMs = 15_000,
+): Promise<T> {
+  const admission = await acquireDatabaseWriter('recording', timeoutMs);
+  try {
+    return await task();
+  } finally {
+    admission.release();
+  }
+}
+
+function openRawDatabase(): Promise<SQLite.SQLiteDatabase> {
+  if (!rawDbPromise) {
+    rawDbPromise = SQLite.openDatabaseAsync('maina.db', { useNewConnection: true });
+  }
+  return rawDbPromise;
+}
+
+function coordinateDatabaseWrites(database: SQLite.SQLiteDatabase): SQLite.SQLiteDatabase {
+  const coordinatedMethods = new Set([
+    'execAsync',
+    'runAsync',
+    'withExclusiveTransactionAsync',
+    'withTransactionAsync',
+  ]);
+  return new Proxy(database, {
+    get(target, property) {
+      const value = Reflect.get(target, property, target);
+      if (typeof property === 'string' && coordinatedMethods.has(property) && typeof value === 'function') {
+        return (...args: unknown[]) => withBackgroundDatabaseWriter(
+          () => Promise.resolve(Reflect.apply(value, target, args)),
+        );
+      }
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  });
+}
+
+/**
+ * A background transaction owns SQLite after BEGIN IMMEDIATE, so the native
+ * admission token can be handed to a waiting recording runtime. Check that
+ * process-wide demand before every subsequent database operation (and again
+ * before COMMIT) so long imports/migrations cooperatively roll back instead
+ * of consuming the recording admission deadline.
+ */
+function checkpointBackgroundTransaction(database: SQLite.SQLiteDatabase): SQLite.SQLiteDatabase {
+  const checkpointedMethods = new Set([
+    'execAsync',
+    'runAsync',
+    'getAllAsync',
+    'getFirstAsync',
+    'prepareAsync',
+    'withExclusiveTransactionAsync',
+    'withTransactionAsync',
+  ]);
+  return new Proxy(database, {
+    get(target, property) {
+      const value = Reflect.get(target, property, target);
+      if (typeof property === 'string' && checkpointedMethods.has(property) && typeof value === 'function') {
+        return (...args: unknown[]) => {
+          assertRecordingAdmissionInactive();
+          return Reflect.apply(value, target, args);
+        };
+      }
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  });
+}
 
 export function getDb(): Promise<SQLite.SQLiteDatabase> {
   // Android can keep the app process alive while React Native recreates its
@@ -27,7 +240,7 @@ export function getDb(): Promise<SQLite.SQLiteDatabase> {
   // native handle across that lifecycle. One fresh connection per JS runtime
   // avoids inheriting a released/poisoned handle; `dbPromise` still keeps one
   // connection for the lifetime of this runtime.
-  if (!dbPromise) dbPromise = SQLite.openDatabaseAsync('maina.db', { useNewConnection: true });
+  if (!dbPromise) dbPromise = openRawDatabase().then(coordinateDatabaseWrites);
   return dbPromise;
 }
 
@@ -42,42 +255,97 @@ export function getDb(): Promise<SQLite.SQLiteDatabase> {
  * remains a truthful failure for the existing startup/periodic repair paths;
  * this helper never retries indefinitely or marks work complete after failure.
  */
-export async function withDurableWakeTransaction<T>(
+export async function withImmediateWriteTransaction<T>(
   task: (transaction: SQLite.SQLiteDatabase) => Promise<T>,
-  options: DurableWakeTransactionOptions = {},
+  options: ImmediateWriteTransactionOptions = {},
 ): Promise<T> {
-  const timeout = Math.max(
+  const configuredBusyTimeout = Math.max(
     0,
     Math.trunc(options.busyTimeoutMs ?? DURABLE_WAKE_BUSY_TIMEOUT_MS),
   );
-  const transaction = await (options.openConnection?.()
-    ?? SQLite.openDatabaseAsync('maina.db', { useNewConnection: true }));
+  const clock = options.now ?? Date.now;
+  const writerStartedAt = clock();
+  const priority = options.writerPriority ?? 'background';
+  const totalDeadline = Math.max(
+    0,
+    Math.trunc(options.writerDeadlineMs ?? options.writerLeaseTimeoutMs ?? configuredBusyTimeout),
+  );
+  const leaseTimeout = priority === 'recording'
+    ? Math.min(
+      Math.max(0, Math.trunc(options.writerLeaseTimeoutMs ?? totalDeadline)),
+      totalDeadline,
+    )
+    : undefined;
+  let admission: DatabaseWriterAdmission | null = await acquireDatabaseWriter(priority, leaseTimeout);
+  let transaction: SQLite.SQLiteDatabase | null = null;
   let began = false;
+  let committed = false;
   let primaryFailure: unknown = null;
 
   try {
-    await transaction.execAsync(`PRAGMA busy_timeout = ${timeout};`);
+    transaction = await (options.openConnection?.()
+      ?? SQLite.openDatabaseAsync('maina.db', { useNewConnection: true }));
+    const remainingDeadline = options.writerDeadlineMs === undefined
+      ? configuredBusyTimeout
+      : Math.max(0, Math.trunc(options.writerDeadlineMs - (clock() - writerStartedAt)));
+    if (priority === 'recording' && remainingDeadline <= 0) {
+      throw new RecordingAdmissionPriorityError();
+    }
+    const busyTimeout = priority === 'recording'
+      ? Math.min(configuredBusyTimeout, remainingDeadline)
+      : admission.native ? 0 : configuredBusyTimeout;
+    await transaction.execAsync(`PRAGMA busy_timeout = ${busyTimeout};`);
     await transaction.execAsync('PRAGMA foreign_keys = ON;');
     await transaction.execAsync('BEGIN IMMEDIATE;');
     began = true;
-    const result = await task(transaction);
+    // Once BEGIN IMMEDIATE succeeds, SQLite itself is the authoritative
+    // cross-runtime/cross-process writer lock. Release the process-local
+    // admission turn before any multi-step JS work so module teardown can
+    // never hand an unfinished transaction to a successor writer.
+    admission.release();
+    admission = null;
+    if (priority === 'background') assertRecordingAdmissionInactive();
+    const taskConnection = priority === 'background'
+      ? checkpointBackgroundTransaction(transaction)
+      : transaction;
+    const result = await task(taskConnection);
+    if (priority === 'background') assertRecordingAdmissionInactive();
     await transaction.execAsync('COMMIT;');
     began = false;
+    committed = true;
     return result;
   } catch (cause) {
     primaryFailure = cause;
     if (began) {
-      await transaction.execAsync('ROLLBACK;').catch(() => undefined);
+      await transaction?.execAsync('ROLLBACK;').catch(() => undefined);
       began = false;
     }
     throw cause;
   } finally {
+    admission?.release();
     try {
-      await transaction.closeAsync();
+      await transaction?.closeAsync();
     } catch (closeFailure) {
-      if (primaryFailure == null) throw closeFailure;
+      // COMMIT success is the durable boundary. A later handle-close failure
+      // must not tell callers that the transaction failed and invite them to
+      // replay already-committed work. The connection is already unusable and
+      // was opened only for this transaction.
+      if (primaryFailure == null && !committed) throw closeFailure;
     }
   }
+}
+
+/**
+ * Backward-compatible name for the durable wake lane. The implementation is
+ * intentionally shared with other bounded, atomic writers (notably recording
+ * admission) so they queue at BEGIN IMMEDIATE instead of failing midway with
+ * `database is locked` after one statement has already run.
+ */
+export function withDurableWakeTransaction<T>(
+  task: (transaction: SQLite.SQLiteDatabase) => Promise<T>,
+  options: ImmediateWriteTransactionOptions = {},
+): Promise<T> {
+  return withImmediateWriteTransaction(task, options);
 }
 
 type Migration = (db: SQLite.SQLiteDatabase) => Promise<void>;
@@ -438,21 +706,28 @@ const MIGRATIONS: Migration[] = [
 ];
 
 export async function initDb(): Promise<void> {
-  const db = await getDb();
-  await db.execAsync('PRAGMA journal_mode = WAL;');
-  await db.execAsync('PRAGMA foreign_keys = ON;');
-  await db.execAsync('PRAGMA busy_timeout = 5000;');
-  const row = await db.getFirstAsync<{ user_version: number }>('PRAGMA user_version;');
-  const current = row?.user_version ?? 0;
+  const db = await openRawDatabase();
+  let current = 0;
+  await withBackgroundDatabaseWriter(async () => {
+    assertRecordingAdmissionInactive();
+    await db.execAsync('PRAGMA journal_mode = WAL;');
+    assertRecordingAdmissionInactive();
+    await db.execAsync('PRAGMA foreign_keys = ON;');
+    assertRecordingAdmissionInactive();
+    await db.execAsync('PRAGMA busy_timeout = 5000;');
+    assertRecordingAdmissionInactive();
+    const row = await db.getFirstAsync<{ user_version: number }>('PRAGMA user_version;');
+    current = row?.user_version ?? 0;
+  });
   if (current >= MIGRATIONS.length) {
     log.info('db', 'schema up to date', { version: current });
     return;
   }
   for (let v = current; v < MIGRATIONS.length; v++) {
-    await db.withTransactionAsync(async () => {
-      await MIGRATIONS[v](db);
+    await withImmediateWriteTransaction(async (transaction) => {
+      await MIGRATIONS[v](transaction);
       // user_version is an int pragma; template-literal is safe (v is a loop int).
-      await db.execAsync(`PRAGMA user_version = ${v + 1};`);
+      await transaction.execAsync(`PRAGMA user_version = ${v + 1};`);
     });
     log.info('db', 'migrated', { to: v + 1 });
   }

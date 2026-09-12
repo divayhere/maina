@@ -133,6 +133,13 @@ const sqlite = vi.hoisted(() => {
 vi.mock('./db', () => ({
   getDb: vi.fn(async () => sqlite.db),
   withDurableWakeTransaction: vi.fn(),
+  withImmediateWriteTransaction: vi.fn(async (work) => {
+    let result: unknown;
+    await sqlite.db.withExclusiveTransactionAsync(async (transaction) => {
+      result = await work(transaction);
+    });
+    return result;
+  }),
 }));
 vi.mock('react-native', () => ({ Platform: { OS: 'ios' } }));
 vi.mock('expo-file-system/legacy', () => ({ documentDirectory: 'file:///documents/' }));
