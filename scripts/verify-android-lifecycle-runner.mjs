@@ -44,7 +44,7 @@ const privateSentinel = 'PRIVATE_DEVICE_OUTPUT_MUST_NOT_PERSIST';
 const syntheticArtifactSha256 = 'a'.repeat(64);
 const syntheticGitContent = Object.freeze({ bytes: 123, mode: 0o644, sha256: 'f'.repeat(64) });
 const syntheticPostBuildDelta = Object.freeze([
-  'release/m3-m4-0.10.69-candidate-plan.json',
+  'release/m3-m4-0.10.70-candidate-plan.json',
   'scripts/qualification/android-lifecycle-adapter.mjs',
   'scripts/qualification/android-lifecycle-core.mjs',
   'scripts/qualification/android-lifecycle-scenario.mjs',
@@ -54,7 +54,7 @@ const syntheticPostBuildDelta = Object.freeze([
   'scripts/verify-android-lifecycle-qualification.mjs',
   'scripts/verify-android-lifecycle-runner.mjs',
   'scripts/verify-android-lifecycle-scenario.mjs',
-  'scripts/verify-release-plan-0.10.69.mjs',
+  'scripts/verify-release-plan-0.10.70.mjs',
 ].map((path) => Object.freeze({
   path,
   status: 'M',
@@ -62,9 +62,9 @@ const syntheticPostBuildDelta = Object.freeze([
   qualification: syntheticGitContent,
 })));
 const releaseBinding = Object.freeze({
-  releaseId: 'maina-synthetic-0.10.69',
-  expectedVersion: '0.10.69',
-  expectedBuild: 95,
+  releaseId: 'maina-synthetic-0.10.70',
+  expectedVersion: '0.10.70',
+  expectedBuild: 96,
   plan: Object.freeze({ path: '/synthetic/release-plan.json', sha256: 'b'.repeat(64), bytes: 123, mode: 0o600 }),
   provenance: Object.freeze({ path: '/synthetic/provenance.json', sha256: 'c'.repeat(64), bytes: 123, mode: 0o600 }),
   artifact: Object.freeze({

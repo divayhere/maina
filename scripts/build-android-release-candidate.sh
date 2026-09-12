@@ -12,7 +12,7 @@ STORAGE_GUARD_SHA256="e8efcaa346ca46ed746970f7739f1346f25442719961f1c8e3d884b3d5
 STORAGE_ROOT="$($STORAGE_GUARD)" || exit $?
 [[ "$STORAGE_ROOT" == "/Volumes/DivaySSD/MainaBuild" ]] || { echo "Canonical Maina storage root was rejected." >&2; exit 78; }
 MAINA_RELEASE_OUTPUT_ROOT="${MAINA_RELEASE_OUTPUT_ROOT:-$STORAGE_ROOT/artifacts/apps/android-main}"
-OUTPUT_DIR="${MAINA_RELEASE_OUTPUT_DIR:-$MAINA_RELEASE_OUTPUT_ROOT/android/Maina-0.10.69-95-candidate}"
+OUTPUT_DIR="${MAINA_RELEASE_OUTPUT_DIR:-$MAINA_RELEASE_OUTPUT_ROOT/android/Maina-0.10.70-96-candidate}"
 [[ "$OUTPUT_DIR" == /* ]] || { echo "MAINA_RELEASE_OUTPUT_DIR must be absolute." >&2; exit 2; }
 case "$OUTPUT_DIR" in
   "$STORAGE_ROOT"/*) ;;
@@ -43,7 +43,7 @@ NODE_BIN="${MAINA_NODE_BIN:-/Users/divay/.cache/codex-runtimes/codex-primary-run
 NODE_EXECUTABLE="$NODE_BIN/node"
 NPM_CLI="${MAINA_NPM_CLI:-/opt/homebrew/lib/node_modules/npm/bin/npm-cli.js}"
 EXPO_CLI="${MAINA_EXPO_CLI:-$PROJECT_DIR/node_modules/expo/bin/cli}"
-RELEASE_PLAN="$PROJECT_DIR/release/m3-m4-0.10.69-candidate-plan.json"
+RELEASE_PLAN="$PROJECT_DIR/release/m3-m4-0.10.70-candidate-plan.json"
 [[ -x "$NODE_EXECUTABLE" ]] || { echo "Android qualification Node runtime is unavailable." >&2; exit 2; }
 "$NODE_EXECUTABLE" "$PROJECT_DIR/scripts/verify-release-toolchain.mjs" \
   "$PROJECT_DIR" "$NODE_EXECUTABLE" "$NPM_CLI" "$EXPO_CLI" "$RELEASE_PLAN" >/dev/null
@@ -64,7 +64,7 @@ source "$PROJECT_DIR/scripts/lib/release-build-attempt-guard.sh"
 BUILD_ATTEMPT_LEDGER_ROOT="$STORAGE_ROOT/artifacts/apps/release-build-attempts"
 PLAN_SHA256="$(shasum -a 256 "$RELEASE_PLAN" | awk '{print $1}')"
 maina_build_attempt_acquire \
-  "$BUILD_ATTEMPT_LEDGER_ROOT" "maina-m3-m4-0.10.69" android "$EXPECTED_FINAL" "$PLAN_SHA256" || exit $?
+  "$BUILD_ATTEMPT_LEDGER_ROOT" "maina-m3-m4-0.10.70" android "$EXPECTED_FINAL" "$PLAN_SHA256" || exit $?
 trap 'status=$?; maina_build_attempt_on_exit "$status" || true; exit "$status"' EXIT
 # shellcheck source=maina-build-env.sh
 source "$PROJECT_DIR/scripts/maina-build-env.sh"
@@ -146,9 +146,9 @@ fi
 
 APK="$MAINA_ANDROID_OUTPUT_ROOT/_app/outputs/apk/release/app-release.apk"
 [[ -n "$APK" && -f "$APK" ]] || fail_terminal "ANDROID_BUILD_ARTIFACT_MISSING" 1
-HELD_APK="$OUTPUT_DIR/Maina-0.10.69-95.apk"
+HELD_APK="$OUTPUT_DIR/Maina-0.10.70-96.apk"
 cp "$APK" "$HELD_APK"
-node scripts/inspect-exact-artifact.mjs android release/m3-m4-0.10.69-candidate-plan.json "$HELD_APK" \
+node scripts/inspect-exact-artifact.mjs android release/m3-m4-0.10.70-candidate-plan.json "$HELD_APK" \
   > "$OUTPUT_DIR/android-inspection.json"
 node scripts/verify-generated-native-release-metadata.mjs android
 node scripts/verify-build-source-state.mjs android "$EXPECTED_FINAL"
