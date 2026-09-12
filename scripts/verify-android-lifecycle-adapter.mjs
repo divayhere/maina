@@ -120,8 +120,8 @@ class FakeAdb {
     }
     if (tail.join(' ') === 'shell dumpsys power') {
       return result({ stdout: this.power === 'on'
-        ? 'Power Manager State:\n  mWakefulness=Awake\nDisplay Power: com.android.server.power.PowerManagerService$4@opaque\n'
-        : 'Power Manager State:\n  mWakefulness=Asleep\nDisplay Power: com.android.server.power.PowerManagerService$4@opaque\n' });
+        ? 'Power Manager State:\n  mWakefulness=Awake\n  mWakefulnessChanging=false\nDisplay Power: com.android.server.power.PowerManagerService$4@opaque\n'
+        : 'Power Manager State:\n  mWakefulness=Dozing\n  mWakefulnessChanging=false\nDisplay Power: com.android.server.power.PowerManagerService$4@opaque\n' });
     }
     if (tail.join(' ') === 'shell dumpsys display') {
       const state = this.power === 'on' ? 'ON' : 'OFF';

@@ -404,8 +404,12 @@ export function classifyPowerState(powerOutput, displayOutput) {
   invariant(typeof displayOutput === 'string' && displayOutput.length > 0, 'Display state output must be nonempty text.');
   const normalizedPower = powerOutput.replace(/\r\n/gu, '\n');
   const normalizedDisplay = displayOutput.replace(/\r\n/gu, '\n');
-  const wakefulness = [...normalizedPower.matchAll(/^\s*mWakefulness=(Awake|Asleep|Dreaming|Dozing)$/gm)].map((match) => match[1]);
+  const wakefulness = [...normalizedPower.matchAll(/^ {2}mWakefulness=(Awake|Asleep|Dreaming|Dozing)$/gm)].map((match) => match[1]);
   invariant(wakefulness.length === 1, 'Power state is missing or ambiguous.');
+  const wakefulnessChanging = [...normalizedPower.matchAll(/^ {2}mWakefulnessChanging=(true|false)$/gm)]
+    .map((match) => match[1]);
+  invariant(wakefulnessChanging.length === 1, 'Power transition state is missing or ambiguous.');
+  invariant(wakefulnessChanging[0] === 'false', 'Power transition is in progress.');
 
   const displayStateHeaders = [...normalizedDisplay.matchAll(/^Display States: size=([0-9]+)$/gm)];
   invariant(displayStateHeaders.length === 1 && displayStateHeaders[0][1] === '1', 'Display state section is missing or ambiguous.');
@@ -454,7 +458,7 @@ export function classifyPowerState(powerOutput, displayOutput) {
   const logicalState = logicalDisplayRecord[1];
   invariant(logicalState === actualState, 'Logical and actual display states disagree.');
   if (wakefulness[0] === 'Awake' && actualState === 'ON') return 'on';
-  if (wakefulness[0] === 'Asleep' && actualState === 'OFF') return 'off';
+  if ((wakefulness[0] === 'Asleep' || wakefulness[0] === 'Dozing') && actualState === 'OFF') return 'off';
   throw new Error('Power state is not an exact on/off condition.');
 }
 
