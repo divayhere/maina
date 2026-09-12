@@ -120,8 +120,37 @@ class FakeAdb {
     }
     if (tail.join(' ') === 'shell dumpsys power') {
       return result({ stdout: this.power === 'on'
-        ? 'Power Manager State:\n  mWakefulness=Awake\nDisplay Power: state=ON\n'
-        : 'Power Manager State:\n  mWakefulness=Asleep\nDisplay Power: state=OFF\n' });
+        ? 'Power Manager State:\n  mWakefulness=Awake\nDisplay Power: com.android.server.power.PowerManagerService$4@opaque\n'
+        : 'Power Manager State:\n  mWakefulness=Asleep\nDisplay Power: com.android.server.power.PowerManagerService$4@opaque\n' });
+    }
+    if (tail.join(' ') === 'shell dumpsys display') {
+      const state = this.power === 'on' ? 'ON' : 'OFF';
+      return result({ stdout: [
+        'Display States: size=1',
+        '---------------------',
+        '  Display Id=0',
+        `  Display State=${state}`,
+        '  Display Brightness=0.5',
+        '  Display SdrBrightness=0.5',
+        '',
+        'Display Adapters: size=1',
+        '',
+        'Display Power Controllers: size=1',
+        '',
+        'Display Power Controller:',
+        '-------------------------',
+        '  mDisplayId=0',
+        '',
+        'Photonic Modulator State:',
+        `  mPendingState=${state}`,
+        '  mPendingBacklight=0.5',
+        '  mPendingSdrBacklight=0.5',
+        `  mActualState=${state}`,
+        '  mActualBacklight=0.5',
+        '  mActualSdrBacklight=0.5',
+        '  mStateChangeInProgress=false',
+        '  mBacklightChangeInProgress=false',
+      ].join('\n') });
     }
     if (tail.join(' ') === 'shell pidof com.divay.maina') {
       return this.process === 'present' ? result({ stdout: '1234\n' }) : result({ exitCode: 1 });
@@ -166,6 +195,21 @@ class FakeAdb {
       } else {
         this.screen = 'home';
       }
+      return result({ stdout: privateSentinel });
+    }
+    if (tail.join(' ') === 'shell am start -W -a android.intent.action.VIEW -d maina:/// -n com.divay.maina/.MainActivity') {
+      this.process = 'present';
+      if (this.pendingRecovery) {
+        this.pendingRecovery = false;
+        this.capture = 'ready';
+        assert.ok(this.pendingCard);
+        this.pendingCard.recovery = false;
+        this.visibleCards.unshift(this.pendingCard);
+        this.pendingCard = null;
+        this.qualificationEvidenceDigest = null;
+      }
+      assert.equal(this.capture, 'ready');
+      this.screen = 'home';
       return result({ stdout: privateSentinel });
     }
     const armMatch = /^shell am broadcast --receiver-foreground -a com\.divay\.maina\.recorder\.SHELL_COMMAND -n com\.divay\.maina\/com\.divay\.maina\.recorder\.MainaShellCommandReceiver --es command arm_qualification --es expectedState idle --es nonce ([0-9a-f-]+)$/u.exec(tail.join(' '));
@@ -447,6 +491,11 @@ assert.equal(fake.calls.filter((tail) => tail.join(' ') === `shell sha256sum ${i
 assert.equal(fake.calls.some((tail) => tail.join(' ') === 'shell dumpsys notification --noredact'), false);
 assert.equal(fake.calls.some((tail) => tail.join(' ') === 'exec-out uiautomator dump /dev/tty'), true);
 assert.equal(fake.calls.some((tail) => /(?:uninstall|\binstall\b|pm clear|reset)/u.test(tail.join(' '))), false);
+assert.equal(fake.calls.filter((tail) => tail.join(' ') === 'shell am start -W -a android.intent.action.VIEW -d maina:/// -n com.divay.maina/.MainActivity').length, 3);
+const powerCommandCount = fake.calls.filter((tail) => tail.join(' ') === 'shell dumpsys power').length;
+const displayCommandCount = fake.calls.filter((tail) => tail.join(' ') === 'shell dumpsys display').length;
+assert.equal(powerCommandCount >= 3, true);
+assert.equal(displayCommandCount, powerCommandCount);
 assert.equal(fake.calls.filter((tail) => tail.includes('arm_qualification')).length, 2);
 const armedIds = fake.calls
   .filter((tail) => tail.includes('arm_qualification'))
@@ -467,7 +516,7 @@ assert.deepEqual(pauseQualificationCalls[0], [
   '--es', 'expectedState', 'recording',
   '--es', 'nonce', normalQualificationRunId,
 ]);
-assertions += 15;
+assertions += 18;
 
 await assert.rejects(
   () => tools.performMutation({ action: 'arm_qualification', payload: { qualificationRunId: armedIds[0] } }),

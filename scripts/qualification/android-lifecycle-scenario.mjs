@@ -306,20 +306,7 @@ function requireProgressHeld(before, after, code) {
 }
 
 async function launchHome(tools, ledger, id) {
-  return ledger.issue(id, tools, 'launch_main', {}, async () => {
-    try {
-      return await waitHome(tools, 5_000);
-    } catch (error) {
-      if (!(error instanceof AndroidLifecycleQualificationFailure) || error.code !== 'HOME_SURFACE_TIMEOUT') throw error;
-      const nodes = await stage('UI_OBSERVATION_FAILED', () => tools.readUiNodes());
-      const home = await stage('HOME_NAVIGATION_UNAVAILABLE', () => optionalUniqueAction(nodes, {
-        label: 'Home',
-        testId: 'main-tab-index',
-      }));
-      if (!home) fail('HOME_NAVIGATION_UNAVAILABLE');
-      fail('HOME_NAVIGATION_REQUIRES_SEPARATE_MUTATION');
-    }
-  });
+  return ledger.issue(id, tools, 'launch_home', {}, async () => waitHome(tools, 20_000));
 }
 
 async function startRecording(tools, ledger, home, id, recordingSlot) {
@@ -402,6 +389,14 @@ export async function executeAndroidLifecycleScenario(config, tools) {
       || installedArtifactSha256 !== config.expectedArtifactSha256) fail('INSTALLED_ARTIFACT_MISMATCH');
     pass('exact_installed_artifact');
 
+    await waitNotification(tools, 'ready');
+    const initialProgress = await readProgress(tools, null);
+    if (initialProgress.active || !initialProgress.clean || initialProgress.nativeState !== 'idle') {
+      fail('INITIAL_NATIVE_CAPTURE_NOT_IDLE');
+    }
+    await ledger.issue('force-stop-initial-idle', tools, 'force_stop', {}, async () => (
+      await stage('PROCESS_OBSERVATION_FAILED', () => tools.processState()) === 'absent' ? true : fail('INITIAL_FORCE_STOP_UNPROVEN')
+    ));
     const initialHome = await launchHome(tools, ledger, 'launch-initial-home');
     await waitNotification(tools, 'ready');
     measurements.beforeNormalSaveCount = parsePublicRecordingCount(initialHome.nodes);
@@ -644,7 +639,7 @@ export const androidLifecycleScenarioPolicy = Object.freeze({
   physicalIncomingCallTestPerformed: false,
   rawScreenshotsAllowed: false,
   rawHierarchyPersistenceAllowed: false,
-  allowedMutations: Object.freeze(['arm_qualification', 'force_stop', 'launch_main', 'launch_record_qualification', 'pause_qualification', 'press_back', 'press_home', 'sleep_device', 'tap', 'wake_up']),
+  allowedMutations: Object.freeze(['arm_qualification', 'force_stop', 'launch_home', 'launch_main', 'launch_record_qualification', 'pause_qualification', 'press_back', 'press_home', 'sleep_device', 'tap', 'wake_up']),
   expectedTestIds: Object.freeze([
     'exact_installed_identity',
     'exact_installed_artifact',
@@ -661,7 +656,8 @@ export const androidLifecycleScenarioPolicy = Object.freeze({
   maxFirstResumeAcceptedMs: MAX_FIRST_RESUME_ACCEPTED_MS,
   passedMutationTraces: Object.freeze([
     Object.freeze([
-      ['launch-initial-home', 'launch_main', []],
+      ['force-stop-initial-idle', 'force_stop', []],
+      ['launch-initial-home', 'launch_home', []],
       ['launch-start-normal-arm', 'arm_qualification', ['qualificationRunId']],
       ['launch-start-normal', 'launch_record_qualification', ['qualificationRunId']],
       ['pause-normal-for-initial-ui', 'pause_qualification', ['qualificationRunId']],
@@ -680,15 +676,16 @@ export const androidLifecycleScenarioPolicy = Object.freeze({
       ['tap-stop-normal', 'tap', ['x', 'y']],
       ['back-from-saved-detail', 'press_back', []],
       ['force-stop-idle', 'force_stop', []],
-      ['launch-after-idle-force-stop', 'launch_main', []],
+      ['launch-after-idle-force-stop', 'launch_home', []],
       ['launch-start-recovery-arm', 'arm_qualification', ['qualificationRunId']],
       ['launch-start-recovery', 'launch_record_qualification', ['qualificationRunId']],
       ['force-stop-active-recovery', 'force_stop', []],
-      ['launch-after-active-force-stop', 'launch_main', []],
+      ['launch-after-active-force-stop', 'launch_home', []],
       ['tap-recovered-top-card', 'tap', ['x', 'y']],
     ]),
     Object.freeze([
-      ['launch-initial-home', 'launch_main', []],
+      ['force-stop-initial-idle', 'force_stop', []],
+      ['launch-initial-home', 'launch_home', []],
       ['launch-start-normal-arm', 'arm_qualification', ['qualificationRunId']],
       ['launch-start-normal', 'launch_record_qualification', ['qualificationRunId']],
       ['pause-normal-for-initial-ui', 'pause_qualification', ['qualificationRunId']],
@@ -707,11 +704,11 @@ export const androidLifecycleScenarioPolicy = Object.freeze({
       ['tap-stop-normal', 'tap', ['x', 'y']],
       ['back-from-saved-detail', 'press_back', []],
       ['force-stop-idle', 'force_stop', []],
-      ['launch-after-idle-force-stop', 'launch_main', []],
+      ['launch-after-idle-force-stop', 'launch_home', []],
       ['launch-start-recovery-arm', 'arm_qualification', ['qualificationRunId']],
       ['launch-start-recovery', 'launch_record_qualification', ['qualificationRunId']],
       ['force-stop-active-recovery', 'force_stop', []],
-      ['launch-after-active-force-stop', 'launch_main', []],
+      ['launch-after-active-force-stop', 'launch_home', []],
       ['tap-recovered-top-card', 'tap', ['x', 'y']],
       ['tap-recovered-transcript', 'tap', ['x', 'y']],
     ]),

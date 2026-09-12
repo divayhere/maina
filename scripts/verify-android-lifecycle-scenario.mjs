@@ -201,7 +201,7 @@ class FakeDevice {
       this.capture = 'paused';
       return;
     }
-    if (mutation === 'launch_main') {
+    if (mutation === 'launch_main' || mutation === 'launch_home') {
       this.process = 'present';
       if (this.pendingRecovery) {
         this.capture = 'ready';
@@ -214,6 +214,9 @@ class FakeDevice {
         this.pendingCard = null;
         this.screen = 'home';
         this.qualificationEvidenceDigest = null;
+      } else if (mutation === 'launch_home') {
+        assert.equal(this.capture, 'ready');
+        this.screen = 'home';
       } else if (this.capture === 'recording' || this.capture === 'paused') {
         this.screen = 'record';
       } else if (this.capture === 'ready') {
@@ -423,6 +426,7 @@ async function expectFailure(overrides, reasonCode, verify = () => {}) {
 }
 
 await expectPass();
+await expectPass(new FakeDevice({ screen: 'detail' }));
 await expectPass(new FakeDevice({ rejectUiReadsWhileRecording: true }));
 await expectPass(new FakeDevice({ omitHomeLoadMarker: true }));
 await expectPass(new FakeDevice({ homeLoadDelayReads: 3 }));
@@ -444,8 +448,16 @@ await expectFailure({ artifactSha256: 'b'.repeat(64) }, 'INSTALLED_ARTIFACT_MISM
   assert.equal(result.mutations.length, 0);
   assert.equal(device.mutationCalls.size, 0);
 });
-await expectFailure({ homeSelected: false }, 'HOME_NAVIGATION_REQUIRES_SEPARATE_MUTATION');
+await expectFailure({ homeSelected: false }, 'HOME_SURFACE_TIMEOUT');
 await expectFailure({ duplicateNotifications: true }, 'HOME_SURFACE_INVALID');
+await expectFailure({ forceNativeActive: true }, 'INITIAL_NATIVE_CAPTURE_NOT_IDLE', (result, device) => {
+  assert.equal(result.mutations.length, 0);
+  assert.equal(device.mutationCalls.size, 0);
+});
+await expectFailure({ nativeError: true }, 'INITIAL_NATIVE_CAPTURE_NOT_IDLE', (result, device) => {
+  assert.equal(result.mutations.length, 0);
+  assert.equal(device.mutationCalls.size, 0);
+});
 await expectFailure({ freezeTimer: true }, 'RECORDING_TIMER_STALLED', (result) => {
   assert.equal(result.reconciliationRequired, true);
 });
@@ -484,7 +496,8 @@ await expectFailure({ ambiguousMutationId: 'tap-stop-normal', ambiguousMutationA
 });
 await expectFailure({ notSpawnedMutationId: 'launch-initial-home' }, 'LAUNCH_INITIAL_HOME_NOT_SPAWNED', (result) => {
   assert.equal(result.reconciliationRequired, false);
-  assert.equal(result.mutations[0].state, 'confirmed_no_effect');
+  assert.equal(result.mutations[0].state, 'confirmed_applied');
+  assert.equal(result.mutations[1].state, 'confirmed_no_effect');
 });
 await expectFailure({ invalidReceiptMutationId: 'launch-initial-home' }, 'LAUNCH_INITIAL_HOME_RECEIPT_INVALID');
 
@@ -510,8 +523,8 @@ const postProcessingSource = readFileSync(
 for (const forbidden of ['screenshot', ' uninstall', ' pm clear', ' clear data', ' reset-permissions', ' install -r']) {
   assert.equal(scenarioSource.includes(forbidden), false, `Scenario contains forbidden text: ${forbidden}`);
 }
-assert.match(scenarioSource, /testId: 'main-tab-index'/);
-assert.doesNotMatch(scenarioSource, /main-tab-home/);
+assert.match(scenarioSource, /ledger\.issue\(id, tools, 'launch_home', \{\}, async \(\) => waitHome\(tools, 20_000\)\)/);
+assert.doesNotMatch(scenarioSource, /HOME_NAVIGATION_REQUIRES_SEPARATE_MUTATION/);
 assert.match(recordSource, /authorizeAndroidQualificationSession\([\s\S]*consumeAndroidQualificationSession/);
 assert.match(recordSource, /qualificationEvidenceDigest: qualificationEvidenceDigestRef\.current/);
 assert.match(recordSource, /qualificationSession: qualificationRunIdRef\.current !== null/);
@@ -533,7 +546,7 @@ assert.equal(androidLifecycleScenarioPolicy.physicalIncomingCallTestPerformed, f
 assert.equal(androidLifecycleScenarioPolicy.rawScreenshotsAllowed, false);
 assert.equal(androidLifecycleScenarioPolicy.rawHierarchyPersistenceAllowed, false);
 assert.deepEqual(androidLifecycleScenarioPolicy.allowedMutations, [
-  'arm_qualification', 'force_stop', 'launch_main', 'launch_record_qualification', 'pause_qualification', 'press_back', 'press_home', 'sleep_device', 'tap', 'wake_up',
+  'arm_qualification', 'force_stop', 'launch_home', 'launch_main', 'launch_record_qualification', 'pause_qualification', 'press_back', 'press_home', 'sleep_device', 'tap', 'wake_up',
 ]);
 
 const creators = readdirSync(join(repoRoot, 'src/app'), { recursive: true })

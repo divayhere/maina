@@ -297,12 +297,60 @@ rejects(() => classifyRecoveryDurability(parse(
   node({ text: 'Re-transcribe from saved audio', 'resource-id': 'meeting-recovery-retranscribe', clickable: 'true' }),
 )), /ambiguous/);
 
-assert.equal(classifyPowerState('Power Manager State:\n  mWakefulness=Awake\nDisplay Power: state=ON\n'), 'on');
-assert.equal(classifyPowerState('Power Manager State:\n  mWakefulness=Asleep\nDisplay Power: state=OFF\n'), 'off');
+const displayDump = (state, {
+  size = 1,
+  id = 0,
+  controllerSize = 1,
+  transition = false,
+  extraPhotonicState = '',
+} = {}) => [
+  `Display States: size=${size}`,
+  '---------------------',
+  `  Display Id=${id}`,
+  `  Display State=${state}`,
+  '  Display Brightness=0.5',
+  '  Display SdrBrightness=0.5',
+  '',
+  'Display Adapters: size=1',
+  '',
+  `Display Power Controllers: size=${controllerSize}`,
+  '',
+  'Display Power Controller:',
+  '-------------------------',
+  '  mDisplayId=0',
+  '',
+  'Photonic Modulator State:',
+  `  mPendingState=${state}`,
+  '  mPendingBacklight=0.5',
+  '  mPendingSdrBacklight=0.5',
+  `  mActualState=${state}`,
+  '  mActualBacklight=0.5',
+  '  mActualSdrBacklight=0.5',
+  `  mStateChangeInProgress=${transition}`,
+  '  mBacklightChangeInProgress=false',
+  extraPhotonicState,
+].join('\n');
+assert.equal(classifyPowerState(
+  'Power Manager State:\n  mWakefulness=Awake\nDisplay Power: com.android.server.power.PowerManagerService$4@opaque\n',
+  displayDump('ON'),
+), 'on');
+assert.equal(classifyPowerState(
+  'Power Manager State:\r\n  mWakefulness=Asleep\r\nDisplay Power: com.android.server.power.PowerManagerService$4@opaque\r\n',
+  displayDump('OFF').replace(/\n/gu, '\r\n'),
+), 'off');
 assertions += 2;
-rejects(() => classifyPowerState('mWakefulness=Awake\nDisplay Power: state=OFF\n'), /not an exact/);
-rejects(() => classifyPowerState('mWakefulness=Awake\nmWakefulness=Asleep\nDisplay Power: state=OFF\n'), /ambiguous/);
-rejects(() => classifyPowerState('mWakefulness=Dozing\nDisplay Power: state=DOZE\n'), /not an exact/);
+rejects(() => classifyPowerState('mWakefulness=Awake\nmWakefulness=Asleep\n', displayDump('ON')), /ambiguous/);
+rejects(() => classifyPowerState('mWakefulness=Dozing\n', displayDump('DOZE')), /not an exact/);
+rejects(() => classifyPowerState('mWakefulness=Awake\n', displayDump('OFF')), /not an exact/);
+rejects(() => classifyPowerState('mWakefulness=Awake\n', displayDump('ON', { transition: true })), /transition/);
+rejects(() => classifyPowerState('mWakefulness=Awake\n', displayDump('ON', { size: 2 })), /section/);
+rejects(() => classifyPowerState('mWakefulness=Awake\n', displayDump('ON', { id: 1 })), /Default display/);
+rejects(() => classifyPowerState('mWakefulness=Awake\n', displayDump('ON', { controllerSize: 2 })), /controller section/);
+rejects(() => classifyPowerState('mWakefulness=Awake\n', `${displayDump('ON')}\nDisplay States: size=1\n`), /section/);
+rejects(() => classifyPowerState('mWakefulness=Awake\n', displayDump('ON', {
+  extraPhotonicState: '\nPhotonic Modulator State:\n  mPendingState=ON\n  mPendingBacklight=0.5\n  mPendingSdrBacklight=0.5\n  mActualState=ON\n  mActualBacklight=0.5\n  mActualSdrBacklight=0.5\n  mStateChangeInProgress=false\n  mBacklightChangeInProgress=false',
+})), /controller state/);
+rejects(() => classifyPowerState('mWakefulness=Awake\n', ''), /nonempty/);
 
 const readyNotification = [
   'NotificationRecord(0x00000001: pkg=com.divay.maina user=UserHandle{0} id=7001 tag=null importance=2 key=synthetic: Notification(channel=maina_recording shortcut=null contentView=null))',

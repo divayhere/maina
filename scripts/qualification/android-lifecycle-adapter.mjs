@@ -11,6 +11,7 @@ const MAIN_ACTIVITY = `${PACKAGE_NAME}/.MainActivity`;
 const RECORDING_SERVICE = `${PACKAGE_NAME}/com.divay.maina.recorder.MainaRecordingService`;
 const RECORDING_SERVICE_DUMP_ARG = '--maina-capture-qualification-v1';
 const MAX_SMALL_OUTPUT_BYTES = 256 * 1024;
+const MAX_DISPLAY_OUTPUT_BYTES = 2 * 1024 * 1024;
 const MAX_HIERARCHY_OUTPUT_BYTES = 8 * 1024 * 1024;
 const DEFAULT_TIMEOUT_MS = 15_000;
 
@@ -248,6 +249,7 @@ function mutationCommand(action, payload, packageName) {
   if (!exactKeys(payload, [])) fail('MUTATION_PAYLOAD_INVALID');
   const commands = {
     force_stop: ['shell', 'am', 'force-stop', packageName],
+    launch_home: ['shell', 'am', 'start', '-W', '-a', 'android.intent.action.VIEW', '-d', 'maina:///', '-n', MAIN_ACTIVITY],
     launch_main: ['shell', 'am', 'start', '-W', '-a', 'android.intent.action.MAIN', '-c', 'android.intent.category.LAUNCHER', '-n', MAIN_ACTIVITY],
     press_back: ['shell', 'input', 'keyevent', 'KEYCODE_BACK'],
     press_home: ['shell', 'input', 'keyevent', 'KEYCODE_HOME'],
@@ -315,10 +317,14 @@ export function createAndroidLifecycleAdbTools({
       'UI_HIERARCHY_COMMAND_FAILED',
       { timeoutMs: 20_000, maxOutputBytes: MAX_HIERARCHY_OUTPUT_BYTES },
     )),
-    powerState: async () => classifyPowerState(read(
-      ['shell', 'dumpsys', 'power'],
-      'POWER_COMMAND_FAILED',
-    )),
+    powerState: async () => classifyPowerState(
+      read(['shell', 'dumpsys', 'power'], 'POWER_COMMAND_FAILED'),
+      read(
+        ['shell', 'dumpsys', 'display'],
+        'DISPLAY_COMMAND_FAILED',
+        { maxOutputBytes: MAX_DISPLAY_OUTPUT_BYTES },
+      ),
+    ),
     processState: async () => parseProcessState(execute(
       ['shell', 'pidof', packageName],
     )),
@@ -332,7 +338,7 @@ export function createAndroidLifecycleAdbTools({
     )),
     performMutation: async ({ action, payload }) => {
       const tail = mutationCommand(action, payload, packageName);
-      const result = execute(tail, { timeoutMs: action === 'launch_main' ? 20_000 : DEFAULT_TIMEOUT_MS });
+      const result = execute(tail, { timeoutMs: ['launch_home', 'launch_main'].includes(action) ? 20_000 : DEFAULT_TIMEOUT_MS });
       if (['arm_qualification', 'pause_qualification'].includes(action) && commandSucceeded(result)) {
         const expected = `Broadcast completed: result=17051, data="${payload.qualificationRunId.toLowerCase()}"`;
         const matches = result.stdout.replace(/\r\n/gu, '\n').split('\n').filter((line) => line.trim() === expected);

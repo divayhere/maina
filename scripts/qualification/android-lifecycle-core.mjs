@@ -399,13 +399,62 @@ export function requireNoActiveRecordingSurface(nodes) {
   return true;
 }
 
-export function classifyPowerState(output) {
-  invariant(typeof output === 'string' && output.length > 0, 'Power state output must be nonempty text.');
-  const wakefulness = [...output.matchAll(/^\s*mWakefulness=(Awake|Asleep|Dreaming|Dozing)$/gm)].map((match) => match[1]);
-  const display = [...output.matchAll(/^\s*Display Power: state=(ON|OFF|DOZE|DOZE_SUSPEND|UNKNOWN)$/gm)].map((match) => match[1]);
-  invariant(wakefulness.length === 1 && display.length === 1, 'Power state is missing or ambiguous.');
-  if (wakefulness[0] === 'Awake' && display[0] === 'ON') return 'on';
-  if (wakefulness[0] === 'Asleep' && display[0] === 'OFF') return 'off';
+export function classifyPowerState(powerOutput, displayOutput) {
+  invariant(typeof powerOutput === 'string' && powerOutput.length > 0, 'Power state output must be nonempty text.');
+  invariant(typeof displayOutput === 'string' && displayOutput.length > 0, 'Display state output must be nonempty text.');
+  const normalizedPower = powerOutput.replace(/\r\n/gu, '\n');
+  const normalizedDisplay = displayOutput.replace(/\r\n/gu, '\n');
+  const wakefulness = [...normalizedPower.matchAll(/^\s*mWakefulness=(Awake|Asleep|Dreaming|Dozing)$/gm)].map((match) => match[1]);
+  invariant(wakefulness.length === 1, 'Power state is missing or ambiguous.');
+
+  const displayStateHeaders = [...normalizedDisplay.matchAll(/^Display States: size=([0-9]+)$/gm)];
+  invariant(displayStateHeaders.length === 1 && displayStateHeaders[0][1] === '1', 'Display state section is missing or ambiguous.');
+  const displayStateStart = displayStateHeaders[0].index;
+  const displayAdapterStart = normalizedDisplay.indexOf('\nDisplay Adapters:', displayStateStart);
+  invariant(displayAdapterStart > displayStateStart, 'Display state section boundary is missing or ambiguous.');
+  const displayStateSection = normalizedDisplay.slice(displayStateStart, displayAdapterStart);
+  const displayStateNames = '(UNKNOWN|OFF|ON|DOZE|DOZE_SUSPEND|VR|ON_SUSPEND|[0-9]+)';
+  const floatValue = '(?:NaN|Infinity|-Infinity|-?(?:[0-9]+(?:\\.[0-9]*)?|\\.[0-9]+)(?:[Ee][+-]?[0-9]+)?)';
+  const logicalDisplayRecord = new RegExp([
+    '^Display States: size=1',
+    '---------------------',
+    '  Display Id=0',
+    `  Display State=${displayStateNames}`,
+    `  Display Brightness=${floatValue}`,
+    `  Display SdrBrightness=${floatValue}`,
+    '$',
+  ].join('\\n'), 'u').exec(displayStateSection);
+  invariant(logicalDisplayRecord !== null, 'Default display state is missing or ambiguous.');
+
+  const controllerHeaders = [...normalizedDisplay.matchAll(/^Display Power Controllers: size=([0-9]+)$/gm)];
+  invariant(controllerHeaders.length === 1 && controllerHeaders[0][1] === '1', 'Display power controller section is missing or ambiguous.');
+  const controllerSection = normalizedDisplay.slice(controllerHeaders[0].index);
+  const controllerMarkers = [...controllerSection.matchAll(/^Display Power Controller:$/gm)];
+  const controllerPrefix = /^Display Power Controllers: size=1\n\nDisplay Power Controller:\n-------------------------\n {2}mDisplayId=0\n/u;
+  const photonicHeadings = [...controllerSection.matchAll(/^Photonic Modulator State:$/gm)];
+  const photonicState = new RegExp([
+    '^Photonic Modulator State:',
+    `  mPendingState=${displayStateNames}`,
+    `  mPendingBacklight=${floatValue}`,
+    `  mPendingSdrBacklight=${floatValue}`,
+    `  mActualState=${displayStateNames}`,
+    `  mActualBacklight=${floatValue}`,
+    `  mActualSdrBacklight=${floatValue}`,
+    '  mStateChangeInProgress=(true|false)',
+    '  mBacklightChangeInProgress=(true|false)$',
+  ].join('\\n'), 'mu').exec(controllerSection);
+  invariant(controllerMarkers.length === 1 && controllerPrefix.test(controllerSection)
+    && photonicHeadings.length === 1 && photonicState !== null,
+  'Default display controller state is missing or ambiguous.');
+  const pendingState = photonicState[1];
+  const actualState = photonicState[2];
+  invariant(photonicState[3] === 'false', 'Display state transition is in progress.');
+  invariant(pendingState === actualState, 'Pending and actual display states disagree.');
+
+  const logicalState = logicalDisplayRecord[1];
+  invariant(logicalState === actualState, 'Logical and actual display states disagree.');
+  if (wakefulness[0] === 'Awake' && actualState === 'ON') return 'on';
+  if (wakefulness[0] === 'Asleep' && actualState === 'OFF') return 'off';
   throw new Error('Power state is not an exact on/off condition.');
 }
 
