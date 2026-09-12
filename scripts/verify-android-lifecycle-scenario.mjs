@@ -454,6 +454,14 @@ await expectPass(new FakeDevice({ homeLoadDelayReads: 3 }));
 await expectPass(new FakeDevice({ rollChunkOnProgress: true }));
 await expectPass(new FakeDevice({ forceRecoveryRoute: true, durabilityDelayReads: 3 }));
 await expectPass(new FakeDevice({ virtualizeOldAfterRecovery: true }));
+await expectFailure({
+  powerState: async function powerState() {
+    return this.power === 'off' ? 'transitioning' : this.power;
+  },
+}, 'POWER_OFF_UNPROVEN', (result) => {
+  assert.equal(result.mutations.find((entry) => entry.id === 'sleep-screen-during-recording')?.state, 'ambiguous');
+  assert.equal(result.reconciliationRequired, true);
+});
 const initialLaunchFault = new FakeDevice({ countDriftByMutationId: { 'launch-initial-home': -1 } });
 await expectPass(initialLaunchFault);
 assert.equal(initialLaunchFault.faultHits.get('launch-initial-home'), 1);
