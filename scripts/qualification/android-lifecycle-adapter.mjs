@@ -82,7 +82,7 @@ function exactNonnegativeInteger(value, label) {
 export function parseInstalledIdentity(output, packageName = PACKAGE_NAME) {
   if (typeof output !== 'string' || !/^[a-z][a-z0-9_.]{2,200}$/u.test(packageName)) fail('PACKAGE_IDENTITY_INVALID');
   const escapedPackage = escapeRegex(packageName);
-  const packageHeaders = output.match(new RegExp(`^Package \\[${escapedPackage}\\] \\([^)\\r\\n]+\\):$`, 'gmu')) ?? [];
+  const packageHeaders = output.match(new RegExp(`^ {2}Package \\[${escapedPackage}\\] \\([0-9a-f]+\\):$`, 'gmu')) ?? [];
   const versionNames = [...output.matchAll(/^[\t ]*versionName=([^\t \r\n]+)[\t ]*$/gmu)].map((match) => match[1]);
   const versionCodes = [...output.matchAll(/^[\t ]*versionCode=([0-9]+)(?:[\t ]+[^\r\n]*)?$/gmu)].map((match) => Number(match[1]));
   if (packageHeaders.length !== 1 || versionNames.length !== 1 || versionCodes.length !== 1

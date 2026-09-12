@@ -36,7 +36,9 @@ const CANONICAL_GIT_VERSION = 'git version 2.50.1 (Apple Git-155)';
 const SHA256 = /^[0-9a-f]{64}$/u;
 const RESULT_KEYS = ['cleanup', 'measurements', 'mutations', 'reasonCode', 'reconciliationRequired', 'status', 'tests'];
 const QUALIFICATION_RUNTIME_DELTA_PATHS = Object.freeze([
+  'scripts/qualification/android-lifecycle-adapter.mjs',
   'scripts/run-android-lifecycle-qualification.mjs',
+  'scripts/verify-android-lifecycle-adapter.mjs',
   'scripts/verify-android-lifecycle-evidence.mjs',
   'scripts/verify-android-lifecycle-runner.mjs',
 ]);

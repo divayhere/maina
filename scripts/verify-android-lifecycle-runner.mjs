@@ -45,7 +45,9 @@ const syntheticArtifactSha256 = 'a'.repeat(64);
 const syntheticGitContent = Object.freeze({ bytes: 123, mode: 0o644, sha256: 'f'.repeat(64) });
 const syntheticPostBuildDelta = Object.freeze([
   'release/m3-m4-0.10.69-candidate-plan.json',
+  'scripts/qualification/android-lifecycle-adapter.mjs',
   'scripts/run-android-lifecycle-qualification.mjs',
+  'scripts/verify-android-lifecycle-adapter.mjs',
   'scripts/verify-android-lifecycle-evidence.mjs',
   'scripts/verify-android-lifecycle-runner.mjs',
   'scripts/verify-release-plan-0.10.69.mjs',
@@ -291,7 +293,7 @@ try {
       commandCount += 1;
       assert.deepEqual(args, ['-s', 'adb-synthetic._adb-tls-connect._tcp', 'shell', 'dumpsys', 'package', 'com.divay.maina']);
       return commandResult(
-        `Package [com.divay.maina] (123):\n  versionCode=93 minSdk=24 targetSdk=36\n  versionName=0.10.67\n${privateSentinel}\n`,
+        `  Package [com.divay.maina] (123):\n  versionCode=93 minSdk=24 targetSdk=36\n  versionName=0.10.67\n${privateSentinel}\n`,
       );
     },
     now: () => 0,
