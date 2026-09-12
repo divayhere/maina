@@ -2,7 +2,11 @@
  * Meetings repository — the only place SQL for meetings lives. UI and state
  * talk to these functions, never to the DB directly (swap-seam: storage).
  */
-import { getDb, withDurableWakeTransaction } from './db';
+import {
+  getDb,
+  withDurableWakeTransaction,
+  withImmediateWriteTransaction,
+} from './db';
 import { persistDeferredPipelineWakeInTransaction } from './pipelineWake';
 import { log } from '../services/logger';
 import { splitTranscriptChunks, transcriptWordCount } from '../core/transcription/transcript';
@@ -22,6 +26,15 @@ import { selectPurgeableStagingMeetingIds } from '../core/recording/stagingPurge
 const documentDirectory = FileSystem.documentDirectory;
 const storeAudioUri = (value: string | null | undefined) => toPortableDocumentReference(value, documentDirectory);
 const readAudioUri = (value: string | null | undefined) => resolveDocumentReference(value, documentDirectory);
+
+export const CAPTURE_START_WRITER_LEASE_TIMEOUT_MS = 10_000;
+export const CAPTURE_START_BUSY_TIMEOUT_MS = 15_000;
+export const CAPTURE_START_DATABASE_DEADLINE_MS = 15_000;
+
+type MeetingWriteConnection = Pick<
+  Awaited<ReturnType<typeof getDb>>,
+  'getFirstAsync' | 'runAsync'
+>;
 
 export type MeetingStatus =
   | 'recording'
@@ -535,29 +548,37 @@ export async function createMeeting(m: {
   status?: MeetingStatus;
   qualificationEvidenceDigest?: string | null;
 }): Promise<void> {
-  const db = await getDb();
-  await db.runAsync(
-    `INSERT INTO meetings (
-       id, title, started_at, duration_ms, audio_uri, status, segment_count, updated_at, qualification_evidence_digest
-     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    [
-      m.id,
-      m.title,
-      m.startedAt,
-      m.durationMs,
-      storeAudioUri(m.audioUri),
-      m.status ?? 'recorded',
-      m.segmentCount ?? 0,
-      Date.now(),
-      m.qualificationEvidenceDigest ?? null,
-    ],
-  );
-  await updateMeetingPipelineStage({
-    meetingId: m.id,
-    stage: 'recording',
-    state: m.status === 'recording' ? 'running' : 'pending',
-    completedUnits: 0,
-    totalUnits: 0,
+  const now = Date.now();
+  await withImmediateWriteTransaction(async (transaction) => {
+    await transaction.runAsync(
+      `INSERT INTO meetings (
+         id, title, started_at, duration_ms, audio_uri, status, segment_count, updated_at, qualification_evidence_digest
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        m.id,
+        m.title,
+        m.startedAt,
+        m.durationMs,
+        storeAudioUri(m.audioUri),
+        m.status ?? 'recorded',
+        m.segmentCount ?? 0,
+        now,
+        m.qualificationEvidenceDigest ?? null,
+      ],
+    );
+    await updateMeetingPipelineStageWithConnection(transaction, {
+      meetingId: m.id,
+      stage: 'recording',
+      state: m.status === 'recording' ? 'running' : 'pending',
+      completedUnits: 0,
+      totalUnits: 0,
+      now,
+    });
+  }, {
+    busyTimeoutMs: CAPTURE_START_BUSY_TIMEOUT_MS,
+    writerPriority: 'recording',
+    writerLeaseTimeoutMs: CAPTURE_START_WRITER_LEASE_TIMEOUT_MS,
+    writerDeadlineMs: CAPTURE_START_DATABASE_DEADLINE_MS,
   });
   log.info('meetings', 'created', { id: m.id, durationMs: m.durationMs, segments: m.segmentCount ?? 0 });
 }
@@ -1149,7 +1170,7 @@ function toMeetingPipelineStage(row: MeetingPipelineStageRow): MeetingPipelineSt
  * never make a durable transcript look failed, and summary retries must not
  * erase capture evidence.
  */
-export async function updateMeetingPipelineStage(input: {
+type MeetingPipelineStageUpdate = {
   meetingId: string;
   stage: MeetingPipelineStage;
   state: MeetingPipelineStageState;
@@ -1158,8 +1179,12 @@ export async function updateMeetingPipelineStage(input: {
   error?: string | null;
   metadata?: Record<string, unknown> | null;
   now?: number;
-}): Promise<MeetingPipelineStageStatus> {
-  const db = await getDb();
+};
+
+async function updateMeetingPipelineStageWithConnection(
+  db: MeetingWriteConnection,
+  input: MeetingPipelineStageUpdate,
+): Promise<MeetingPipelineStageStatus> {
   const now = input.now ?? Date.now();
   const existing = await db.getFirstAsync<MeetingPipelineStageRow>(
     `SELECT * FROM meeting_pipeline_stages WHERE meeting_id = ? AND stage = ?`,
@@ -1226,6 +1251,12 @@ export async function updateMeetingPipelineStage(input: {
     totalUnits: transition.totalUnits,
     metadata: input.metadata === undefined ? parsePipelineMetadata(existing?.metadata_json ?? null) : input.metadata ?? null,
   };
+}
+
+export async function updateMeetingPipelineStage(
+  input: MeetingPipelineStageUpdate,
+): Promise<MeetingPipelineStageStatus> {
+  return updateMeetingPipelineStageWithConnection(await getDb(), input);
 }
 
 export async function getMeetingPipelineStages(meetingId: string): Promise<MeetingPipelineStageStatus[]> {
@@ -1497,7 +1528,7 @@ export async function commitTranscriptFinalBlocks(input: {
   const createdAt = Date.now();
 
   let accepted = true;
-  await db.withExclusiveTransactionAsync(async (transaction) => {
+  await withImmediateWriteTransaction(async (transaction) => {
     if (input.checkpoint) {
       const owner = await transaction.getFirstAsync<{
         generation: number;
@@ -1597,11 +1628,10 @@ export type LocalAsrRunClaim = {
 };
 
 export async function beginLocalAsrRun(meetingId: string): Promise<LocalAsrRunClaim> {
-  const db = await getDb();
   const now = Date.now();
   const token = newId();
   let generation = 1;
-  await db.withExclusiveTransactionAsync(async (transaction) => {
+  await withImmediateWriteTransaction(async (transaction) => {
     const existing = await transaction.getFirstAsync<{ generation: number }>(
       `SELECT generation FROM local_asr_run_claims WHERE meeting_id = ?`,
       [meetingId],
@@ -1676,10 +1706,9 @@ export async function claimLocalAsrWindow(input: LocalAsrRunClaim & {
   startedMs: number;
   endedMs: number;
 }): Promise<'claimed' | 'committed' | 'lost'> {
-  const db = await getDb();
   const now = Date.now();
   let outcome: 'claimed' | 'committed' | 'lost' = 'lost';
-  await db.withExclusiveTransactionAsync(async (transaction) => {
+  await withImmediateWriteTransaction(async (transaction) => {
     const owner = await transaction.getFirstAsync<{ found: number }>(
       `SELECT 1 AS found FROM local_asr_run_claims
        WHERE meeting_id = ? AND generation = ? AND claim_token = ? AND state = 'claimed'`,
@@ -1889,7 +1918,7 @@ export async function importNativePostProcessingResult(input: {
     : 0;
 
   let didImport = false;
-  await db.withExclusiveTransactionAsync(async (transaction) => {
+  await withImmediateWriteTransaction(async (transaction) => {
     const inTransaction = await transaction.getFirstAsync<{
       native_postprocess_run_id: string | null;
       transcription_window_count: number;
@@ -2245,9 +2274,8 @@ export async function saveMeetingPacket(input: {
 }
 
 export async function clearMeetingPacket(meetingId: string): Promise<void> {
-  const db = await getDb();
-  await db.withTransactionAsync(async () => {
-    await db.runAsync(
+  await withImmediateWriteTransaction(async (transaction) => {
+    await transaction.runAsync(
       `UPDATE meetings
        SET summary = NULL,
            decisions_json = NULL,
@@ -2261,7 +2289,7 @@ export async function clearMeetingPacket(meetingId: string): Promise<void> {
        WHERE id = ?`,
       [Date.now(), meetingId],
     );
-    await db.runAsync(`DELETE FROM todo_items WHERE meeting_id = ?`, [meetingId]);
+    await transaction.runAsync(`DELETE FROM todo_items WHERE meeting_id = ?`, [meetingId]);
   });
   await updateMeetingPipelineStage({
     meetingId,
@@ -2331,15 +2359,14 @@ export async function replaceMeetingTodos(
     origin?: 'ai' | 'manual';
   }[],
 ): Promise<void> {
-  const db = await getDb();
   const now = Date.now();
-  await db.withTransactionAsync(async () => {
-    await db.runAsync(`DELETE FROM todo_items WHERE meeting_id = ? AND origin = 'ai'`, [meetingId]);
+  await withImmediateWriteTransaction(async (transaction) => {
+    await transaction.runAsync(`DELETE FROM todo_items WHERE meeting_id = ? AND origin = 'ai'`, [meetingId]);
     for (let index = 0; index < todos.length; index += 1) {
       const todo = todos[index];
       const text = todo.text.trim();
       if (!text) continue;
-      await db.runAsync(
+      await transaction.runAsync(
         `INSERT INTO todo_items
           (id, meeting_id, text, done, source_quote, source_speaker_id, source_timestamp, sort_order, origin, created_at, updated_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -2439,15 +2466,14 @@ export async function deleteTodo(id: string): Promise<void> {
 
 export async function resetMeetingTranscript(meetingId: string): Promise<void> {
   await clearMeetingPacket(meetingId);
-  const db = await getDb();
-  await db.withTransactionAsync(async () => {
-    await db.runAsync(`DELETE FROM transcript_blocks WHERE meeting_id = ?`, [meetingId]);
+  await withImmediateWriteTransaction(async (transaction) => {
+    await transaction.runAsync(`DELETE FROM transcript_blocks WHERE meeting_id = ?`, [meetingId]);
     // An explicit re-transcription owns a new ASR generation. Remove only this
     // meeting's derived window claims so durable audio is decoded again; the
     // recording/chunk source remains untouched.
-    await db.runAsync(`DELETE FROM local_asr_windows WHERE meeting_id = ?`, [meetingId]);
-    await db.runAsync(`DELETE FROM local_asr_run_claims WHERE meeting_id = ?`, [meetingId]);
-    await db.runAsync(
+    await transaction.runAsync(`DELETE FROM local_asr_windows WHERE meeting_id = ?`, [meetingId]);
+    await transaction.runAsync(`DELETE FROM local_asr_run_claims WHERE meeting_id = ?`, [meetingId]);
+    await transaction.runAsync(
       `UPDATE meetings
        SET transcript = NULL, transcribed_segments = 0,
            transcription_window_count = 0, transcription_completed_windows = 0,
@@ -2471,9 +2497,9 @@ export async function purgeStagingMeetings(protectedMeetingIds: readonly string[
   const purgeableIds = new Set(selectPurgeableStagingMeetingIds(allMeetings, protectedMeetingIds));
   const meetings = allMeetings.filter((meeting) => purgeableIds.has(meeting.id));
   if (meetings.length === 0) return [];
-  await db.withTransactionAsync(async () => {
+  await withImmediateWriteTransaction(async (transaction) => {
     for (const meeting of meetings) {
-      await db.runAsync('DELETE FROM meetings WHERE id = ?', [meeting.id]);
+      await transaction.runAsync('DELETE FROM meetings WHERE id = ?', [meeting.id]);
     }
   });
   log.warn('meetings', 'purged staging meetings', { count: meetings.length });
@@ -2529,19 +2555,22 @@ export async function repairStoredRecordingReferences(
     `SELECT meeting_id, segment_index, audio_uri FROM recording_segments`,
   );
   let changes = 0;
-  await db.withTransactionAsync(async () => {
+  await withImmediateWriteTransaction(async (transaction) => {
     for (const row of meetings) {
       if (protectedIds.has(row.id)) continue;
       const portable = storeAudioUri(row.audio_uri);
       if (!portable || portable === row.audio_uri) continue;
-      await db.runAsync(`UPDATE meetings SET audio_uri = ?, updated_at = ? WHERE id = ?`, [portable, Date.now(), row.id]);
+      await transaction.runAsync(
+        `UPDATE meetings SET audio_uri = ?, updated_at = ? WHERE id = ?`,
+        [portable, Date.now(), row.id],
+      );
       changes += 1;
     }
     for (const row of segments) {
       if (protectedIds.has(row.meeting_id)) continue;
       const portable = storeAudioUri(row.audio_uri);
       if (!portable || portable === row.audio_uri) continue;
-      await db.runAsync(
+      await transaction.runAsync(
         `UPDATE recording_segments SET audio_uri = ? WHERE meeting_id = ? AND segment_index = ?`,
         [portable, row.meeting_id, row.segment_index],
       );

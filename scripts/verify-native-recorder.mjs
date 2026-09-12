@@ -267,6 +267,7 @@ const requiredFiles = [
   'android/build.gradle',
   'android/src/main/AndroidManifest.xml',
   'android/src/main/java/com/divay/maina/recorder/MainaRecorderModule.kt',
+  'android/src/main/java/com/divay/maina/recorder/MainaDatabaseWriterCoordinator.kt',
   'android/src/main/java/com/divay/maina/recorder/MainaRecordingService.kt',
   'android/src/main/java/com/divay/maina/recorder/MainaPostProcessingService.kt',
   'android/src/main/java/com/divay/maina/recorder/MainaPostProcessingRecoveryWorker.kt',
@@ -274,6 +275,7 @@ const requiredFiles = [
   'android/src/main/java/com/divay/maina/recorder/MainaQwenAsr.kt',
   'android/src/main/java/com/divay/maina/recorder/MainaModelPackLifecycle.kt',
   'android/src/test/java/com/divay/maina/recorder/MainaModelPackLifecycleTest.kt',
+  'android/src/test/java/com/divay/maina/recorder/MainaDatabaseWriterCoordinatorTest.kt',
   'android/src/main/java/com/divay/maina/recorder/MainaVoiceActivity.kt',
   'android/src/main/java/com/divay/maina/recorder/MainaHardwareTrigger.kt',
   'android/src/main/assets/silero_vad.int8.onnx',
@@ -373,8 +375,34 @@ for (const invariant of [
   'verifyAndPromoteNativeModelPack',
   'lifecycle.noteExactResult(',
   'NATIVE_MODEL_RESULT_BINDING_FAILED',
+  'acquireDatabaseWriterLease',
+  'releaseDatabaseWriterLease',
+  'isDatabaseRecordingAdmissionPending',
+  'databaseWriterLeases.retire().forEach(MainaDatabaseWriterCoordinator::abandon)',
 ]) {
   if (!recorderModule.includes(invariant)) throw new Error(`Android model-pack bridge invariant missing: ${invariant}`);
+}
+
+const databaseWriterCoordinator = readFileSync(
+  path.join(androidRoot, 'src/main/java/com/divay/maina/recorder/MainaDatabaseWriterCoordinator.kt'),
+  'utf8',
+);
+for (const invariant of [
+  'object MainaDatabaseWriterCoordinator',
+  'class MainaDatabaseWriterLeaseRegistry',
+  'suspendCancellableCoroutine',
+  'withTimeout(timeoutMs)',
+  'recording.pollFirst() ?: background.pollFirst()',
+  'if (activeToken != token)',
+  'continuation.invokeOnCancellation { cancel(token) }',
+  'fun abandon(token: String)',
+  'if (poisoned) return',
+  'MainaDatabaseWriterPoisonedException',
+  'fun isRecordingPending()',
+]) {
+  if (!databaseWriterCoordinator.includes(invariant)) {
+    throw new Error(`Android process-wide database writer invariant missing: ${invariant}`);
+  }
 }
 
 const postProcessing = readFileSync(path.join(androidRoot, 'src/main/java/com/divay/maina/recorder/MainaPostProcessingService.kt'), 'utf8');

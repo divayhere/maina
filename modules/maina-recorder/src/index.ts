@@ -340,6 +340,9 @@ interface MainaRecorderNativeModule {
   armRemoteControl(): Promise<RemoteControlStatus>;
   disarmRemoteControl(): Promise<void>;
   setCaptureState(state: CaptureState): Promise<void>;
+  acquireDatabaseWriterLease?(priority: 'recording' | 'background', timeoutMs: number): Promise<string>;
+  releaseDatabaseWriterLease?(token: string): boolean;
+  isDatabaseRecordingAdmissionPending?(): boolean;
   consumeAndroidQualificationSession?(runId: string): Promise<string | null>;
   beginAndroidQualificationDiagnostics?(meetingId: string, evidenceDigest: string): Promise<boolean>;
   cancelAndroidQualificationDiagnosticsBeforeCapture?(meetingId: string, evidenceDigest: string): Promise<boolean>;
