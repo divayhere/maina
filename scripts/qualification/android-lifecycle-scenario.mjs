@@ -82,10 +82,21 @@ async function poll(code, tools, callback, timeoutMs, intervalMs = 200) {
 }
 
 async function waitNotification(tools, expected, timeoutMs = 20_000) {
-  return poll(`NOTIFICATION_${expected.toUpperCase()}_TIMEOUT`, tools, async () => {
-    const observed = await stage('NOTIFICATION_OBSERVATION_FAILED', () => tools.notificationState());
-    return observed === expected ? expected : null;
-  }, timeoutMs);
+  const started = tools.now();
+  let successfulObservations = 0;
+  let transientFailures = 0;
+  while (tools.now() - started <= timeoutMs) {
+    try {
+      const observed = await tools.notificationState();
+      successfulObservations += 1;
+      if (observed === expected) return expected;
+    } catch {
+      transientFailures += 1;
+    }
+    await tools.sleep(200);
+  }
+  if (successfulObservations === 0 && transientFailures > 0) fail('NOTIFICATION_OBSERVATION_FAILED');
+  fail(`NOTIFICATION_${expected.toUpperCase()}_TIMEOUT`);
 }
 
 async function waitRecordingSurface(tools, expected, timeoutMs = 15_000) {

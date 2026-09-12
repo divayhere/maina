@@ -77,6 +77,8 @@ class FakeDevice {
     this.omitHomeLoadMarker = false;
     this.homeSelected = true;
     this.duplicateNotifications = false;
+    this.notificationFailuresByState = {};
+    this.notificationOverridesByState = {};
     this.durabilityDelayReads = 0;
     this.rollChunkOnProgress = false;
     this.virtualizeOldAfterRecovery = false;
@@ -134,7 +136,14 @@ class FakeDevice {
 
   installedIdentity = async () => ({ version: this.version ?? '0.10.69', build: this.build ?? 95 });
   installedArtifactSha256 = async () => this.artifactSha256 ?? syntheticArtifactSha256;
-  notificationState = async () => this.capture;
+  notificationState = async () => {
+    const remaining = this.notificationFailuresByState[this.capture] ?? 0;
+    if (remaining > 0) {
+      this.notificationFailuresByState[this.capture] = remaining - 1;
+      throw new Error('SYNTHETIC_NOTIFICATION_OBSERVATION_FAILED');
+    }
+    return this.notificationOverridesByState[this.capture] ?? this.capture;
+  };
   powerState = async () => this.power;
   processState = async () => this.process;
   foregroundState = async () => this.screen === 'background' ? 'background' : 'foreground';
@@ -428,6 +437,8 @@ async function expectFailure(overrides, reasonCode, verify = () => {}) {
 await expectPass();
 await expectPass(new FakeDevice({ screen: 'detail' }));
 await expectPass(new FakeDevice({ rejectUiReadsWhileRecording: true }));
+await expectPass(new FakeDevice({ notificationFailuresByState: { paused: 1 } }));
+await expectPass(new FakeDevice({ notificationFailuresByState: { paused: 2 } }));
 await expectPass(new FakeDevice({ omitHomeLoadMarker: true }));
 await expectPass(new FakeDevice({ homeLoadDelayReads: 3 }));
 await expectPass(new FakeDevice({ rollChunkOnProgress: true }));
@@ -458,6 +469,12 @@ await expectFailure({ nativeError: true }, 'INITIAL_NATIVE_CAPTURE_NOT_IDLE', (r
   assert.equal(result.mutations.length, 0);
   assert.equal(device.mutationCalls.size, 0);
 });
+await expectFailure({ notificationFailuresByState: { paused: 100 } }, 'NOTIFICATION_OBSERVATION_FAILED', (result, device) => {
+  assert.equal(result.mutations.find((entry) => entry.id === 'pause-normal-for-initial-ui')?.state, 'ambiguous');
+  assert.equal(result.reconciliationRequired, true);
+  assert.equal(device.mutationCalls.get('pause-normal-for-initial-ui'), 1);
+});
+await expectFailure({ notificationOverridesByState: { paused: 'recording' } }, 'NOTIFICATION_PAUSED_TIMEOUT');
 await expectFailure({ freezeTimer: true }, 'RECORDING_TIMER_STALLED', (result) => {
   assert.equal(result.reconciliationRequired, true);
 });
