@@ -49,6 +49,7 @@ function xmlNode(attributes) {
     'content-desc': '',
     clickable: 'false',
     enabled: 'true',
+    selected: 'false',
     bounds: '[0,0][100,100]',
     'visible-to-user': 'true',
     ...attributes,
@@ -60,8 +61,8 @@ function hierarchy(...items) {
   return `<?xml version="1.0" encoding="UTF-8"?><hierarchy rotation="0">${items.join('')}</hierarchy>`;
 }
 
-function action(text, id, top) {
-  return xmlNode({ text, 'resource-id': id, clickable: 'true', bounds: `[0,${top}][200,${top + 80}]` });
+function action(text, id, top, attributes = {}) {
+  return xmlNode({ text, 'resource-id': id, clickable: 'true', bounds: `[0,${top}][200,${top + 80}]`, ...attributes });
 }
 
 class FakeAdb {
@@ -257,6 +258,8 @@ class FakeAdb {
   ui() {
     if (this.screen === 'home') {
       return hierarchy(
+        action('Home', 'main-tab-index', 900, { selected: 'true' }),
+        action('Notifications', '', 10),
         action('Record a meeting', 'record-meeting', 1_000),
         xmlNode({ 'resource-id': 'meeting-list-loaded' }),
         xmlNode({ text: `${this.recordingCount} recordings`, 'resource-id': 'recording-count' }),

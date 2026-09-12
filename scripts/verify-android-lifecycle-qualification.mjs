@@ -12,6 +12,7 @@ import {
   classifyRecoveryDurability,
   classifyRecordingSurface,
   classifySavedDetailDurability,
+  observeHomeSurface,
   observeRecordingSurface,
   optionalUniqueAction,
   optionalUniqueMarker,
@@ -139,6 +140,9 @@ assert.equal(optionalUniqueMarker(parse(node({ text: 'other' })), 'meeting-recov
 assertions += 4;
 
 const homeBefore = parse(
+  node({ text: 'Home', 'resource-id': 'main-tab-index', clickable: 'true', selected: 'true', bounds: '[0,900][200,1000]' }),
+  node({ text: 'Notifications', clickable: 'true', bounds: '[800,0][900,100]' }),
+  node({ text: 'Record a meeting', 'resource-id': 'record-meeting', clickable: 'true', bounds: '[400,900][600,1000]' }),
   node({ text: 'Recent' }),
   node({ text: '12 recordings', 'resource-id': 'recording-count' }),
   node({ 'resource-id': 'com.divay.maina:id/meeting-card', clickable: 'true', bounds: '[10,300][990,500]' }),
@@ -146,6 +150,10 @@ const homeBefore = parse(
   node({ 'resource-id': 'meeting-card-correlation-existing-meeting', bounds: '[20,360][900,380]' }),
 );
 const homeAfter = parse(
+  node({ text: 'Home', 'resource-id': 'main-tab-index', clickable: 'true', selected: 'true', bounds: '[0,900][200,1000]' }),
+  node({ text: 'Notifications', clickable: 'true', bounds: '[800,0][900,100]' }),
+  node({ text: 'Record a meeting', 'resource-id': 'record-meeting', clickable: 'true', bounds: '[400,900][600,1000]' }),
+  node({ 'resource-id': 'meeting-list-loaded' }),
   node({ text: 'Recent' }),
   node({ text: '13 recordings', 'resource-id': 'recording-count' }),
   node({ 'resource-id': 'com.divay.maina:id/meeting-card', clickable: 'true', bounds: '[10,260][990,460]' }),
@@ -159,6 +167,12 @@ const homeAfter = parse(
 );
 assert.equal(parsePublicRecordingCount(homeBefore), 12);
 assert.equal(parsePublicRecordingCount(homeAfter), 13);
+assert.deepEqual(observeHomeSurface(homeBefore), {
+  record: { x: 500, y: 950 },
+  recordingCount: 12,
+  legacyLoadedMarkerPresent: false,
+});
+assert.equal(observeHomeSurface(homeAfter)?.legacyLoadedMarkerPresent, true);
 assert.equal(requireOneNewRecording(12, 13), 13);
 assert.deepEqual(selectTopMeetingCard(homeAfter), {
   visibleCardCount: 2,
@@ -168,7 +182,36 @@ assert.deepEqual(selectTopMeetingCard(homeAfter), {
   y: 360,
 });
 assert.equal(readUniqueMarkerLabel(homeBefore, 'meeting-card-metadata'), 'Sep 11 · 8:00 AM · 1:00');
-assertions += 5;
+assertions += 7;
+assert.equal(observeHomeSurface(parse(
+  node({ text: 'Home', 'resource-id': 'main-tab-index', clickable: 'true', selected: 'false' }),
+  node({ text: 'Notifications', clickable: 'true' }),
+  node({ text: 'Record a meeting', 'resource-id': 'record-meeting', clickable: 'true' }),
+  node({ text: '12 recordings', 'resource-id': 'recording-count' }),
+)), null);
+rejects(() => observeHomeSurface(parse(
+  node({ text: 'Home', 'resource-id': 'main-tab-index', clickable: 'true', selected: 'true' }),
+  node({ text: 'Notifications', clickable: 'true' }),
+  node({ text: 'Notifications', clickable: 'true', bounds: '[0,101][100,201]' }),
+  node({ text: 'Record a meeting', 'resource-id': 'record-meeting', clickable: 'true' }),
+  node({ text: '12 recordings', 'resource-id': 'recording-count' }),
+)), /ambiguous/);
+assert.equal(observeHomeSurface(parse(
+  node({ text: 'Home', 'resource-id': 'main-tab-index', clickable: 'true', selected: 'true' }),
+  node({ text: 'Notifications', clickable: 'true' }),
+  node({ text: 'Record a meeting', 'resource-id': 'record-meeting', clickable: 'true' }),
+  node({ text: '12 recordings', 'resource-id': 'recording-count' }),
+  node({ text: 'Allow', package: 'com.android.permissioncontroller' }),
+)), null);
+assert.equal(observeHomeSurface(parse(
+  node({ text: 'Home', 'resource-id': 'main-tab-index', clickable: 'true', selected: 'true' }),
+  node({ text: 'Notifications', clickable: 'true' }),
+  node({ text: 'Record a meeting', 'resource-id': 'record-meeting', clickable: 'true' }),
+  node({ text: '12 recordings', 'resource-id': 'recording-count' }),
+  node({ text: 'Allow' }),
+))?.recordingCount, 12);
+rejects(() => parse(node({ selected: 'unknown' })), /invalid selected/);
+assertions += 3;
 rejects(() => requireOneNewRecording(12, 14), /exactly one/);
 rejects(() => parsePublicRecordingCount(parse(node({ text: '13 recordings', 'resource-id': 'recording-count' }), node({ 'content-desc': '13 recordings', 'resource-id': 'recording-count' }))), /ambiguous/);
 rejects(() => parsePublicRecordingCount(parse(node({ text: '13 recordings' }))), /missing or ambiguous/);

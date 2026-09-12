@@ -46,10 +46,14 @@ const syntheticGitContent = Object.freeze({ bytes: 123, mode: 0o644, sha256: 'f'
 const syntheticPostBuildDelta = Object.freeze([
   'release/m3-m4-0.10.69-candidate-plan.json',
   'scripts/qualification/android-lifecycle-adapter.mjs',
+  'scripts/qualification/android-lifecycle-core.mjs',
+  'scripts/qualification/android-lifecycle-scenario.mjs',
   'scripts/run-android-lifecycle-qualification.mjs',
   'scripts/verify-android-lifecycle-adapter.mjs',
   'scripts/verify-android-lifecycle-evidence.mjs',
+  'scripts/verify-android-lifecycle-qualification.mjs',
   'scripts/verify-android-lifecycle-runner.mjs',
+  'scripts/verify-android-lifecycle-scenario.mjs',
   'scripts/verify-release-plan-0.10.69.mjs',
 ].map((path) => Object.freeze({
   path,

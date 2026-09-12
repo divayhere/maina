@@ -62,9 +62,11 @@ export function parseUiAutomatorHierarchy(xml) {
     const visible = attributes['visible-to-user'];
     const enabled = attributes.enabled;
     const clickable = attributes.clickable;
+    const selected = attributes.selected;
     invariant(visible === undefined || visible === 'true' || visible === 'false', 'UI node has invalid visibility.');
     invariant(enabled === undefined || enabled === 'true' || enabled === 'false', 'UI node has invalid enabled state.');
     invariant(clickable === undefined || clickable === 'true' || clickable === 'false', 'UI node has invalid clickable state.');
+    invariant(selected === undefined || selected === 'true' || selected === 'false', 'UI node has invalid selected state.');
     nodes.push(Object.freeze({
       text: attributes.text ?? '',
       contentDescription: attributes['content-desc'] ?? '',
@@ -74,6 +76,7 @@ export function parseUiAutomatorHierarchy(xml) {
       visible: visible !== 'false',
       enabled: enabled !== 'false',
       clickable: clickable === 'true',
+      selected: selected === 'true',
       bounds: parseBounds(attributes.bounds ?? ''),
     }));
     invariant(nodes.length <= MAX_NODE_COUNT, 'UI hierarchy exceeds the bounded node count.');
@@ -223,6 +226,45 @@ export function parsePublicRecordingCount(nodes) {
   }
   invariant(matches.length === 1, 'Public recording count is missing or ambiguous.');
   return exactCount(matches[0], 'Public recording count');
+}
+
+export function observeHomeSurface(nodes) {
+  invariant(Array.isArray(nodes), 'UI nodes must be an array.');
+  const home = actionableMatches(nodes, { label: 'Home', testId: 'main-tab-index' });
+  const record = actionableMatches(nodes, { label: 'Record a meeting', testId: 'record-meeting' });
+  const notifications = nodes.filter((node) => isMainaNode(node)
+    && node.visible
+    && node.enabled
+    && node.clickable
+    && node.bounds !== null
+    && hasExactLabel(node, 'Notifications'));
+  const countNodes = nodes.filter((node) => isMainaNode(node)
+    && node.visible
+    && hasExactTestId(node, 'recording-count'));
+  invariant(home.length <= 1 && record.length <= 1 && notifications.length <= 1 && countNodes.length <= 1,
+    'Home surface contains an ambiguous stable node.');
+  if (home.length === 0 || !home[0].selected || record.length === 0 || notifications.length === 0 || countNodes.length === 0) {
+    return null;
+  }
+  const recordingTestIds = new Set([
+    'recording-timer',
+    'recording-state',
+    'recording-stop-save',
+    'recording-pause-resume',
+    'recording-discard',
+  ]);
+  if (nodes.some((node) => isMainaNode(node) && node.visible && recordingTestIds.has(testIdValue(node)))) return null;
+  const permissionLabels = new Set(['Allow', 'While using the app', 'Only this time', 'Don’t allow', "Don't allow"]);
+  const permissionPackages = new Set(['com.android.permissioncontroller', 'com.google.android.permissioncontroller']);
+  if (nodes.some((node) => node.visible
+    && permissionPackages.has(node.packageName)
+    && [...exactLabels(node)].some((label) => permissionLabels.has(label)))) return null;
+  const { left, top, right, bottom } = record[0].bounds;
+  return Object.freeze({
+    record: Object.freeze({ x: Math.floor((left + right) / 2), y: Math.floor((top + bottom) / 2) }),
+    recordingCount: parsePublicRecordingCount(nodes),
+    legacyLoadedMarkerPresent: optionalUniqueMarker(nodes, 'meeting-list-loaded') === true,
+  });
 }
 
 export function requireOneNewRecording(beforeCount, afterCount) {

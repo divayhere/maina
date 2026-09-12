@@ -35,8 +35,8 @@ function nodes(...items) {
   return parseUiAutomatorHierarchy(`<hierarchy>${items.join('')}</hierarchy>`);
 }
 
-function action(text, id, top) {
-  return xmlNode({ text, 'resource-id': id, clickable: 'true', bounds: `[0,${top}][200,${top + 80}]` });
+function action(text, id, top, attributes = {}) {
+  return xmlNode({ text, 'resource-id': id, clickable: 'true', bounds: `[0,${top}][200,${top + 80}]`, ...attributes });
 }
 
 function successReceipt() {
@@ -74,6 +74,9 @@ class FakeDevice {
     this.detailMetadataMismatch = false;
     this.detailCorrelationMismatch = false;
     this.homeLoadDelayReads = 0;
+    this.omitHomeLoadMarker = false;
+    this.homeSelected = true;
+    this.duplicateNotifications = false;
     this.durabilityDelayReads = 0;
     this.rollChunkOnProgress = false;
     this.virtualizeOldAfterRecovery = false;
@@ -298,8 +301,11 @@ class FakeDevice {
         return nodes(action('Record a meeting', 'record-meeting', 1000));
       }
       return nodes(
+        action('Home', 'main-tab-index', 900, { selected: this.homeSelected ? 'true' : 'false' }),
+        action('Notifications', '', 10),
+        ...(this.duplicateNotifications ? [action('Notifications', '', 100)] : []),
         action('Record a meeting', 'record-meeting', 1000),
-        xmlNode({ 'resource-id': 'meeting-list-loaded' }),
+        ...(this.omitHomeLoadMarker ? [] : [xmlNode({ 'resource-id': 'meeting-list-loaded' })]),
         xmlNode({ text: `${this.recordingCount} recordings`, 'resource-id': 'recording-count' }),
         ...this.visibleCards.flatMap((card, index) => {
           const top = 300 + index * 220;
@@ -408,6 +414,7 @@ async function expectFailure(overrides, reasonCode, verify = () => {}) {
 }
 
 await expectPass();
+await expectPass(new FakeDevice({ omitHomeLoadMarker: true }));
 await expectPass(new FakeDevice({ homeLoadDelayReads: 3 }));
 await expectPass(new FakeDevice({ rollChunkOnProgress: true }));
 await expectPass(new FakeDevice({ forceRecoveryRoute: true, durabilityDelayReads: 3 }));
@@ -427,6 +434,8 @@ await expectFailure({ artifactSha256: 'b'.repeat(64) }, 'INSTALLED_ARTIFACT_MISM
   assert.equal(result.mutations.length, 0);
   assert.equal(device.mutationCalls.size, 0);
 });
+await expectFailure({ homeSelected: false }, 'HOME_NAVIGATION_REQUIRES_SEPARATE_MUTATION');
+await expectFailure({ duplicateNotifications: true }, 'HOME_SURFACE_INVALID');
 await expectFailure({ freezeTimer: true }, 'RECORDING_TIMER_STALLED', (result) => {
   assert.equal(result.reconciliationRequired, true);
 });

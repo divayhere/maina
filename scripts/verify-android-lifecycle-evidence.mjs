@@ -26,10 +26,14 @@ const SHA256 = /^[0-9a-f]{64}$/u;
 const RESULT_KEYS = ['cleanup', 'measurements', 'mutations', 'reasonCode', 'reconciliationRequired', 'status', 'tests'];
 const QUALIFICATION_RUNTIME_DELTA_PATHS = Object.freeze([
   'scripts/qualification/android-lifecycle-adapter.mjs',
+  'scripts/qualification/android-lifecycle-core.mjs',
+  'scripts/qualification/android-lifecycle-scenario.mjs',
   'scripts/run-android-lifecycle-qualification.mjs',
   'scripts/verify-android-lifecycle-adapter.mjs',
   'scripts/verify-android-lifecycle-evidence.mjs',
+  'scripts/verify-android-lifecycle-qualification.mjs',
   'scripts/verify-android-lifecycle-runner.mjs',
+  'scripts/verify-android-lifecycle-scenario.mjs',
 ]);
 const ATTEMPT_KEYS = [
   'adb', 'artifact', 'attemptNonce', 'attemptRoot', 'executionMode', 'expectedBuild', 'expectedVersion', 'git',

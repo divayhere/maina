@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto';
 import {
   classifyRecoveryDurability,
   classifySavedDetailDurability,
+  observeHomeSurface,
   observeRecordingSurface,
   optionalUniqueAction,
   optionalUniqueMarker,
@@ -99,14 +100,8 @@ async function waitRecordingSurface(tools, expected, timeoutMs = 15_000) {
 async function waitHome(tools, timeoutMs = 15_000) {
   return poll('HOME_SURFACE_TIMEOUT', tools, async () => {
     const nodes = await stage('UI_OBSERVATION_FAILED', () => tools.readUiNodes());
-    const record = await stage('HOME_ACTION_AMBIGUOUS', () => optionalUniqueAction(nodes, {
-      label: 'Record a meeting',
-      testId: 'record-meeting',
-    }));
-    const loaded = await stage('HOME_LIST_AMBIGUOUS', () => optionalUniqueMarker(nodes, 'meeting-list-loaded'));
-    if (!record || !loaded) return null;
-    await stage('HOME_COUNT_INVALID', () => parsePublicRecordingCount(nodes));
-    return { nodes, record };
+    const home = await stage('HOME_SURFACE_INVALID', () => observeHomeSurface(nodes));
+    return home ? { nodes, record: home.record } : null;
   }, timeoutMs);
 }
 
