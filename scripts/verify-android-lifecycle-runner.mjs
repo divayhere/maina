@@ -455,12 +455,20 @@ try {
     () => journal({ id: 'tap-invalid-test', action: 'tap', payloadDigest: null, payloadShape: [], state: 'issued', attempts: 1 }),
     (error) => error instanceof AndroidLifecycleRunnerFailure && error.code === 'MUTATION_JOURNAL_ENTRY_INVALID',
   );
+  await assert.rejects(
+    () => journal({ id: 'launch-home-payload-test', action: 'launch_home', payloadDigest: null, payloadShape: ['qualificationRunId'], state: 'issued', attempts: 1 }),
+    (error) => error instanceof AndroidLifecycleRunnerFailure && error.code === 'MUTATION_JOURNAL_ENTRY_INVALID',
+  );
+  await assert.rejects(
+    () => journal({ id: 'launch-home-digest-test', action: 'launch_home', payloadDigest: 'a'.repeat(64), payloadShape: [], state: 'issued', attempts: 1 }),
+    (error) => error instanceof AndroidLifecycleRunnerFailure && error.code === 'MUTATION_JOURNAL_ENTRY_INVALID',
+  );
   await journal({ id: 'action-mismatch-test', action: 'tap', payloadDigest: null, payloadShape: ['x', 'y'], state: 'issued', attempts: 1 });
   await assert.rejects(
     () => journal({ id: 'action-mismatch-test', action: 'force_stop', payloadDigest: null, payloadShape: [], state: 'confirmed_applied', attempts: 1 }),
     (error) => error instanceof AndroidLifecycleRunnerFailure && error.code === 'MUTATION_JOURNAL_TRANSITION_INVALID',
   );
-  assertions += 8;
+  assertions += 10;
 } finally {
   rmSync(runnerRoot, { recursive: true, force: true });
   rmSync(journalRoot, { recursive: true, force: true });
