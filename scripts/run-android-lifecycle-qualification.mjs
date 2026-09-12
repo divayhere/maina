@@ -126,7 +126,7 @@ function gitFileRecord(commit, relativePath, code) {
   });
 }
 
-function expectedQualificationDeltaPaths(expectedVersion) {
+function allowedQualificationDeltaPaths(expectedVersion) {
   if (typeof expectedVersion !== 'string' || !/^\d+\.\d+\.\d+$/u.test(expectedVersion)) fail('SOURCE_CUSTODY_INVALID');
   return Object.freeze([
     `release/m3-m4-${expectedVersion}-candidate-plan.json`,
@@ -141,24 +141,28 @@ function validateGitContentRecord(record) {
     && [0o644, 0o755].includes(record.mode) && SHA256.test(record.sha256);
 }
 
-function validateQualificationSourceShape(source, expectedVersion) {
-  const expectedPaths = expectedQualificationDeltaPaths(expectedVersion);
+export function validateQualificationSourceShape(source, expectedVersion) {
+  const allowedPaths = allowedQualificationDeltaPaths(expectedVersion);
   if (!exactKeys(source, ['artifactCommit', 'postBuildDelta', 'qualificationCommit', 'repository'])
     || source.repository !== PROJECT_ROOT
     || !/^[0-9a-f]{40}$/u.test(source.artifactCommit)
     || !/^[0-9a-f]{40}$/u.test(source.qualificationCommit)
-    || !Array.isArray(source.postBuildDelta)
-    || source.postBuildDelta.length !== expectedPaths.length) fail('RELEASE_BINDING_INVALID');
+    || !Array.isArray(source.postBuildDelta)) fail('RELEASE_BINDING_INVALID');
+  const commitsEqual = source.artifactCommit === source.qualificationCommit;
+  if ((commitsEqual && source.postBuildDelta.length !== 0)
+    || (!commitsEqual && source.postBuildDelta.length === 0)
+    || source.postBuildDelta.length > allowedPaths.length) fail('RELEASE_BINDING_INVALID');
   const paths = [];
   for (const entry of source.postBuildDelta) {
     if (!exactKeys(entry, ['artifact', 'path', 'qualification', 'status'])
-      || entry.status !== 'M' || typeof entry.path !== 'string'
+      || entry.status !== 'M' || typeof entry.path !== 'string' || !allowedPaths.includes(entry.path)
       || !validateGitContentRecord(entry.artifact) || !validateGitContentRecord(entry.qualification)) {
       fail('RELEASE_BINDING_INVALID');
     }
     paths.push(entry.path);
   }
-  if (JSON.stringify(paths) !== JSON.stringify(expectedPaths)) fail('RELEASE_BINDING_INVALID');
+  const sortedUniquePaths = [...new Set(paths)].sort();
+  if (JSON.stringify(paths) !== JSON.stringify(sortedUniquePaths)) fail('RELEASE_BINDING_INVALID');
   return source;
 }
 
@@ -173,13 +177,13 @@ export function resolveQualificationSourceBinding({ artifactCommit, expectedVers
   if (ancestor.status !== 0 || ancestor.signal !== null || ancestor.stdout !== '' || ancestor.stderr !== '') {
     fail('SOURCE_CUSTODY_INVALID');
   }
-  const expectedPaths = expectedQualificationDeltaPaths(expectedVersion);
+  const allowedPaths = allowedQualificationDeltaPaths(expectedVersion);
   const rawDelta = gitOutput([
     'diff', '--name-status', '--no-renames', artifactCommit, state.head, '--',
   ], 'SOURCE_CUSTODY_INVALID');
   const entries = rawDelta === '' ? [] : rawDelta.split('\n').map((line) => {
     const fields = line.split('\t');
-    if (fields.length !== 2 || fields[0] !== 'M' || !expectedPaths.includes(fields[1])) {
+    if (fields.length !== 2 || fields[0] !== 'M' || !allowedPaths.includes(fields[1])) {
       fail('SOURCE_CUSTODY_INVALID');
     }
     return Object.freeze({
@@ -189,7 +193,8 @@ export function resolveQualificationSourceBinding({ artifactCommit, expectedVers
       qualification: gitFileRecord(state.head, fields[1], 'SOURCE_CUSTODY_INVALID'),
     });
   }).sort((left, right) => left.path.localeCompare(right.path, 'en'));
-  if (JSON.stringify(entries.map(({ path }) => path)) !== JSON.stringify(expectedPaths)) {
+  if ((artifactCommit === state.head && entries.length !== 0)
+    || (artifactCommit !== state.head && entries.length === 0)) {
     fail('SOURCE_CUSTODY_INVALID');
   }
   return validateQualificationSourceShape(Object.freeze({

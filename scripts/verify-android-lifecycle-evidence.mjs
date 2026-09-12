@@ -158,7 +158,7 @@ function gitObject(repository, commit) {
   return result.status === 0 && result.signal === null && result.stdout.trim() === commit;
 }
 
-function expectedQualificationDeltaPaths(expectedVersion) {
+function allowedQualificationDeltaPaths(expectedVersion) {
   if (typeof expectedVersion !== 'string' || !/^\d+\.\d+\.\d+$/u.test(expectedVersion)) {
     fail('RELEASE_BINDING_INVALID');
   }
@@ -178,7 +178,7 @@ function validateGitContentRecord(record, code) {
 
 function verifyQualificationSource(source, expectedVersion, provenanceSource) {
   exactKeys(source, ['artifactCommit', 'postBuildDelta', 'qualificationCommit', 'repository'], 'ATTEMPT_BINDING_INVALID');
-  const expectedPaths = expectedQualificationDeltaPaths(expectedVersion);
+  const allowedPaths = allowedQualificationDeltaPaths(expectedVersion);
   if (!isAbsolute(source.repository)
     || !/^[0-9a-f]{40}$/u.test(source.artifactCommit)
     || !/^[0-9a-f]{40}$/u.test(source.qualificationCommit)
@@ -186,8 +186,7 @@ function verifyQualificationSource(source, expectedVersion, provenanceSource) {
     || source.artifactCommit !== provenanceSource.finalCommit
     || !gitObject(source.repository, source.artifactCommit)
     || !gitObject(source.repository, source.qualificationCommit)
-    || !Array.isArray(source.postBuildDelta)
-    || source.postBuildDelta.length !== expectedPaths.length) fail('RELEASE_BINDING_INVALID');
+    || !Array.isArray(source.postBuildDelta)) fail('RELEASE_BINDING_INVALID');
   const ancestor = spawnSync(CANONICAL_GIT, [
     '-C', source.repository, 'merge-base', '--is-ancestor', source.artifactCommit, source.qualificationCommit,
   ], { encoding: 'utf8', timeout: 15_000 });
@@ -202,23 +201,28 @@ function verifyQualificationSource(source, expectedVersion, provenanceSource) {
   const actualLines = diff.stdout.trim() === '' ? [] : diff.stdout.trim().split('\n');
   const actualPaths = actualLines.map((line) => {
     const fields = line.split('\t');
-    if (fields.length !== 2 || fields[0] !== 'M') fail('RELEASE_BINDING_INVALID');
+    if (fields.length !== 2 || fields[0] !== 'M' || !allowedPaths.includes(fields[1])) {
+      fail('RELEASE_BINDING_INVALID');
+    }
     return fields[1];
   }).sort();
-  if (JSON.stringify(actualPaths) !== JSON.stringify(expectedPaths)) fail('RELEASE_BINDING_INVALID');
+  const commitsEqual = source.artifactCommit === source.qualificationCommit;
+  if ((commitsEqual && actualPaths.length !== 0)
+    || (!commitsEqual && actualPaths.length === 0)
+    || actualPaths.length > allowedPaths.length) fail('RELEASE_BINDING_INVALID');
   const recordedPaths = [];
   for (const entry of source.postBuildDelta) {
     exactKeys(entry, ['artifact', 'path', 'qualification', 'status'], 'ATTEMPT_BINDING_INVALID');
     validateGitContentRecord(entry.artifact, 'ATTEMPT_BINDING_INVALID');
     validateGitContentRecord(entry.qualification, 'ATTEMPT_BINDING_INVALID');
-    if (entry.status !== 'M' || !expectedPaths.includes(entry.path)) fail('RELEASE_BINDING_INVALID');
+    if (entry.status !== 'M' || !allowedPaths.includes(entry.path)) fail('RELEASE_BINDING_INVALID');
     const artifact = gitFileRecord(source.repository, source.artifactCommit, entry.path, 'RELEASE_BINDING_INVALID');
     const qualification = gitFileRecord(source.repository, source.qualificationCommit, entry.path, 'RELEASE_BINDING_INVALID');
     if (JSON.stringify(entry.artifact) !== JSON.stringify(artifact)
       || JSON.stringify(entry.qualification) !== JSON.stringify(qualification)) fail('RELEASE_BINDING_INVALID');
     recordedPaths.push(entry.path);
   }
-  if (JSON.stringify(recordedPaths) !== JSON.stringify(expectedPaths)) fail('RELEASE_BINDING_INVALID');
+  if (JSON.stringify(recordedPaths) !== JSON.stringify(actualPaths)) fail('RELEASE_BINDING_INVALID');
 }
 
 function gitFileRecord(repository, commit, relativePath, code) {

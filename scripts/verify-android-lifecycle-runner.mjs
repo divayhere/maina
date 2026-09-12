@@ -18,7 +18,9 @@ import {
   AndroidLifecycleRunnerFailure,
   createDurableMutationJournal,
   currentGitState,
+  resolveQualificationSourceBinding,
   runAndroidLifecycleQualification,
+  validateQualificationSourceShape,
 } from './run-android-lifecycle-qualification.mjs';
 import {
   assertAndroidLifecycleOperationalStatus,
@@ -159,7 +161,14 @@ try {
   process.env.PATH = originalPath;
   assert.match(gitState.head, /^[0-9a-f]{40}$/u);
   assert.equal(lstatSync(fakeGitSentinel, { throwIfNoEntry: false }), undefined);
-  assertions += 2;
+  const equalCommitBinding = resolveQualificationSourceBinding({
+    artifactCommit: gitState.head,
+    expectedVersion: '0.10.70',
+    state: { ...gitState, clean: true, upstream: gitState.head },
+  });
+  assert.equal(equalCommitBinding.qualificationCommit, gitState.head);
+  assert.deepEqual(equalCommitBinding.postBuildDelta, []);
+  assertions += 4;
   writeFileSync(fakeAdb, '#!/bin/sh\nexit 1\n', { mode: 0o700 });
   chmodSync(fakeAdb, 0o700);
   assert.equal(validatePassedAndroidLifecycleResult(passedResult), true);
@@ -236,10 +245,49 @@ try {
     })),
   }), true);
   assertions += 9;
+  const equalCommitSource = Object.freeze({
+    ...releaseBinding.source,
+    artifactCommit: 'e'.repeat(40),
+    qualificationCommit: 'e'.repeat(40),
+    postBuildDelta: Object.freeze([]),
+  });
+  assert.equal(validateQualificationSourceShape(equalCommitSource, '0.10.70'), equalCommitSource);
+  assert.throws(
+    () => validateQualificationSourceShape({ ...equalCommitSource, postBuildDelta: syntheticPostBuildDelta.slice(0, 1) }, '0.10.70'),
+    (error) => error instanceof AndroidLifecycleRunnerFailure && error.code === 'RELEASE_BINDING_INVALID',
+  );
+  const subsetSource = Object.freeze({
+    ...releaseBinding.source,
+    postBuildDelta: Object.freeze(syntheticPostBuildDelta.filter(({ path }) => [
+      'scripts/run-android-lifecycle-qualification.mjs',
+      'scripts/verify-android-lifecycle-evidence.mjs',
+      'scripts/verify-android-lifecycle-runner.mjs',
+    ].includes(path))),
+  });
+  assert.equal(validateQualificationSourceShape(subsetSource, '0.10.70'), subsetSource);
+  for (const invalidSource of [
+    { ...subsetSource, postBuildDelta: [] },
+    { ...subsetSource, postBuildDelta: [...subsetSource.postBuildDelta, subsetSource.postBuildDelta[0]] },
+    { ...subsetSource, postBuildDelta: [...subsetSource.postBuildDelta].reverse() },
+    {
+      ...subsetSource,
+      postBuildDelta: [{ ...subsetSource.postBuildDelta[0], path: 'src/app/record.tsx' }],
+    },
+    {
+      ...subsetSource,
+      postBuildDelta: [{ ...subsetSource.postBuildDelta[0], status: 'A' }],
+    },
+  ]) {
+    assert.throws(
+      () => validateQualificationSourceShape(invalidSource, '0.10.70'),
+      (error) => error instanceof AndroidLifecycleRunnerFailure && error.code === 'RELEASE_BINDING_INVALID',
+    );
+  }
+  assertions += 8;
   for (const invalidSource of [
     { ...releaseBinding.source, unexpected: true },
     { ...releaseBinding.source, qualificationCommit: 'invalid' },
-    { ...releaseBinding.source, postBuildDelta: releaseBinding.source.postBuildDelta.slice(1) },
+    { ...releaseBinding.source, postBuildDelta: [] },
     {
       ...releaseBinding.source,
       postBuildDelta: releaseBinding.source.postBuildDelta.map((entry, index) => (
