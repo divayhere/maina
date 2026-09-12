@@ -134,19 +134,19 @@ class FakeAdb {
     if (tail.join(' ') === 'shell dumpsys activity service com.divay.maina/com.divay.maina.recorder.MainaRecordingService --maina-capture-qualification-v1') {
       return result({ stdout: [
         'SERVICE com.divay.maina/.recorder.MainaRecordingService',
-        'MAINA_CAPTURE_QUALIFICATION_V1',
-        'valid=true',
-        `nativeState=${this.capture === 'recording' ? 'recording' : this.capture === 'paused' ? 'paused' : 'idle'}`,
-        `presentationState=${this.capture}`,
-        `notificationState=${this.capture}`,
-        'clean=true',
-        `active=${this.capture === 'recording'}`,
-        `chunkIndex=${this.chunkIndex}`,
-        `bytesWritten=${this.bytesWritten}`,
-        `lastProgressAtMs=${this.lastProgressAtMs}`,
-        `qualificationSession=${this.qualificationEvidenceDigest !== null}`,
-        `qualificationEvidenceDigest=${this.qualificationEvidenceDigest ?? 'none'}`,
-        'END_MAINA_CAPTURE_QUALIFICATION_V1',
+        '    MAINA_CAPTURE_QUALIFICATION_V1',
+        '    valid=true',
+        `    nativeState=${this.capture === 'recording' ? 'recording' : this.capture === 'paused' ? 'paused' : 'idle'}`,
+        `    presentationState=${this.capture}`,
+        `    notificationState=${this.capture}`,
+        '    clean=true',
+        `    active=${this.capture === 'recording'}`,
+        `    chunkIndex=${this.chunkIndex}`,
+        `    bytesWritten=${this.bytesWritten}`,
+        `    lastProgressAtMs=${this.lastProgressAtMs}`,
+        `    qualificationSession=${this.qualificationEvidenceDigest !== null}`,
+        `    qualificationEvidenceDigest=${this.qualificationEvidenceDigest ?? 'none'}`,
+        '    END_MAINA_CAPTURE_QUALIFICATION_V1',
       ].join('\n') });
     }
     if (tail.join(' ') === 'shell am start -W -a android.intent.action.MAIN -c android.intent.category.LAUNCHER -n com.divay.maina/.MainActivity') {
@@ -361,7 +361,7 @@ const captureDump = [
   `qualificationEvidenceDigest=${'b'.repeat(64)}`,
   'END_MAINA_CAPTURE_QUALIFICATION_V1',
 ].join('\n');
-assert.deepEqual(parseCaptureQualificationDump(captureDump), {
+const expectedCaptureDump = {
   nativeState: 'recording',
   presentationState: 'recording',
   notificationState: 'recording',
@@ -372,8 +372,23 @@ assert.deepEqual(parseCaptureQualificationDump(captureDump), {
   lastProgressAtMs: 8192,
   qualificationSession: true,
   qualificationEvidenceDigest: 'b'.repeat(64),
-});
-assertions += 1;
+};
+assert.deepEqual(parseCaptureQualificationDump(captureDump), expectedCaptureDump);
+const captureEnvelope = captureDump.split('\n').slice(1);
+const captureDumpWithFourSpacePrefix = [
+  'system wrapper line',
+  ...captureEnvelope.map((line) => `    ${line}`),
+].join('\n');
+assert.deepEqual(parseCaptureQualificationDump(captureDumpWithFourSpacePrefix), expectedCaptureDump);
+assertions += 2;
+for (const prefix of [' ', '  ', '   ', '     ', '\t']) {
+  rejects(() => parseCaptureQualificationDump([
+    'system wrapper line',
+    ...captureEnvelope.map((line) => `${prefix}${line}`),
+  ].join('\n')), 'NATIVE_PROGRESS_OUTPUT_INVALID');
+}
+rejects(() => parseCaptureQualificationDump(captureDumpWithFourSpacePrefix.replace('    bytesWritten=4096', 'bytesWritten=4096')), 'NATIVE_PROGRESS_OUTPUT_INVALID');
+rejects(() => parseCaptureQualificationDump(captureDumpWithFourSpacePrefix.replace('    END_MAINA_CAPTURE_QUALIFICATION_V1', 'END_MAINA_CAPTURE_QUALIFICATION_V1')), 'NATIVE_PROGRESS_OUTPUT_INVALID');
 rejects(() => parseCaptureQualificationDump(captureDump.replace('valid=true', 'valid=false')), 'NATIVE_PROGRESS_OUTPUT_INVALID');
 rejects(() => parseCaptureQualificationDump(captureDump.replace('notificationState=recording', 'notificationState=paused')), 'NATIVE_PROGRESS_OUTPUT_INVALID');
 rejects(() => parseCaptureQualificationDump(`${captureDump}\n${captureDump}`), 'NATIVE_PROGRESS_OUTPUT_INVALID');

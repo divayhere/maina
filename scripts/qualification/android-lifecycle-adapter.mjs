@@ -140,13 +140,26 @@ export function parseCaptureQualificationDump(output) {
     fail('NATIVE_PROGRESS_OUTPUT_INVALID');
   }
   const lines = output.replace(/\r\n/gu, '\n').split('\n');
-  const beginIndexes = lines.flatMap((line, index) => line === 'MAINA_CAPTURE_QUALIFICATION_V1' ? [index] : []);
-  const endIndexes = lines.flatMap((line, index) => line === 'END_MAINA_CAPTURE_QUALIFICATION_V1' ? [index] : []);
-  if (beginIndexes.length !== 1 || endIndexes.length !== 1 || endIndexes[0] !== beginIndexes[0] + 12) {
+  const allowedPrefixes = Object.freeze(['', '    ']);
+  const beginMatches = lines.flatMap((line, index) => allowedPrefixes.flatMap((prefix) => (
+    line === `${prefix}MAINA_CAPTURE_QUALIFICATION_V1` ? [{ index, prefix }] : []
+  )));
+  const endMatches = lines.flatMap((line, index) => allowedPrefixes.flatMap((prefix) => (
+    line === `${prefix}END_MAINA_CAPTURE_QUALIFICATION_V1` ? [{ index, prefix }] : []
+  )));
+  if (
+    beginMatches.length !== 1
+    || endMatches.length !== 1
+    || endMatches[0].index !== beginMatches[0].index + 12
+    || endMatches[0].prefix !== beginMatches[0].prefix
+  ) {
     fail('NATIVE_PROGRESS_OUTPUT_INVALID');
   }
-  const body = lines.slice(beginIndexes[0] + 1, endIndexes[0]);
-  const match = /^valid=(true|false)\nnativeState=(idle|ownership_pending|paused|recording|error)\npresentationState=(ready|recording|paused|saving)\nnotificationState=(ready|recording|paused|saving)\nclean=(true|false)\nactive=(true|false)\nchunkIndex=([0-9]+)\nbytesWritten=([0-9]+)\nlastProgressAtMs=([0-9]+)\nqualificationSession=(true|false)\nqualificationEvidenceDigest=(none|[0-9a-f]{64})$/u.exec(body.join('\n'));
+  const { index: beginIndex, prefix } = beginMatches[0];
+  const body = lines.slice(beginIndex + 1, endMatches[0].index);
+  if (body.some((line) => !line.startsWith(prefix))) fail('NATIVE_PROGRESS_OUTPUT_INVALID');
+  const normalizedBody = prefix === '' ? body : body.map((line) => line.slice(prefix.length));
+  const match = /^valid=(true|false)\nnativeState=(idle|ownership_pending|paused|recording|error)\npresentationState=(ready|recording|paused|saving)\nnotificationState=(ready|recording|paused|saving)\nclean=(true|false)\nactive=(true|false)\nchunkIndex=([0-9]+)\nbytesWritten=([0-9]+)\nlastProgressAtMs=([0-9]+)\nqualificationSession=(true|false)\nqualificationEvidenceDigest=(none|[0-9a-f]{64})$/u.exec(normalizedBody.join('\n'));
   if (!match || match[1] !== 'true' || match[4] !== match[3]) fail('NATIVE_PROGRESS_OUTPUT_INVALID');
   const chunkIndex = Number(match[7]);
   const bytesWritten = Number(match[8]);
