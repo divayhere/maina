@@ -107,7 +107,7 @@ class FakeAdb {
     this.calls.push(tail);
 
     if (tail.join(' ') === 'shell dumpsys package com.divay.maina') {
-      return result({ stdout: '  Package [com.divay.maina] (123):\n  versionCode=96 minSdk=24 targetSdk=36\n  versionName=0.10.70\n' });
+      return result({ stdout: '  Package [com.divay.maina] (123):\n  versionCode=97 minSdk=24 targetSdk=36\n  versionName=0.10.71\n' });
     }
     if (tail.join(' ') === 'shell pm path com.divay.maina') {
       return result({ stdout: `package:${installedApkPath}\n` });
@@ -366,8 +366,8 @@ function rejects(callback, code) {
 }
 
 assert.deepEqual(parseInstalledIdentity(
-  '  Package [com.divay.maina] (123):\n  versionCode=96 minSdk=24 targetSdk=36\n  versionName=0.10.70\n',
-), { version: '0.10.70', build: 96 });
+  '  Package [com.divay.maina] (123):\n  versionCode=97 minSdk=24 targetSdk=36\n  versionName=0.10.71\n',
+), { version: '0.10.71', build: 97 });
 assertions += 1;
 assert.equal(parseInstalledApkPath(`package:${installedApkPath}\n`), installedApkPath);
 assert.equal(parseInstalledApkSha256(`${syntheticArtifactSha256}  ${installedApkPath}\n`, installedApkPath), syntheticArtifactSha256);
@@ -377,21 +377,21 @@ rejects(() => parseInstalledApkPath(` package:${installedApkPath}\n`), 'INSTALLE
 rejects(() => parseInstalledApkPath(`package:/data/app/private path/base.apk\n`), 'INSTALLED_APK_PATH_OUTPUT_INVALID');
 rejects(() => parseInstalledApkSha256(`${syntheticArtifactSha256}  /data/app/other/base.apk\n`, installedApkPath), 'INSTALLED_APK_SHA256_OUTPUT_INVALID');
 rejects(() => parseInstalledApkSha256(`${syntheticArtifactSha256.toUpperCase()}  ${installedApkPath}\n`, installedApkPath), 'INSTALLED_APK_SHA256_OUTPUT_INVALID');
-rejects(() => parseInstalledIdentity('  Package [com.divay.maina] (123):\n  versionName=0.10.70\n'), 'INSTALLED_IDENTITY_OUTPUT_INVALID');
-rejects(() => parseInstalledIdentity('  Package [com.divay.maina.evil] (123):\n  versionCode=96\n  versionName=0.10.70\n'), 'INSTALLED_IDENTITY_OUTPUT_INVALID');
-rejects(() => parseInstalledIdentity('  Package [com.divay.maina] (123):\n  versionCode=96\n  versionCode=96\n  versionName=0.10.70\n'), 'INSTALLED_IDENTITY_OUTPUT_INVALID');
-rejects(() => parseInstalledIdentity('  Package [com.divay.maina] (123):\r\n  versionCode=96 minSdk=24 targetSdk=36\r\n  versionCode=96 minSdk=24 targetSdk=36\r\n  versionName=0.10.70\r\n'), 'INSTALLED_IDENTITY_OUTPUT_INVALID');
-rejects(() => parseInstalledIdentity('  Package [com.divay.maina] (123):\n  versionCode=96\n  versionName=0.10.70\n  versionName=0.10.70\n'), 'INSTALLED_IDENTITY_OUTPUT_INVALID');
-rejects(() => parseInstalledIdentity('  Package [com.divay.maina\n.evil] (123):\n  versionCode=96\n  versionName=0.10.70\n'), 'INSTALLED_IDENTITY_OUTPUT_INVALID');
-rejects(() => parseInstalledIdentity('Package [com.divay.maina] (123):\n  versionCode=96\n  versionName=0.10.70\n'), 'INSTALLED_IDENTITY_OUTPUT_INVALID');
-rejects(() => parseInstalledIdentity(' Package [com.divay.maina] (123):\n  versionCode=96\n  versionName=0.10.70\n'), 'INSTALLED_IDENTITY_OUTPUT_INVALID');
-rejects(() => parseInstalledIdentity('   Package [com.divay.maina] (123):\n  versionCode=96\n  versionName=0.10.70\n'), 'INSTALLED_IDENTITY_OUTPUT_INVALID');
-rejects(() => parseInstalledIdentity('\t\tPackage [com.divay.maina] (123):\n  versionCode=96\n  versionName=0.10.70\n'), 'INSTALLED_IDENTITY_OUTPUT_INVALID');
-rejects(() => parseInstalledIdentity('  Package [com.divay.maina] (xyz):\n  versionCode=96\n  versionName=0.10.70\n'), 'INSTALLED_IDENTITY_OUTPUT_INVALID');
-rejects(() => parseInstalledIdentity('  Package [com.divay.maina] (123):\n  Package [com.divay.maina] (456):\n  versionCode=96\n  versionName=0.10.70\n'), 'INSTALLED_IDENTITY_OUTPUT_INVALID');
+rejects(() => parseInstalledIdentity('  Package [com.divay.maina] (123):\n  versionName=0.10.71\n'), 'INSTALLED_IDENTITY_OUTPUT_INVALID');
+rejects(() => parseInstalledIdentity('  Package [com.divay.maina.evil] (123):\n  versionCode=97\n  versionName=0.10.71\n'), 'INSTALLED_IDENTITY_OUTPUT_INVALID');
+rejects(() => parseInstalledIdentity('  Package [com.divay.maina] (123):\n  versionCode=97\n  versionCode=97\n  versionName=0.10.71\n'), 'INSTALLED_IDENTITY_OUTPUT_INVALID');
+rejects(() => parseInstalledIdentity('  Package [com.divay.maina] (123):\r\n  versionCode=97 minSdk=24 targetSdk=36\r\n  versionCode=97 minSdk=24 targetSdk=36\r\n  versionName=0.10.71\r\n'), 'INSTALLED_IDENTITY_OUTPUT_INVALID');
+rejects(() => parseInstalledIdentity('  Package [com.divay.maina] (123):\n  versionCode=97\n  versionName=0.10.71\n  versionName=0.10.71\n'), 'INSTALLED_IDENTITY_OUTPUT_INVALID');
+rejects(() => parseInstalledIdentity('  Package [com.divay.maina\n.evil] (123):\n  versionCode=97\n  versionName=0.10.71\n'), 'INSTALLED_IDENTITY_OUTPUT_INVALID');
+rejects(() => parseInstalledIdentity('Package [com.divay.maina] (123):\n  versionCode=97\n  versionName=0.10.71\n'), 'INSTALLED_IDENTITY_OUTPUT_INVALID');
+rejects(() => parseInstalledIdentity(' Package [com.divay.maina] (123):\n  versionCode=97\n  versionName=0.10.71\n'), 'INSTALLED_IDENTITY_OUTPUT_INVALID');
+rejects(() => parseInstalledIdentity('   Package [com.divay.maina] (123):\n  versionCode=97\n  versionName=0.10.71\n'), 'INSTALLED_IDENTITY_OUTPUT_INVALID');
+rejects(() => parseInstalledIdentity('\t\tPackage [com.divay.maina] (123):\n  versionCode=97\n  versionName=0.10.71\n'), 'INSTALLED_IDENTITY_OUTPUT_INVALID');
+rejects(() => parseInstalledIdentity('  Package [com.divay.maina] (xyz):\n  versionCode=97\n  versionName=0.10.71\n'), 'INSTALLED_IDENTITY_OUTPUT_INVALID');
+rejects(() => parseInstalledIdentity('  Package [com.divay.maina] (123):\n  Package [com.divay.maina] (456):\n  versionCode=97\n  versionName=0.10.71\n'), 'INSTALLED_IDENTITY_OUTPUT_INVALID');
 assert.deepEqual(parseInstalledIdentity(
-  '  Package [com.divay.maina] (123):\n\n\tversionCode=96 minSdk=24 targetSdk=36\n\tversionName=0.10.70\n',
-), { version: '0.10.70', build: 96 });
+  '  Package [com.divay.maina] (123):\n\n\tversionCode=97 minSdk=24 targetSdk=36\n\tversionName=0.10.71\n',
+), { version: '0.10.71', build: 97 });
 assertions += 1;
 
 const exactHierarchy = hierarchy(xmlNode({ text: 'Resume', 'resource-id': 'recording-pause-resume', clickable: 'true' }));
@@ -475,8 +475,8 @@ const tools = createAndroidLifecycleAdbTools({
   sleep: fake.sleep,
 });
 const scenario = await executeAndroidLifecycleScenario({
-  expectedVersion: '0.10.70',
-  expectedBuild: 96,
+  expectedVersion: '0.10.71',
+  expectedBuild: 97,
   localMeetingCreatorExclusive: true,
   meetingListNewestFirst: true,
   expectedArtifactSha256: syntheticArtifactSha256,

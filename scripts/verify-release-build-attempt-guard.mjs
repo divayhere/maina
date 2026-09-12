@@ -11,10 +11,10 @@ const helper = path.join(root, 'scripts/lib/release-build-attempt-guard.sh');
 const temporary = mkdtempSync(path.join(os.tmpdir(), 'maina-release-build-attempt-'));
 const source = 'a'.repeat(40);
 const plan = 'b'.repeat(64);
-const activeRelease = 'maina-m3-m4-0.10.70';
-const successorRelease = 'maina-m3-m4-0.10.71';
-const concurrentRelease = 'maina-m3-m4-0.10.72';
-const invalidPlatformRelease = 'maina-m3-m4-0.10.73';
+const activeRelease = 'maina-m3-m4-0.10.71';
+const successorRelease = 'maina-m3-m4-0.10.72';
+const concurrentRelease = 'maina-m3-m4-0.10.73';
+const invalidPlatformRelease = 'maina-m3-m4-0.10.74';
 
 function command(releaseId, platform, terminal = null) {
   const terminalCommand = terminal

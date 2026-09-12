@@ -206,7 +206,7 @@ try {
   result.emulatorVerified = true;
 
   const badging = must(join(buildTools, 'aapt2'), ['dump', 'badging', stagedMainaApk], 'MAINA_APK_INSPECTION_FAILED');
-  if (!badging.includes("package: name='com.divay.maina' versionCode='96' versionName='0.10.70'")) fail('MAINA_APK_IDENTITY_MISMATCH');
+  if (!badging.includes("package: name='com.divay.maina' versionCode='97' versionName='0.10.71'")) fail('MAINA_APK_IDENTITY_MISMATCH');
   result.mainaIdentityVerified = true;
 
   const hostileApk = buildHostile(workRoot);
