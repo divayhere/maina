@@ -1,7 +1,7 @@
 {
   "name": "maina",
   "main": "index.js",
-  "version": "0.10.70",
+  "version": "0.10.71",
   "dependencies": {
     "@expo/ui": "~57.0.14",
     "@expo/vector-icons": "^15.0.2",
@@ -75,7 +75,7 @@
     "verify:build-source": "node scripts/verify-build-source-state.mjs",
     "verify:external-storage": "node scripts/verify-external-storage-contract.mjs",
     "verify:release-build-scripts": "npm run verify:external-storage && node scripts/verify-package-script-targets.mjs && node scripts/verify-release-toolchain-self-test.mjs && node scripts/verify-release-build-attempt-guard.mjs && node scripts/verify-release-build-scripts.mjs && node scripts/verify-ios-pod-refresh-safety.mjs",
-    "verify:release-plan-candidate": "node scripts/verify-release-plan-0.10.70.mjs && node scripts/verify-generated-native-release-metadata.synthetic.mjs",
+    "verify:release-plan-candidate": "node scripts/verify-release-plan-0.10.71.mjs && node scripts/verify-generated-native-release-metadata.synthetic.mjs",
     "verify:evidence-ledger": "node scripts/verify-external-storage-contract.mjs && node scripts/verify-capability-evidence-ledger.mjs --self-test --verify-external --verify-local-git",
     "verify:evidence-ledger:structure": "node scripts/verify-capability-evidence-ledger.mjs --self-test",
     "ios:runtime": "bash scripts/prepare-ios-sherpa-runtime.sh",

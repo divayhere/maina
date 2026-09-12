@@ -11,7 +11,7 @@ source "$PROJECT_DIR/scripts/maina-build-env.sh"
 "$PROJECT_DIR/scripts/restore-external-build-links.sh" dependencies
 
 EXPECTED_FINAL="${MAINA_EXPECTED_FINAL_COMMIT:?Set the exact Admin-reviewed final Android commit}"
-OUTPUT_DIR="${MAINA_RELEASE_OUTPUT_DIR:-$MAINA_RELEASE_OUTPUT_ROOT/android/Maina-0.10.70-96-candidate}"
+OUTPUT_DIR="${MAINA_RELEASE_OUTPUT_DIR:-$MAINA_RELEASE_OUTPUT_ROOT/android/Maina-0.10.71-97-candidate}"
 [[ "$OUTPUT_DIR" == /* ]] || { echo "MAINA_RELEASE_OUTPUT_DIR must be absolute." >&2; exit 2; }
 maina_require_storage_path "$OUTPUT_DIR" || exit $?
 case "$OUTPUT_DIR" in
@@ -38,7 +38,7 @@ NODE_BIN="${MAINA_NODE_BIN:-/Users/divay/.cache/codex-runtimes/codex-primary-run
 NODE_EXECUTABLE="$NODE_BIN/node"
 NPM_CLI="${MAINA_NPM_CLI:-/opt/homebrew/lib/node_modules/npm/bin/npm-cli.js}"
 EXPO_CLI="${MAINA_EXPO_CLI:-$PROJECT_DIR/node_modules/expo/bin/cli}"
-RELEASE_PLAN="$PROJECT_DIR/release/m3-m4-0.10.70-candidate-plan.json"
+RELEASE_PLAN="$PROJECT_DIR/release/m3-m4-0.10.71-candidate-plan.json"
 [[ -x "$NODE_EXECUTABLE" ]] || { echo "Android qualification Node runtime is unavailable." >&2; exit 2; }
 "$NODE_EXECUTABLE" "$PROJECT_DIR/scripts/verify-release-toolchain.mjs" \
   "$PROJECT_DIR" "$NODE_EXECUTABLE" "$NPM_CLI" "$EXPO_CLI" "$RELEASE_PLAN" >/dev/null
@@ -54,7 +54,7 @@ source "$PROJECT_DIR/scripts/lib/release-build-attempt-guard.sh"
 BUILD_ATTEMPT_LEDGER_ROOT="$MAINA_STORAGE_ROOT/artifacts/apps/release-build-attempts"
 PLAN_SHA256="$(shasum -a 256 "$RELEASE_PLAN" | awk '{print $1}')"
 maina_build_attempt_acquire \
-  "$BUILD_ATTEMPT_LEDGER_ROOT" "maina-m3-m4-0.10.70" android "$EXPECTED_FINAL" "$PLAN_SHA256" || exit $?
+  "$BUILD_ATTEMPT_LEDGER_ROOT" "maina-m3-m4-0.10.71" android "$EXPECTED_FINAL" "$PLAN_SHA256" || exit $?
 trap 'status=$?; maina_build_attempt_on_exit "$status" || true; exit "$status"' EXIT
 maina_storage_mkdir "$OUTPUT_DIR"
 : > "$OUTPUT_DIR/build-attempted"
@@ -95,9 +95,9 @@ fi
 
 APK="$MAINA_ANDROID_OUTPUT_ROOT/_app/outputs/apk/release/app-release.apk"
 [[ -n "$APK" && -f "$APK" ]] || { echo "Exact release APK was not produced." >&2; exit 1; }
-HELD_APK="$OUTPUT_DIR/Maina-0.10.70-96.apk"
+HELD_APK="$OUTPUT_DIR/Maina-0.10.71-97.apk"
 cp "$APK" "$HELD_APK"
-node scripts/inspect-exact-artifact.mjs android release/m3-m4-0.10.70-candidate-plan.json "$HELD_APK" \
+node scripts/inspect-exact-artifact.mjs android release/m3-m4-0.10.71-candidate-plan.json "$HELD_APK" \
   > "$OUTPUT_DIR/android-inspection.json"
 node scripts/verify-generated-native-release-metadata.mjs android
 node scripts/verify-build-source-state.mjs android "$EXPECTED_FINAL"

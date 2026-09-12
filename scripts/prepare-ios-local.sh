@@ -18,7 +18,7 @@ if [[ "$($NODE_EXECUTABLE --version)" != "v24.19.0" ]]; then
 fi
 "$NODE_EXECUTABLE" "$PROJECT_DIR/scripts/verify-release-toolchain.mjs" \
   "$PROJECT_DIR" "$NODE_EXECUTABLE" "$NPM_CLI" "$EXPO_CLI" \
-  "$PROJECT_DIR/release/m3-m4-0.10.70-candidate-plan.json" >/dev/null
+  "$PROJECT_DIR/release/m3-m4-0.10.71-candidate-plan.json" >/dev/null
 xcodebuild -checkFirstLaunchStatus
 if [[ "$(ruby --version)" != ruby\ 3.3.9* ]]; then
   echo "Expected the isolated Maina Ruby 3.3.9; found $(ruby --version)." >&2
@@ -33,7 +33,7 @@ node scripts/verify-build-source-state.mjs ios "${MAINA_EXPECTED_FINAL_COMMIT:?S
 "$PROJECT_DIR/scripts/install-external-node-dependencies.sh"
 "$NODE_EXECUTABLE" "$PROJECT_DIR/scripts/verify-release-toolchain.mjs" \
   "$PROJECT_DIR" "$NODE_EXECUTABLE" "$NPM_CLI" "$EXPO_CLI" \
-  "$PROJECT_DIR/release/m3-m4-0.10.70-candidate-plan.json" >/dev/null
+  "$PROJECT_DIR/release/m3-m4-0.10.71-candidate-plan.json" >/dev/null
 export NODE_ENV=production
 "$NODE_EXECUTABLE" "$NPM_CLI" run ios:runtime
 "$NODE_EXECUTABLE" "$NPM_CLI" run verify:ios-native

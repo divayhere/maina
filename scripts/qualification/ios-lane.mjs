@@ -17,7 +17,7 @@ const projectDir = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const storageGuard = '/Users/divay/Developer/Maina/qualification/storage-architecture/jobs/storage-local-staging-format-20260904/require-maina-storage.sh';
 const storageGuardSha256 = 'e8efcaa346ca46ed746970f7739f1346f25442719961f1c8e3d884b3d54c538f';
 const expectedStorageRoot = '/Volumes/DivaySSD/MainaBuild';
-const activeReleasePlanRelativePath = 'release/m3-m4-0.10.70-candidate-plan.json';
+const activeReleasePlanRelativePath = 'release/m3-m4-0.10.71-candidate-plan.json';
 const expectedCapabilities = Object.freeze([
   'node',
   'storage_guard',
