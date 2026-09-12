@@ -293,7 +293,7 @@ function passedMutationTraceIndex(entries) {
     trace.length === entries.length && trace.every(([id, action, payloadShape], index) => {
       const entry = entries[index];
       return entry.id === id && entry.action === action
-        && (['arm_qualification', 'launch_record_qualification'].includes(action)
+        && (['arm_qualification', 'launch_record_qualification', 'pause_qualification'].includes(action)
           ? typeof entry.payloadDigest === 'string' && /^[0-9a-f]{64}$/u.test(entry.payloadDigest)
           : entry.payloadDigest === null)
         && JSON.stringify(entry.payloadShape) === JSON.stringify(payloadShape)
@@ -525,14 +525,14 @@ export function verifyAndroidLifecycleEvidence(root, {
       fail('MUTATION_JOURNAL_INVALID');
     }
     if (name !== `${String(entry.sequence).padStart(3, '0')}-${entry.id}-${entry.state}.json`
-      || !['arm_qualification', 'force_stop', 'launch_main', 'launch_record_qualification', 'press_back', 'press_home', 'sleep_device', 'tap', 'wake_up'].includes(entry.action)
+      || !['arm_qualification', 'force_stop', 'launch_main', 'launch_record_qualification', 'pause_qualification', 'press_back', 'press_home', 'sleep_device', 'tap', 'wake_up'].includes(entry.action)
       || JSON.stringify(entry.payloadShape) !== JSON.stringify(
-        entry.action === 'tap' ? ['x', 'y'] : ['arm_qualification', 'launch_record_qualification'].includes(entry.action) ? ['qualificationRunId'] : [],
+        entry.action === 'tap' ? ['x', 'y'] : ['arm_qualification', 'launch_record_qualification', 'pause_qualification'].includes(entry.action) ? ['qualificationRunId'] : [],
       )
-      || (['arm_qualification', 'launch_record_qualification'].includes(entry.action)
+      || (['arm_qualification', 'launch_record_qualification', 'pause_qualification'].includes(entry.action)
         ? typeof entry.payloadDigest !== 'string' || !/^[0-9a-f]{64}$/u.test(entry.payloadDigest)
         : entry.payloadDigest !== null)) fail('MUTATION_JOURNAL_INVALID');
-    if (['arm_qualification', 'launch_record_qualification'].includes(entry.action)) {
+    if (['arm_qualification', 'launch_record_qualification', 'pause_qualification'].includes(entry.action)) {
       const slot = entry.id.includes('-normal') ? 'normal' : entry.id.includes('-recovery') ? 'recovery' : null;
       if (slot === null || entry.payloadDigest !== deriveQualificationEvidenceDigest(
         deriveQualificationRecordingRunId(attempt.attemptNonce, slot),

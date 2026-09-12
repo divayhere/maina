@@ -86,6 +86,7 @@ class FakeAdb {
     this.qualificationArmed = null;
     this.qualificationEvidenceDigest = null;
     this.qualificationUsed = new Set();
+    this.shellControlUsed = new Set();
     this.calls = [];
   }
 
@@ -175,6 +176,16 @@ class FakeAdb {
       }
       this.qualificationUsed.add(runId);
       this.qualificationArmed = runId;
+      return result({ stdout: `Broadcasting: Intent { act=com.divay.maina.recorder.SHELL_COMMAND }\nBroadcast completed: result=17051, data="${runId}"\n` });
+    }
+    const pauseMatch = /^shell am broadcast --receiver-foreground -a com\.divay\.maina\.recorder\.SHELL_COMMAND -n com\.divay\.maina\/com\.divay\.maina\.recorder\.MainaShellCommandReceiver --es command pause --es expectedState recording --es nonce ([0-9a-f-]+)$/u.exec(tail.join(' '));
+    if (pauseMatch) {
+      const runId = pauseMatch[1];
+      if (this.shellControlUsed.has(runId) || this.capture !== 'recording') {
+        return result({ stdout: 'Broadcast completed: result=0\n' });
+      }
+      this.shellControlUsed.add(runId);
+      this.capture = 'paused';
       return result({ stdout: `Broadcasting: Intent { act=com.divay.maina.recorder.SHELL_COMMAND }\nBroadcast completed: result=17051, data="${runId}"\n` });
     }
     const launchMatch = /^shell am start -W -a android\.intent\.action\.VIEW -d maina:\/\/\/record\?qualificationRunId=([0-9a-f-]+) -n com\.divay\.maina\/\.MainActivity$/u.exec(tail.join(' '));
@@ -344,6 +355,7 @@ assert.equal(parseUiHierarchyCommandOutput(`${exactHierarchy}\nUI hierchary dump
 assertions += 1;
 rejects(() => parseUiHierarchyCommandOutput(`${privateSentinel}\n${exactHierarchy}`), 'UI_HIERARCHY_OUTPUT_INVALID');
 rejects(() => parseUiHierarchyCommandOutput(`${exactHierarchy}${exactHierarchy}`), 'UI_HIERARCHY_OUTPUT_INVALID');
+rejects(() => parseUiHierarchyCommandOutput('ERROR: could not get idle state.\n'), 'UI_HIERARCHY_IDLE_TIMEOUT');
 
 const captureDump = [
   'system wrapper line',
@@ -444,7 +456,18 @@ assert.deepEqual(armedIds, [
   deriveQualificationRecordingRunId(qualificationRunId, 'normal'),
   deriveQualificationRecordingRunId(qualificationRunId, 'recovery'),
 ]);
-assertions += 13;
+const normalQualificationRunId = deriveQualificationRecordingRunId(qualificationRunId, 'normal');
+const pauseQualificationCalls = fake.calls.filter((tail) => tail.includes('pause'));
+assert.equal(pauseQualificationCalls.length, 1);
+assert.deepEqual(pauseQualificationCalls[0], [
+  'shell', 'am', 'broadcast', '--receiver-foreground',
+  '-a', 'com.divay.maina.recorder.SHELL_COMMAND',
+  '-n', 'com.divay.maina/com.divay.maina.recorder.MainaShellCommandReceiver',
+  '--es', 'command', 'pause',
+  '--es', 'expectedState', 'recording',
+  '--es', 'nonce', normalQualificationRunId,
+]);
+assertions += 15;
 
 await assert.rejects(
   () => tools.performMutation({ action: 'arm_qualification', payload: { qualificationRunId: armedIds[0] } }),
@@ -471,7 +494,11 @@ await assert.rejects(
   () => malformedArmTools.performMutation({ action: 'arm_qualification', payload: { qualificationRunId } }),
   (error) => error instanceof AndroidLifecycleAdapterFailure && error.code === 'QUALIFICATION_ARM_OUTPUT_INVALID',
 );
-assertions += 1;
+await assert.rejects(
+  () => malformedArmTools.performMutation({ action: 'pause_qualification', payload: { qualificationRunId } }),
+  (error) => error instanceof AndroidLifecycleAdapterFailure && error.code === 'QUALIFICATION_ARM_OUTPUT_INVALID',
+);
+assertions += 2;
 
 const mutationCalls = [];
 const timeoutTools = createAndroidLifecycleAdbTools({

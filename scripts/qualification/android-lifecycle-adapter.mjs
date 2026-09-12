@@ -119,6 +119,8 @@ export function parseUiHierarchyCommandOutput(output) {
   if (typeof output !== 'string' || Buffer.byteLength(output, 'utf8') > MAX_HIERARCHY_OUTPUT_BYTES) {
     fail('UI_HIERARCHY_OUTPUT_INVALID');
   }
+  const normalized = output.replace(/\r\n/gu, '\n');
+  if (normalized === 'ERROR: could not get idle state.\n') fail('UI_HIERARCHY_IDLE_TIMEOUT');
   const start = output.indexOf('<?xml');
   const endToken = '</hierarchy>';
   const end = output.indexOf(endToken);
@@ -215,7 +217,7 @@ function mutationCommand(action, payload, packageName) {
     if (x > 10_000 || y > 10_000) fail('MUTATION_PAYLOAD_INVALID');
     return ['shell', 'input', 'tap', String(x), String(y)];
   }
-  if (action === 'arm_qualification' || action === 'launch_record_qualification') {
+  if (action === 'arm_qualification' || action === 'launch_record_qualification' || action === 'pause_qualification') {
     if (!exactKeys(payload, ['qualificationRunId'])
       || typeof payload.qualificationRunId !== 'string'
       || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(payload.qualificationRunId)) {
@@ -227,6 +229,14 @@ function mutationCommand(action, payload, packageName) {
       '-n', `${packageName}/com.divay.maina.recorder.MainaShellCommandReceiver`,
       '--es', 'command', 'arm_qualification',
       '--es', 'expectedState', 'idle',
+      '--es', 'nonce', payload.qualificationRunId.toLowerCase(),
+    ];
+    if (action === 'pause_qualification') return [
+      'shell', 'am', 'broadcast', '--receiver-foreground',
+      '-a', 'com.divay.maina.recorder.SHELL_COMMAND',
+      '-n', `${packageName}/com.divay.maina.recorder.MainaShellCommandReceiver`,
+      '--es', 'command', 'pause',
+      '--es', 'expectedState', 'recording',
       '--es', 'nonce', payload.qualificationRunId.toLowerCase(),
     ];
     return [
@@ -323,7 +333,7 @@ export function createAndroidLifecycleAdbTools({
     performMutation: async ({ action, payload }) => {
       const tail = mutationCommand(action, payload, packageName);
       const result = execute(tail, { timeoutMs: action === 'launch_main' ? 20_000 : DEFAULT_TIMEOUT_MS });
-      if (action === 'arm_qualification' && commandSucceeded(result)) {
+      if (['arm_qualification', 'pause_qualification'].includes(action) && commandSucceeded(result)) {
         const expected = `Broadcast completed: result=17051, data="${payload.qualificationRunId.toLowerCase()}"`;
         const matches = result.stdout.replace(/\r\n/gu, '\n').split('\n').filter((line) => line.trim() === expected);
         if (matches.length !== 1) fail('QUALIFICATION_ARM_OUTPUT_INVALID');

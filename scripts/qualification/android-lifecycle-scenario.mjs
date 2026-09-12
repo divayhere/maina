@@ -90,10 +90,9 @@ async function waitNotification(tools, expected, timeoutMs = 20_000) {
 
 async function waitRecordingSurface(tools, expected, timeoutMs = 15_000) {
   return poll(`RECORDING_${expected.toUpperCase()}_SURFACE_TIMEOUT`, tools, async () => {
-    const surface = await stage('RECORDING_SURFACE_INVALID', async () => (
-      observeRecordingSurface(await stage('UI_OBSERVATION_FAILED', () => tools.readUiNodes()))
-    ));
-    return surface?.state === expected ? surface : null;
+    const nodes = await stage('UI_OBSERVATION_FAILED', () => tools.readUiNodes());
+    const surface = await stage('RECORDING_SURFACE_INVALID', () => observeRecordingSurface(nodes));
+    return surface?.state === expected ? Object.freeze({ ...surface, nodes }) : null;
   }, timeoutMs);
 }
 
@@ -205,7 +204,7 @@ function newMutationLedger(tools, operational) {
       const code = fixedCode(id);
       if (byId.has(id)) fail('MUTATION_REPLAY_REJECTED');
       const payloadShape = Object.keys(payload).sort();
-      const payloadDigest = ['arm_qualification', 'launch_record_qualification'].includes(action)
+      const payloadDigest = ['arm_qualification', 'launch_record_qualification', 'pause_qualification'].includes(action)
         ? deriveQualificationEvidenceDigest(payload.qualificationRunId)
         : null;
       const entry = { id, action, payloadDigest, payloadShape, state: 'issued', attempts: 1 };
@@ -279,6 +278,14 @@ async function readProgress(tools, expectedQualificationEvidenceDigest) {
   ));
 }
 
+async function waitOwnedRecording(tools, expectedQualificationEvidenceDigest, timeoutMs = 20_000) {
+  await waitNotification(tools, 'recording', timeoutMs);
+  return poll('QUALIFICATION_OWNERSHIP_UNPROVEN', tools, async () => {
+    const progress = await readProgress(tools, expectedQualificationEvidenceDigest);
+    return progress.clean && progress.active && progress.nativeState === 'recording' ? progress : null;
+  }, timeoutMs);
+}
+
 function requireProgressAdvance(before, after, code) {
   const sameChunkAdvanced = after.chunkIndex === before.chunkIndex && after.bytesWritten > before.bytesWritten;
   const laterChunkAdvanced = after.chunkIndex > before.chunkIndex;
@@ -325,11 +332,18 @@ async function startRecording(tools, ledger, home, id, recordingSlot) {
   return ledger.issue(id, tools, 'launch_record_qualification', {
     qualificationRunId,
   }, async () => {
-    await waitNotification(tools, 'recording', 20_000);
-    const surface = await waitRecordingSurface(tools, 'recording', 15_000);
+    const progress = await waitOwnedRecording(tools, qualificationEvidenceDigest, 20_000);
+    return Object.freeze({ progress, qualificationRunId, qualificationEvidenceDigest });
+  });
+}
+
+async function pauseForStableUi(tools, ledger, id, qualificationRunId, qualificationEvidenceDigest) {
+  return ledger.issue(id, tools, 'pause_qualification', { qualificationRunId }, async () => {
+    await waitNotification(tools, 'paused', 15_000);
+    const surface = await waitRecordingSurface(tools, 'paused', 15_000);
     const progress = await readProgress(tools, qualificationEvidenceDigest);
-    if (!progress.active || progress.nativeState !== 'recording') fail('QUALIFICATION_OWNERSHIP_UNPROVEN');
-    return surface;
+    if (!progress.clean || progress.active || progress.nativeState !== 'paused') fail('QUALIFICATION_PAUSE_UNPROVEN');
+    return Object.freeze({ surface, progress });
   });
 }
 
@@ -395,40 +409,44 @@ export async function executeAndroidLifecycleScenario(config, tools) {
 
     const normalQualificationRunId = deriveQualificationRecordingRunId(tools.qualificationRunId, 'normal');
     const normalQualificationEvidenceDigest = deriveQualificationEvidenceDigest(normalQualificationRunId);
-    let recording = await startRecording(tools, ledger, initialHome, 'launch-start-normal', 'normal');
+    const normalStart = await startRecording(tools, ledger, initialHome, 'launch-start-normal', 'normal');
     captureMayBeActive = true;
-    measurements.firstTimerSeconds = recording.timerSeconds;
+    const initialPaused = await pauseForStableUi(
+      tools,
+      ledger,
+      'pause-normal-for-initial-ui',
+      normalStart.qualificationRunId,
+      normalStart.qualificationEvidenceDigest,
+    );
+    measurements.firstTimerSeconds = initialPaused.surface.timerSeconds;
+    const stopCoordinate = await stage('STOP_ACTION_UNAVAILABLE', () => requireUniqueAction(
+      initialPaused.surface.nodes,
+      { label: 'Stop and save', testId: 'recording-stop-save' },
+    ));
+    const pauseResumeCoordinate = await stage('RESUME_ACTION_UNAVAILABLE', () => requireUniqueAction(
+      initialPaused.surface.nodes,
+      { label: 'Resume', testId: 'recording-pause-resume' },
+    ));
+    const resumeVisibleAt = tools.now();
+    const resumedProgress = await ledger.issue('tap-resume-first', tools, 'tap', pauseResumeCoordinate, async () => (
+      waitOwnedRecording(tools, normalStart.qualificationEvidenceDigest, 20_000)
+    ));
+    measurements.firstResumeAcceptedMs = tools.now() - resumeVisibleAt;
+    if (measurements.firstResumeAcceptedMs > MAX_FIRST_RESUME_ACCEPTED_MS) fail('FIRST_RESUME_ACCEPTANCE_TOO_SLOW');
     await tools.sleep(3_000);
-    recording = await waitRecordingSurface(tools, 'recording');
-    measurements.secondTimerSeconds = recording.timerSeconds;
+    const advancedProgress = await readProgress(tools, normalStart.qualificationEvidenceDigest);
+    requireProgressAdvance(resumedProgress, advancedProgress, 'RECORDING_NATIVE_PROGRESS_STALLED');
+    const paused = await ledger.issue('tap-pause-hold', tools, 'tap', pauseResumeCoordinate, async () => {
+      await waitNotification(tools, 'paused', 15_000);
+      return waitRecordingSurface(tools, 'paused', 15_000);
+    });
+    measurements.secondTimerSeconds = paused.timerSeconds;
     measurements.timerAdvanceSeconds = await stage('RECORDING_TIMER_STALLED', () => requireTimerAdvance(
       measurements.firstTimerSeconds, measurements.secondTimerSeconds, 2,
     ));
     pass('recording_start_and_timer_advanced');
-
-    let nodes = await stage('UI_OBSERVATION_FAILED', () => tools.readUiNodes());
-    const pauseFirst = await stage('PAUSE_ACTION_UNAVAILABLE', () => requireUniqueAction(nodes, { label: 'Pause', testId: 'recording-pause-resume' }));
-    await ledger.issue('tap-pause-first', tools, 'tap', pauseFirst, async () => {
-      await waitNotification(tools, 'paused', 15_000);
-      return waitRecordingSurface(tools, 'paused', 15_000);
-    });
-    const resumeVisibleAt = tools.now();
-    nodes = await stage('UI_OBSERVATION_FAILED', () => tools.readUiNodes());
-    const resumeFirst = await stage('RESUME_ACTION_UNAVAILABLE', () => requireUniqueAction(nodes, { label: 'Resume', testId: 'recording-pause-resume' }));
-    await ledger.issue('tap-resume-first', tools, 'tap', resumeFirst, async () => {
-      await waitNotification(tools, 'recording', 20_000);
-      return waitRecordingSurface(tools, 'recording', 15_000);
-    });
-    measurements.firstResumeAcceptedMs = tools.now() - resumeVisibleAt;
-    if (measurements.firstResumeAcceptedMs > MAX_FIRST_RESUME_ACCEPTED_MS) fail('FIRST_RESUME_ACCEPTANCE_TOO_SLOW');
     pass('first_visible_resume_tap');
 
-    nodes = await stage('UI_OBSERVATION_FAILED', () => tools.readUiNodes());
-    const pauseHold = await stage('PAUSE_ACTION_UNAVAILABLE', () => requireUniqueAction(nodes, { label: 'Pause', testId: 'recording-pause-resume' }));
-    const paused = await ledger.issue('tap-pause-hold', tools, 'tap', pauseHold, async () => {
-      await waitNotification(tools, 'paused', 15_000);
-      return waitRecordingSurface(tools, 'paused', 15_000);
-    });
     measurements.pausedTimerSeconds = paused.timerSeconds;
     const pausedProgressBefore = await readProgress(tools, normalQualificationEvidenceDigest);
     await tools.sleep(4_000);
@@ -438,15 +456,16 @@ export async function executeAndroidLifecycleScenario(config, tools) {
     const pausedProgressAfter = await readProgress(tools, normalQualificationEvidenceDigest);
     requireProgressHeld(pausedProgressBefore, pausedProgressAfter, 'PAUSED_NATIVE_PROGRESS_ADVANCED');
     measurements.pausedNativeProgressHeld = true;
-    nodes = await stage('UI_OBSERVATION_FAILED', () => tools.readUiNodes());
-    const resumeHold = await stage('RESUME_ACTION_UNAVAILABLE', () => requireUniqueAction(nodes, { label: 'Resume', testId: 'recording-pause-resume' }));
+    const resumeHold = await stage('RESUME_ACTION_UNAVAILABLE', () => requireUniqueAction(
+      pausedAfterHold.nodes,
+      { label: 'Resume', testId: 'recording-pause-resume' },
+    ));
     await ledger.issue('tap-resume-hold', tools, 'tap', resumeHold, async () => {
-      await waitNotification(tools, 'recording', 20_000);
-      return waitRecordingSurface(tools, 'recording', 15_000);
+      return waitOwnedRecording(tools, normalQualificationEvidenceDigest, 20_000);
     });
     pass('paused_state_holds_and_manual_resume');
 
-    const backgroundTimerBefore = (await waitRecordingSurface(tools, 'recording')).timerSeconds;
+    const backgroundTimerBefore = pausedAfterHold.timerSeconds;
     const backgroundProgressBefore = await readProgress(tools, normalQualificationEvidenceDigest);
     await ledger.issue('press-home-during-recording', tools, 'press_home', {}, async () => (
       await stage('FOREGROUND_OBSERVATION_FAILED', () => tools.foregroundState()) === 'background' ? true : fail('BACKGROUND_STATE_UNPROVEN')
@@ -456,12 +475,30 @@ export async function executeAndroidLifecycleScenario(config, tools) {
     const backgroundProgressAfter = await readProgress(tools, normalQualificationEvidenceDigest);
     requireProgressAdvance(backgroundProgressBefore, backgroundProgressAfter, 'BACKGROUND_NATIVE_PROGRESS_STALLED');
     measurements.backgroundNativeProgressAdvanced = true;
-    const backgroundRecording = await ledger.issue('launch-after-background', tools, 'launch_main', {}, async () => waitRecordingSurface(tools, 'recording', 15_000));
-    measurements.backgroundTimerAdvanceSeconds = await stage('BACKGROUND_TIMER_STALLED', () => requireTimerAdvance(backgroundTimerBefore, backgroundRecording.timerSeconds, 6));
+    await ledger.issue('launch-after-background', tools, 'launch_main', {}, async () => {
+      if (await stage('FOREGROUND_OBSERVATION_FAILED', () => tools.foregroundState()) !== 'foreground') fail('FOREGROUND_STATE_UNPROVEN');
+      return waitOwnedRecording(tools, normalQualificationEvidenceDigest, 20_000);
+    });
+    const backgroundPaused = await ledger.issue('tap-pause-after-background', tools, 'tap', pauseResumeCoordinate, async () => {
+      await waitNotification(tools, 'paused', 15_000);
+      return waitRecordingSurface(tools, 'paused', 15_000);
+    });
+    measurements.backgroundTimerAdvanceSeconds = await stage('BACKGROUND_TIMER_STALLED', () => requireTimerAdvance(
+      backgroundTimerBefore,
+      backgroundPaused.timerSeconds,
+      6,
+    ));
+    const backgroundResume = await stage('RESUME_ACTION_UNAVAILABLE', () => requireUniqueAction(
+      backgroundPaused.nodes,
+      { label: 'Resume', testId: 'recording-pause-resume' },
+    ));
+    await ledger.issue('tap-resume-after-background', tools, 'tap', backgroundResume, async () => (
+      waitOwnedRecording(tools, normalQualificationEvidenceDigest, 20_000)
+    ));
     pass('background_foreground_recording');
 
     if (await stage('POWER_OBSERVATION_FAILED', () => tools.powerState()) !== 'on') fail('POWER_PRECONDITION_INVALID');
-    const screenOffTimerBefore = (await waitRecordingSurface(tools, 'recording')).timerSeconds;
+    const screenOffTimerBefore = backgroundPaused.timerSeconds;
     const screenOffProgressBefore = await readProgress(tools, normalQualificationEvidenceDigest);
     await ledger.issue('sleep-screen-during-recording', tools, 'sleep_device', {}, async () => poll('POWER_OFF_UNPROVEN', tools, async () => (
       await stage('POWER_OBSERVATION_FAILED', () => tools.powerState()) === 'off'
@@ -478,13 +515,29 @@ export async function executeAndroidLifecycleScenario(config, tools) {
     ), 8_000));
     measurements.powerOnObserved = true;
     powerMayBeOff = false;
-    const screenOnRecording = await ledger.issue('launch-after-screen-wake', tools, 'launch_main', {}, async () => waitRecordingSurface(tools, 'recording', 15_000));
-    measurements.screenOffTimerAdvanceSeconds = await stage('SCREEN_OFF_TIMER_STALLED', () => requireTimerAdvance(screenOffTimerBefore, screenOnRecording.timerSeconds, 6));
+    await ledger.issue('launch-after-screen-wake', tools, 'launch_main', {}, async () => {
+      if (await stage('FOREGROUND_OBSERVATION_FAILED', () => tools.foregroundState()) !== 'foreground') fail('FOREGROUND_STATE_UNPROVEN');
+      return waitOwnedRecording(tools, normalQualificationEvidenceDigest, 20_000);
+    });
+    const screenOnPaused = await ledger.issue('tap-pause-after-screen-wake', tools, 'tap', pauseResumeCoordinate, async () => {
+      await waitNotification(tools, 'paused', 15_000);
+      return waitRecordingSurface(tools, 'paused', 15_000);
+    });
+    measurements.screenOffTimerAdvanceSeconds = await stage('SCREEN_OFF_TIMER_STALLED', () => requireTimerAdvance(
+      screenOffTimerBefore,
+      screenOnPaused.timerSeconds,
+      6,
+    ));
+    const screenOnResume = await stage('RESUME_ACTION_UNAVAILABLE', () => requireUniqueAction(
+      screenOnPaused.nodes,
+      { label: 'Resume', testId: 'recording-pause-resume' },
+    ));
+    await ledger.issue('tap-resume-after-screen-wake', tools, 'tap', screenOnResume, async () => (
+      waitOwnedRecording(tools, normalQualificationEvidenceDigest, 20_000)
+    ));
     pass('screen_off_on_recording');
 
-    nodes = await stage('UI_OBSERVATION_FAILED', () => tools.readUiNodes());
-    const stop = await stage('STOP_ACTION_UNAVAILABLE', () => requireUniqueAction(nodes, { label: 'Stop and save', testId: 'recording-stop-save' }));
-    const savedDetail = await ledger.issue('tap-stop-normal', tools, 'tap', stop, async () => {
+    const savedDetail = await ledger.issue('tap-stop-normal', tools, 'tap', stopCoordinate, async () => {
       await waitNotification(tools, 'ready', 90_000);
       const detail = await waitSavedDetail(tools, 30_000);
       const stoppedProgress = await readProgress(tools, null);
@@ -517,12 +570,11 @@ export async function executeAndroidLifecycleScenario(config, tools) {
     pass('idle_process_restart_preserves_count');
 
     measurements.beforeRecoveryCount = measurements.afterIdleRestartCount;
-    recording = await startRecording(tools, ledger, restartedHome, 'launch-start-recovery', 'recovery');
+    const recoveryStart = await startRecording(tools, ledger, restartedHome, 'launch-start-recovery', 'recovery');
     captureMayBeActive = true;
-    const recoveryTimerBefore = recording.timerSeconds;
     await tools.sleep(3_000);
-    const recoveryTimerAfter = (await waitRecordingSurface(tools, 'recording')).timerSeconds;
-    await stage('RECOVERY_TIMER_STALLED', () => requireTimerAdvance(recoveryTimerBefore, recoveryTimerAfter, 2));
+    const recoveryProgressAfter = await readProgress(tools, recoveryStart.qualificationEvidenceDigest);
+    requireProgressAdvance(recoveryStart.progress, recoveryProgressAfter, 'RECOVERY_NATIVE_PROGRESS_STALLED');
     await ledger.issue('force-stop-active-recovery', tools, 'force_stop', {}, async () => (
       await stage('PROCESS_OBSERVATION_FAILED', () => tools.processState()) === 'absent' ? true : fail('RECOVERY_FORCE_STOP_UNPROVEN')
     ));
@@ -592,7 +644,7 @@ export const androidLifecycleScenarioPolicy = Object.freeze({
   physicalIncomingCallTestPerformed: false,
   rawScreenshotsAllowed: false,
   rawHierarchyPersistenceAllowed: false,
-  allowedMutations: Object.freeze(['arm_qualification', 'force_stop', 'launch_main', 'launch_record_qualification', 'press_back', 'press_home', 'sleep_device', 'tap', 'wake_up']),
+  allowedMutations: Object.freeze(['arm_qualification', 'force_stop', 'launch_main', 'launch_record_qualification', 'pause_qualification', 'press_back', 'press_home', 'sleep_device', 'tap', 'wake_up']),
   expectedTestIds: Object.freeze([
     'exact_installed_identity',
     'exact_installed_artifact',
@@ -612,15 +664,19 @@ export const androidLifecycleScenarioPolicy = Object.freeze({
       ['launch-initial-home', 'launch_main', []],
       ['launch-start-normal-arm', 'arm_qualification', ['qualificationRunId']],
       ['launch-start-normal', 'launch_record_qualification', ['qualificationRunId']],
-      ['tap-pause-first', 'tap', ['x', 'y']],
+      ['pause-normal-for-initial-ui', 'pause_qualification', ['qualificationRunId']],
       ['tap-resume-first', 'tap', ['x', 'y']],
       ['tap-pause-hold', 'tap', ['x', 'y']],
       ['tap-resume-hold', 'tap', ['x', 'y']],
       ['press-home-during-recording', 'press_home', []],
       ['launch-after-background', 'launch_main', []],
+      ['tap-pause-after-background', 'tap', ['x', 'y']],
+      ['tap-resume-after-background', 'tap', ['x', 'y']],
       ['sleep-screen-during-recording', 'sleep_device', []],
       ['wake-screen-after-recording', 'wake_up', []],
       ['launch-after-screen-wake', 'launch_main', []],
+      ['tap-pause-after-screen-wake', 'tap', ['x', 'y']],
+      ['tap-resume-after-screen-wake', 'tap', ['x', 'y']],
       ['tap-stop-normal', 'tap', ['x', 'y']],
       ['back-from-saved-detail', 'press_back', []],
       ['force-stop-idle', 'force_stop', []],
@@ -635,15 +691,19 @@ export const androidLifecycleScenarioPolicy = Object.freeze({
       ['launch-initial-home', 'launch_main', []],
       ['launch-start-normal-arm', 'arm_qualification', ['qualificationRunId']],
       ['launch-start-normal', 'launch_record_qualification', ['qualificationRunId']],
-      ['tap-pause-first', 'tap', ['x', 'y']],
+      ['pause-normal-for-initial-ui', 'pause_qualification', ['qualificationRunId']],
       ['tap-resume-first', 'tap', ['x', 'y']],
       ['tap-pause-hold', 'tap', ['x', 'y']],
       ['tap-resume-hold', 'tap', ['x', 'y']],
       ['press-home-during-recording', 'press_home', []],
       ['launch-after-background', 'launch_main', []],
+      ['tap-pause-after-background', 'tap', ['x', 'y']],
+      ['tap-resume-after-background', 'tap', ['x', 'y']],
       ['sleep-screen-during-recording', 'sleep_device', []],
       ['wake-screen-after-recording', 'wake_up', []],
       ['launch-after-screen-wake', 'launch_main', []],
+      ['tap-pause-after-screen-wake', 'tap', ['x', 'y']],
+      ['tap-resume-after-screen-wake', 'tap', ['x', 'y']],
       ['tap-stop-normal', 'tap', ['x', 'y']],
       ['back-from-saved-detail', 'press_back', []],
       ['force-stop-idle', 'force_stop', []],

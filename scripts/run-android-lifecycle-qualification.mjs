@@ -379,12 +379,12 @@ export function createDurableMutationJournal(attemptRoot) {
   return async (entry) => {
     if (!exactKeys(entry, ['action', 'attempts', 'id', 'payloadDigest', 'payloadShape', 'state'])
       || typeof entry.id !== 'string' || !/^[a-z][a-z0-9-]{2,95}$/u.test(entry.id)
-      || !['arm_qualification', 'force_stop', 'launch_main', 'launch_record_qualification', 'press_back', 'press_home', 'sleep_device', 'tap', 'wake_up'].includes(entry.action)
+      || !['arm_qualification', 'force_stop', 'launch_main', 'launch_record_qualification', 'pause_qualification', 'press_back', 'press_home', 'sleep_device', 'tap', 'wake_up'].includes(entry.action)
       || !Array.isArray(entry.payloadShape)
       || JSON.stringify(entry.payloadShape) !== JSON.stringify(
-        entry.action === 'tap' ? ['x', 'y'] : ['arm_qualification', 'launch_record_qualification'].includes(entry.action) ? ['qualificationRunId'] : [],
+        entry.action === 'tap' ? ['x', 'y'] : ['arm_qualification', 'launch_record_qualification', 'pause_qualification'].includes(entry.action) ? ['qualificationRunId'] : [],
       )
-      || (['arm_qualification', 'launch_record_qualification'].includes(entry.action)
+      || (['arm_qualification', 'launch_record_qualification', 'pause_qualification'].includes(entry.action)
         ? typeof entry.payloadDigest !== 'string' || !/^[0-9a-f]{64}$/u.test(entry.payloadDigest)
         : entry.payloadDigest !== null)
       || entry.attempts !== 1

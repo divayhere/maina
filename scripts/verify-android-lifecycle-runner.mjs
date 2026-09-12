@@ -117,7 +117,7 @@ const passedMeasurements = Object.freeze({
 });
 
 function syntheticPayloadDigest(id, action) {
-  if (!['arm_qualification', 'launch_record_qualification'].includes(action)) return null;
+  if (!['arm_qualification', 'launch_record_qualification', 'pause_qualification'].includes(action)) return null;
   return id.includes('-normal') ? 'a'.repeat(64) : 'b'.repeat(64);
 }
 

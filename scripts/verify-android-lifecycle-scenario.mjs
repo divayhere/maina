@@ -84,6 +84,7 @@ class FakeDevice {
     this.transcriptSelected = false;
     this.forceNativeActive = false;
     this.duplicateResume = false;
+    this.rejectUiReadsWhileRecording = false;
     this.omitDurability = false;
     this.countDriftByMutationId = {};
     this.faultHits = new Map();
@@ -160,7 +161,7 @@ class FakeDevice {
     this.mutationCalls.set(id, (this.mutationCalls.get(id) ?? 0) + 1);
     assert.deepEqual(
       Object.keys(payload).sort(),
-      mutation === 'tap' ? ['x', 'y'] : ['arm_qualification', 'launch_record_qualification'].includes(mutation) ? ['qualificationRunId'] : [],
+      mutation === 'tap' ? ['x', 'y'] : ['arm_qualification', 'launch_record_qualification', 'pause_qualification'].includes(mutation) ? ['qualificationRunId'] : [],
     );
     if (id === this.notSpawnedMutationId) return { spawned: false, exitCode: null, signal: null, timedOut: false };
     if (id === this.invalidReceiptMutationId) return { ...successReceipt(), unexpected: true };
@@ -193,6 +194,11 @@ class FakeDevice {
       this.pendingCard = { key: `synthetic-meeting-${this.nextCard}`, recovery: false };
       this.pendingCard.metadata = `Sep 11 · 8:${String(10 + this.nextCard).padStart(2, '0')} AM · 0:20`;
       this.nextCard += 1;
+      return;
+    }
+    if (mutation === 'pause_qualification') {
+      assert.equal(this.capture, 'recording');
+      this.capture = 'paused';
       return;
     }
     if (mutation === 'launch_main') {
@@ -295,6 +301,9 @@ class FakeDevice {
 
   readUiNodes = async () => {
     if (this.screen === 'background' || this.screen === 'stopped') throw new Error('NO_FOREGROUND_UI');
+    if (this.screen === 'record' && this.capture === 'recording' && this.rejectUiReadsWhileRecording) {
+      throw new Error('SYNTHETIC_UI_IDLE_TIMEOUT');
+    }
     if (this.screen === 'home') {
       if (this.homeLoadDelayReads > 0) {
         this.homeLoadDelayReads -= 1;
@@ -414,6 +423,7 @@ async function expectFailure(overrides, reasonCode, verify = () => {}) {
 }
 
 await expectPass();
+await expectPass(new FakeDevice({ rejectUiReadsWhileRecording: true }));
 await expectPass(new FakeDevice({ omitHomeLoadMarker: true }));
 await expectPass(new FakeDevice({ homeLoadDelayReads: 3 }));
 await expectPass(new FakeDevice({ rollChunkOnProgress: true }));
@@ -523,7 +533,7 @@ assert.equal(androidLifecycleScenarioPolicy.physicalIncomingCallTestPerformed, f
 assert.equal(androidLifecycleScenarioPolicy.rawScreenshotsAllowed, false);
 assert.equal(androidLifecycleScenarioPolicy.rawHierarchyPersistenceAllowed, false);
 assert.deepEqual(androidLifecycleScenarioPolicy.allowedMutations, [
-  'arm_qualification', 'force_stop', 'launch_main', 'launch_record_qualification', 'press_back', 'press_home', 'sleep_device', 'tap', 'wake_up',
+  'arm_qualification', 'force_stop', 'launch_main', 'launch_record_qualification', 'pause_qualification', 'press_back', 'press_home', 'sleep_device', 'tap', 'wake_up',
 ]);
 
 const creators = readdirSync(join(repoRoot, 'src/app'), { recursive: true })
