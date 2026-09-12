@@ -28,6 +28,12 @@ export interface NativeTerminalRecoveryWaitOptions {
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
+function isExactPreDeliveryStatus(status: NativeCaptureStatus): boolean {
+  return ['recording', 'paused'].includes(status.state)
+    && (status.terminalPublicationState === 'none' || status.terminalPublicationState == null)
+    && (status.terminalReasonCode === 'no_terminal_operation' || status.terminalReasonCode == null);
+}
+
 export function nativeSavePresentationSurface(input: {
   busy: boolean;
   error: string | null;
@@ -114,10 +120,16 @@ export function classifyNativeSaveStatus(input: {
     return 'restart_required';
   }
   if (status.state === 'idle') {
-    return status.terminalPublicationState === 'succeeded'
+    if (status.terminalPublicationState === 'succeeded'
       && status.terminalReasonCode === 'stop_succeeded'
-      ? 'complete'
-      : 'restart_required';
+    ) return 'complete';
+    // NativeAudioCapture publishes its stopped/idle snapshot from the capture
+    // executor before the service reducer can durably publish stop_succeeded on
+    // the main looper. This one exact tuple is transitional, not recovery.
+    if (status.terminalPublicationState === 'running'
+      && status.terminalReasonCode === 'stop_running'
+    ) return 'pending';
+    return 'restart_required';
   }
   if (status.state === 'finalizing' && (
     (status.terminalPublicationState === 'queued' && status.terminalReasonCode === 'stop_queued')
@@ -143,6 +155,44 @@ export function classifyNativeSaveStatus(input: {
     return 'submission_retryable_once';
   }
   return 'restart_required';
+}
+
+/**
+ * Waits for the meeting-bound terminal receipt, not merely the native recorder's
+ * earlier idle snapshot. Before command delivery Android can still report the
+ * previous recording/paused state; after delivery only exact pending tuples may
+ * remain in the loop. Identity or tuple drift returns immediately and therefore
+ * still fails closed in classifyNativeSaveStatus.
+ */
+export async function waitForNativeSaveResolution(
+  getStatus: () => NativeCaptureStatus | null | Promise<NativeCaptureStatus | null>,
+  input: { expectedMeetingId: string; platform: 'android' },
+  options: NativeTerminalRecoveryWaitOptions = {},
+): Promise<NativeCaptureStatus | null> {
+  if (!input.expectedMeetingId) return null;
+  const timeoutMs = options.timeoutMs ?? 20_000;
+  const pollMs = options.pollMs ?? 100;
+  const now = options.now ?? Date.now;
+  const delay = options.delay ?? sleep;
+  const deadline = now() + timeoutMs;
+  let lastStatus: NativeCaptureStatus | null = null;
+
+  while (now() <= deadline) {
+    lastStatus = await getStatus();
+    if (!lastStatus || lastStatus.meetingId !== input.expectedMeetingId) return lastStatus;
+    const classification = classifyNativeSaveStatus({
+      status: lastStatus,
+      expectedMeetingId: input.expectedMeetingId,
+      platform: 'android',
+      retryAvailable: true,
+      submissionRetryAvailable: true,
+    });
+    if (classification === 'complete' || classification === 'retryable_once') return lastStatus;
+    if (classification !== 'pending' && !isExactPreDeliveryStatus(lastStatus)) return lastStatus;
+    await delay(pollMs);
+  }
+
+  return getStatus();
 }
 
 export function recoveryModeForClassification(
@@ -184,8 +234,14 @@ export async function waitForNativeTerminalRecovery(
     if (Number.isSafeInteger(operationId) && Number(operationId) > input.priorOperationId) {
       observedNewOperation = true;
     }
-    if (observedNewOperation && (lastStatus.state === 'idle' || lastStatus.state === 'error')) {
-      return lastStatus;
+    if (observedNewOperation) {
+      const classification = classifyNativeSaveStatus({
+        status: lastStatus,
+        expectedMeetingId: input.expectedMeetingId,
+        platform: 'android',
+        retryAvailable: false,
+      });
+      if (classification === 'complete' || classification === 'restart_required') return lastStatus;
     }
     await delay(pollMs);
   }

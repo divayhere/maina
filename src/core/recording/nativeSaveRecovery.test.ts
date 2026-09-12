@@ -7,6 +7,7 @@ import {
   nativeSavePresentationSurface,
   nativeTerminalIntentAdmission,
   recoveryModeForClassification,
+  waitForNativeSaveResolution,
   waitForNativeTerminalRecovery,
 } from './nativeSaveRecovery';
 
@@ -110,6 +111,13 @@ describe('native save recovery entry', () => {
         state: 'finalizing', meetingId: 'meeting-1', terminalPublicationState: 'running', terminalReasonCode: 'stop_running',
       },
     })).toBe('pending');
+    expect(classifyNativeSaveStatus({
+      ...base,
+      retryAvailable: true,
+      status: {
+        state: 'idle', meetingId: 'meeting-1', terminalPublicationState: 'running', terminalReasonCode: 'stop_running',
+      },
+    })).toBe('pending');
     const failed = {
       state: 'error' as const,
       meetingId: 'meeting-1',
@@ -134,6 +142,65 @@ describe('native save recovery entry', () => {
         state: 'recording', meetingId: 'meeting-1', terminalPublicationState: 'none', terminalReasonCode: 'no_terminal_operation',
       },
     })).toBe('restart_required');
+  });
+
+  it('waits through native idle until the durable Android terminal receipt is published', async () => {
+    const statuses = [
+      {
+        state: 'recording' as const, meetingId: 'meeting-1',
+        terminalPublicationState: 'none' as const, terminalReasonCode: 'no_terminal_operation' as const,
+      },
+      {
+        state: 'finalizing' as const, meetingId: 'meeting-1', terminalOperationId: 7,
+        terminalPublicationState: 'running' as const, terminalReasonCode: 'stop_running' as const,
+      },
+      {
+        state: 'idle' as const, meetingId: 'meeting-1', terminalOperationId: 7,
+        terminalPublicationState: 'running' as const, terminalReasonCode: 'stop_running' as const,
+      },
+      {
+        state: 'idle' as const, meetingId: 'meeting-1', terminalOperationId: 7,
+        terminalPublicationState: 'succeeded' as const, terminalReasonCode: 'stop_succeeded' as const,
+      },
+    ];
+    let elapsed = 0;
+    const result = await waitForNativeSaveResolution(
+      () => statuses.shift() ?? null,
+      { expectedMeetingId: 'meeting-1', platform: 'android' },
+      { now: () => elapsed, delay: async (ms) => { elapsed += ms; } },
+    );
+    expect(result).toMatchObject({
+      state: 'idle',
+      terminalPublicationState: 'succeeded',
+      terminalReasonCode: 'stop_succeeded',
+    });
+    expect(statuses).toHaveLength(0);
+  });
+
+  it('keeps an unresolved idle/running receipt bounded and rejects tuple or identity drift', async () => {
+    let elapsed = 0;
+    const pending = {
+      state: 'idle' as const, meetingId: 'meeting-1', terminalOperationId: 7,
+      terminalPublicationState: 'running' as const, terminalReasonCode: 'stop_running' as const,
+    };
+    const result = await waitForNativeSaveResolution(
+      () => pending,
+      { expectedMeetingId: 'meeting-1', platform: 'android' },
+      { timeoutMs: 200, pollMs: 100, now: () => elapsed, delay: async (ms) => { elapsed += ms; } },
+    );
+    expect(result).toEqual(pending);
+    expect(elapsed).toBe(300);
+
+    expect(await waitForNativeSaveResolution(
+      () => ({ ...pending, meetingId: 'meeting-2' }),
+      { expectedMeetingId: 'meeting-1', platform: 'android' },
+      { now: () => 0, delay: async () => {} },
+    )).toMatchObject({ meetingId: 'meeting-2' });
+    expect(await waitForNativeSaveResolution(
+      () => ({ ...pending, terminalPublicationState: 'queued', terminalReasonCode: 'stop_running' }),
+      { expectedMeetingId: 'meeting-1', platform: 'android' },
+      { now: () => 0, delay: async () => {} },
+    )).toMatchObject({ terminalPublicationState: 'queued' });
   });
 
   it('rejects contradictory terminal publication and reason pairs', () => {
@@ -209,6 +276,11 @@ describe('native save recovery entry', () => {
       ...Array.from({ length: 12 }, () => staleRecovery),
       {
         state: 'finalizing' as const, meetingId: 'meeting-1', terminalOperationId: 9,
+        terminalPublicationState: 'running' as const,
+        terminalReasonCode: 'stop_running' as const,
+      },
+      {
+        state: 'idle' as const, meetingId: 'meeting-1', terminalOperationId: 9,
         terminalPublicationState: 'running' as const,
         terminalReasonCode: 'stop_running' as const,
       },
